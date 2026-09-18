@@ -1,4 +1,5 @@
 import 'package:aimindtree_app/canvas/render/edge_router.dart';
+import 'package:aimindtree_app/canvas/render/knowledge_node_card.dart';
 import 'package:aimindtree_app/canvas/render/tree_canvas.dart';
 import 'package:aimindtree_app/data/models/knowledge_point.dart';
 import 'package:flutter/material.dart';
@@ -57,6 +58,9 @@ Widget _host({
   required Map<String, Offset> pos,
   void Function(String, double, double)? onMoveNode,
   void Function(String)? onDeleteEdge,
+  String? selectedKpId,
+  void Function(KnowledgePoint)? onKpTap,
+  void Function(String, String)? onCreateEdge,
 }) =>
     MaterialApp(
       home: Scaffold(
@@ -66,12 +70,22 @@ Widget _host({
             edges: _edges,
             currentMastery: (_) => MasteryStatus.unknown,
             savedPositions: _positions(pos),
+            selectedKpId: selectedKpId,
             onMoveNode: onMoveNode,
             onDeleteEdge: onDeleteEdge,
+            onKpTap: onKpTap,
+            onCreateEdge: onCreateEdge,
           ),
         ),
       ),
     );
+
+/// A(0,0) / B(0,200) / C(0,400)，仅用于节点交互测试（不需要边）。
+const Map<String, Offset> kNodePos = <String, Offset>{
+  'A': Offset.zero,
+  'B': Offset(0, 200),
+  'C': Offset(0, 400),
+};
 
 void main() {
   testWidgets('三条边各有一个删除按钮，且落在**路由后**折线的中点上',
@@ -201,5 +215,56 @@ void main() {
     await tester.tap(find.byIcon(Icons.close).at(2));
     await tester.pumpAndSettle();
     expect(deleted, <String>['e-ac']);
+  });
+
+  testWidgets('selectedKpId 对应的 KnowledgeNodeCard 高亮(isSelected=true)', (tester) async {
+    await tester.pumpWidget(_host(pos: kNodePos, selectedKpId: 'B'));
+    await tester.pumpAndSettle();
+    final cards =
+        tester.widgetList<KnowledgeNodeCard>(find.byType(KnowledgeNodeCard));
+    expect(cards.length, 3, reason: '应渲染 A/B/C 三张卡片');
+    for (final c in cards) {
+      expect(c.isSelected, c.kp.id == 'B',
+          reason: '只有被画布点选的 B 应高亮蓝色边框');
+    }
+  });
+
+  testWidgets('点击节点卡片主体触发 onKpTap 并回传正确知识点', (tester) async {
+    KnowledgePoint? tapped;
+    await tester.pumpWidget(_host(pos: kNodePos, onKpTap: (p) => tapped = p));
+    await tester.pumpAndSettle();
+    // 卡片标题文本在 InkWell 内，点它即命中卡片主体的 onTap。
+    await tester.tap(find.text('B'));
+    await tester.pumpAndSettle();
+    expect(tapped, isNotNull, reason: '点击卡片主体应触发 onKpTap');
+    expect(tapped!.id, 'B');
+  });
+
+  testWidgets('连线模式：点 A 连接钮 → 点 B 连接钮 → onCreateEdge(A,B)',
+      (tester) async {
+    final created = <(String, String)>[];
+    await tester.pumpWidget(_host(pos: kNodePos, onCreateEdge: (f, t) => created.add((f, t))));
+    await tester.pumpAndSettle();
+
+    final aCard = find.byWidgetPredicate(
+      (w) => w is KnowledgeNodeCard && w.kp.id == 'A',
+    );
+    await tester.tap(find.descendant(of: aCard, matching: find.byIcon(Icons.link)));
+    await tester.pumpAndSettle();
+
+    // 进入连线态：起点 A 的按钮变成 link_off，并出现提示条。
+    expect(find.byIcon(Icons.link_off), findsOneWidget,
+        reason: '起点应显示为「取消连线」图标');
+    expect(find.textContaining('再点一个知识点'), findsOneWidget,
+        reason: '应出现连线提示条');
+
+    final bCard = find.byWidgetPredicate(
+      (w) => w is KnowledgeNodeCard && w.kp.id == 'B',
+    );
+    await tester.tap(find.descendant(of: bCard, matching: find.byIcon(Icons.link)));
+    await tester.pumpAndSettle();
+
+    expect(created, <(String, String)>[('A', 'B')],
+        reason: '选 A 为起点、B 为目标应建出 A→B 前置边');
   });
 }
