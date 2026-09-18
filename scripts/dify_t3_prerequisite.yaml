@@ -1,0 +1,144 @@
+kind: app
+version: 0.1.2
+app:
+  name: AIMindTree 前置关系推断
+  description: 在已有知识点之间推断前置关系（T3）。输入 points（含 id/name/type/definition），输出 prerequisites JSON（每条约 from/to/reason）。
+  icon: "\U0001F517"
+  icon_background: '#E5F0FF'
+  mode: workflow
+  use_icon_as_answer_icon: false
+dependencies:
+  current_plugin_version: ''
+  installed_plugins: []
+workflow:
+  features:
+    file_upload:
+      image:
+        enabled: false
+        number_limits: 3
+        transfer_methods:
+        - local_file
+        - remote_url
+    opening_statement: ''
+    retriever_resource:
+      enabled: false
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+  environment_variables: []
+  conversation_variables: []
+  graph:
+    edges:
+    - id: start-source-llm-target
+      source: start
+      target: llm
+      sourceHandle: source
+      targetHandle: target
+      type: custom
+      data:
+        isInIteration: false
+        sourceType: start
+        targetType: llm
+    - id: llm-source-end-target
+      source: llm
+      target: end
+      sourceHandle: source
+      targetHandle: target
+      type: custom
+      data:
+        isInIteration: false
+        sourceType: llm
+        targetType: end
+    nodes:
+    - id: start
+      type: custom
+      position:
+        x: 80
+        y: 240
+      data:
+        type: start
+        title: 开始
+        desc: ''
+        variables:
+        - variable: points
+          label: points
+          type: paragraph
+          required: true
+          max_length: 200000
+          options: []
+          allowed_file_types: []
+          allowed_file_extensions: []
+    - id: llm
+      type: custom
+      position:
+        x: 400
+        y: 180
+      data:
+        type: llm
+        title: LLM 推断前置
+        desc: ''
+        model:
+          provider: ollama
+          name: llama3
+          mode: chat
+          completion_params:
+            temperature: 0.3
+        context:
+          enabled: false
+          variable_selector: []
+        vision:
+          enabled: false
+        prompt_template:
+        - role: system
+          text: |-
+            你是一名严谨的「知识图谱工程师」，服务于一款叫 AIMindTree 的 AI 知识笔记 App。
+            给定一组知识点（每条含 id / name / type / definition），你的唯一任务是推断它们之间
+            的「前置关系」：若要先掌握 from 才能掌握 to，则存在一条 from → to 的边。
+        - role: user
+          text: |-
+            请分析下面这组知识点，推断前置关系。
+
+            # 知识点
+            {{#start.points#}}
+
+            # 输出要求（严格遵守）
+            1. 只输出一个 JSON 对象，不要任何解释、前后缀或 Markdown 代码块标记。
+            2. 结构固定为：
+            {
+              "prerequisites": [
+                {
+                  "from": "前置知识点的 id 或 name",
+                  "to": "后继知识点的 id 或 name",
+                  "reason": "一句话说明为什么 from 是 to 的前置（≤ 40 字）"
+                }
+              ]
+            }
+            3. from / to 必须使用输入里给出的 id 或 name（不要编造新知识点）。
+            4. 关系应当是有向无环的（DAG），不要出现循环依赖。
+            5. 只输出你确有把握的关系；把握低的不输出。
+    - id: end
+      type: custom
+      position:
+        x: 740
+        y: 240
+      data:
+        type: end
+        title: 结束
+        desc: ''
+        outputs:
+        - variable: prerequisites
+          value_type: string
+          value: '{{#llm.text#}}'
+    viewport:
+      x1: 0
+      y1: 0
+      x2: 0
+      y2: 0

@@ -1,0 +1,84 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.buildlog/
+.history
+.svn/
+migrate_working_dir/
+
+# IntelliJ / VS Code
+*.iml
+*.ipr
+*.iws
+.idea/
+.vscode/
+
+# Flutter / Dart / Pub
+**/doc/api/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+flutter_*.png
+linked_*.ds
+unlinked_.ds
+.unlinkedkernel.dat
+
+# Android
+**/android/**/gradle-wrapper.jar
+.gradle/
+**/android/capture*sdk*
+**/android/**/release-keystore.jks
+**/android/**/profile-keystore.jks
+**/android/**/debug-keystore.jks
+**/android/.gradle
+**/android/captures/
+**/android/gradlew
+**/android/gradlew.bat
+**/android/local.properties
+**/android/**/GeneratedPluginRegistrant.java
+**/android/key.properties
+**/android/**/gradle-wrapper.properties
+
+# iOS
+**/ios/Flutter/Debug.xcconfig
+**/ios/Flutter/Release.xcconfig
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/flutter_export_environment.sh
+**/ios/Flutter/App.framework
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/Flutter.xcframework
+**/ios/Flutter/GeneratedPluginRegistrant.*
+**/ios/Pods/
+**/ios/Podfile.lock
+
+# Windows (desktop)
+.windows/flutter/ephemeral/
+
+# Linux (desktop)
+.linux/flutter/ephemeral/
+
+# macOS (desktop)
+.macos/Flutter/ephemeral/
+
+# Coverage
+coverage/
+
+# Symbols
+app.*.symbols
+
+# FVM
+.fvm/
+
+# WorkBuddy tooling state (not project source)
+.workbuddy/
+
+# Keep this file tracked
+!.gitignore

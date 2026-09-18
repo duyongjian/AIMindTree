@@ -1,0 +1,148 @@
+kind: app
+version: 0.1.2
+app:
+  name: AIMindTree 知识点提取
+  description: 从一段学习笔记中提取结构化知识点（T1）。输入 note_text，输出 knowledge_points JSON。
+  icon: "\U0001F9E0"
+  icon_background: '#FFEAD5'
+  mode: workflow
+  use_icon_as_answer_icon: false
+dependencies:
+  current_plugin_version: ''
+  installed_plugins: []
+workflow:
+  features:
+    file_upload:
+      image:
+        enabled: false
+        number_limits: 3
+        transfer_methods:
+        - local_file
+        - remote_url
+    opening_statement: ''
+    retriever_resource:
+      enabled: false
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+  environment_variables: []
+  conversation_variables: []
+  graph:
+    edges:
+    - id: start-source-llm-target
+      source: start
+      target: llm
+      sourceHandle: source
+      targetHandle: target
+      type: custom
+      data:
+        isInIteration: false
+        sourceType: start
+        targetType: llm
+    - id: llm-source-end-target
+      source: llm
+      target: end
+      sourceHandle: source
+      targetHandle: target
+      type: custom
+      data:
+        isInIteration: false
+        sourceType: llm
+        targetType: end
+    nodes:
+    - id: start
+      type: custom
+      position:
+        x: 80
+        y: 240
+      data:
+        type: start
+        title: 开始
+        desc: ''
+        variables:
+        - variable: note_text
+          label: note_text
+          # 必须是 paragraph（段落）：text-input（短文本）是 Dify 平台级 256 字符硬限制，
+          # max_length 写再大也会被运行时校验拦截（"must be less than 256 characters"）。
+          type: paragraph
+          required: true
+          max_length: 200000
+          options: []
+          allowed_file_types: []
+          allowed_file_extensions: []
+    - id: llm
+      type: custom
+      position:
+        x: 400
+        y: 180
+      data:
+        type: llm
+        title: LLM 提取
+        desc: ''
+        model:
+          provider: ollama
+          name: llama3
+          mode: chat
+          completion_params:
+            temperature: 0.2
+        context:
+          enabled: false
+          variable_selector: []
+        vision:
+          enabled: false
+        prompt_template:
+        - role: system
+          text: |-
+            你是一名严谨的「知识点提取器」，服务于一款叫 AIMindTree 的 AI 知识笔记 App。
+            你的唯一任务：把用户给出的一段学习笔记，拆解为独立、可复用的「知识点」。
+        - role: user
+          text: |-
+            请提取下面这段笔记中的知识点。
+
+            # 笔记原文
+            {{#start.note_text#}}
+
+            # 输出要求（严格遵守）
+            1. 只输出一个 JSON 对象，不要任何解释、前后缀或 Markdown 代码块标记。
+            2. 结构固定为：
+            {
+              "knowledge_points": [
+                {
+                  "name": "知识点名称（名词短语，≤ 20 字）",
+                  "type": "概念|公式|定理|方法|事实|误区",
+                  "definition": "一句话清晰定义（≤ 60 字）",
+                  "source_quote": "从原文中逐字摘抄的、能支撑该知识点的原句（必须能在原文中找到，否则留空字符串）",
+                  "prerequisites": ["学习本知识点前应先掌握的 0~3 个前置知识点名称，没有则为空数组"],
+                  "confidence": 0.0~1.0 的小数，表示你对这条提取的把握
+                }
+              ]
+            }
+            3. source_quote 必须逐字出现在原文里；若原文没有明确支撑句，source_quote 给空字符串 ""，但知识点仍可保留。
+            4. 不要编造原文没有的定义；无法确认的放在 definition 里标注「（待确认）」。
+            5. prerequisites 只写「名称」，不要写解释。
+    - id: end
+      type: custom
+      position:
+        x: 740
+        y: 240
+      data:
+        type: end
+        title: 结束
+        desc: ''
+        outputs:
+        - variable: knowledge_points
+          value_type: string
+          value: '{{#llm.text#}}'
+    viewport:
+      x1: 0
+      y1: 0
+      x2: 0
+      y2: 0
