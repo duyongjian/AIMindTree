@@ -79,17 +79,61 @@ val = outs.get(expect)
 if val is None:
     print("⚠️ outputs 里没有 %s 字段，outputs = %s" % (expect, outs)); sys.exit(2)
 raw = val if isinstance(val, str) else json.dumps(val, ensure_ascii=False)
-# 剥离 <think>...</think> 与 ```json 代码块
-raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+# 1) 剥离 <think>...</think>（含「未闭合」的情况：推理模型的思考块吃掉 token 预算）
+if "<think>" in raw:
+    end = raw.find("</think>")
+    if end != -1:
+        raw = raw[end + len("</think>"):]
+    else:
+        cand = [i for i in (raw.find("{"), raw.find("[")) if i != -1]
+        if cand: raw = raw[min(cand):]
+raw = raw.strip()
+# 2) 剥离 ```json 代码块
 m = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw, flags=re.IGNORECASE)
 if m: raw = m.group(1).strip()
-s = raw.find("{") if raw.find("{") != -1 else raw.find("[")
-e = raw.rfind("}") if raw.rfind("}") != -1 else raw.rfind("]")
-if s != -1 and e != -1 and e > s: raw = raw[s:e+1]
-try:
-    parsed = json.loads(raw)
-except Exception as e:
-    print("❌ JSON 解析失败：", e); print("RAW:", raw[:400]); sys.exit(3)
+# 3) 解析：先整体解析；失败则在文本里扫第一个「能完整解码」的 JSON（忽略前后杂文）。
+#    不要用「首 { → 末 }」硬切：模型若在 JSON 前后带说明文字，硬切会把杂文并进来。
+def try_load(t):
+    try:
+        return json.loads(t)
+    except Exception:
+        return None
+
+def scan_json(t):
+    dec = json.JSONDecoder()
+    for i, ch in enumerate(t):
+        if ch in "{[":
+            try:
+                obj, _ = dec.raw_decode(t, i)
+                return obj
+            except Exception:
+                continue
+    return None
+
+parsed = try_load(raw)
+if parsed is None:
+    parsed = scan_json(raw)
+salvaged = False
+if parsed is None:
+    # 4) 抢救：输出被截断时截到最后一个完整条目并补上 ]}
+    idx = raw.rfind("}")
+    cut = raw[:idx + 1] if idx != -1 else raw
+    for cand in (cut, cut + "]}", cut + "]", cut + "}"):
+        parsed = try_load(cand)
+        if parsed is not None:
+            raw = cand
+            salvaged = True
+            break
+if parsed is None:
+    try:
+        json.loads(raw)
+    except Exception as e:
+        print("❌ JSON 解析失败：", e)
+    print("RAW HEAD:", repr(raw[:200]))
+    print("RAW TAIL:", repr(raw[-200:]))
+    sys.exit(3)
+if salvaged:
+    print("⚠️ 输出被截断，已抢救到最后一个完整条目 —— 建议调高 Dify LLM 节点的 max_tokens")
 items = parsed.get(expect, [])
 print("✅ %s 成功，条数 = %d" % (name, len(items)))
 bad = []

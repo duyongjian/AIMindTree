@@ -47,32 +47,181 @@ class DifyResult {
 
   /// 把 Dify 的结构化输出文本解析为 JSON。
   ///
-  /// 三层容错（实测必踩）：
-  /// - 推理模型（DeepSeek-R1 / Qwen 等）在 JSON 前加 `<think>...</think>`；
+  /// 四层容错（实测必踩）：
+  /// - 推理模型（DeepSeek-R1 / Qwen 等）在 JSON 前加 `<think>...</think>`，
+  ///   且**可能不闭合**；
   /// - 模型偶尔用 ` ```json ... ``` ` 包裹；
-  /// - 前后可能夹带无关文字。
+  /// - 前后可能夹带无关文字；
+  /// - 输出偶尔被 token 上限截断（JSON 不闭合）。
+  ///
+  /// ⚠️ **不要用「首 `{` → 末 `}`」硬切**（旧实现，已踩坑）：思考块里若含 `{`，
+  /// 切片起点会落进思考文字里，拼出来的串不是合法 JSON，解析直接失败 →
+  /// 静默返回 null → 上层无声退回本地兜底，AI 等于没跑。
+  /// 正确做法是 [_scanJson]：逐个起点做**括号配对**，配对成功才解码。
   static Object? parseStructured(String raw) {
     var s = raw.trim();
+
+    // ① 整体就是合法 JSON（最理想路径）
+    final direct = _tryDecode(s);
+    if (direct != null) return direct;
+
+    // ② 剥离闭合的 <think>...</think>
     s = s
         .replaceAllMapped(
           RegExp(r'<think>[\s\S]*?</think>', caseSensitive: false),
           (_) => '',
         )
         .trim();
+    final afterThink = _tryDecode(s);
+    if (afterThink != null) return afterThink;
+
+    // ③ 剥离 ```json 代码块
     final fence =
         RegExp(r'```(?:json)?\s*([\s\S]*?)```', caseSensitive: false);
     final m = fence.firstMatch(s);
-    if (m != null) s = m.group(1)!.trim();
+    if (m != null) {
+      final inner = m.group(1)!.trim();
+      final decoded = _tryDecode(inner);
+      if (decoded != null) return decoded;
+      s = inner;
+    }
+
+    // ④ 扫描第一个「括号完整配对且能解码」的 JSON（关键修复）
+    final scanned = _scanJson(s);
+    if (scanned != null) return scanned;
+
+    // ⑤ 最后退回首尾硬切（兼容旧行为，尽力而为）
     final start = s.indexOf(RegExp(r'[\{\[]'));
     final end = s.lastIndexOf(RegExp(r'[\}\]]'));
     if (start != -1 && end != -1 && end > start) {
-      s = s.substring(start, end + 1);
+      return _tryDecode(s.substring(start, end + 1));
     }
+    return null;
+  }
+
+  /// 尝试解码，失败返回 null（不抛）。
+  static Object? _tryDecode(String s) {
     try {
       return jsonDecode(s);
     } on Object {
       return null;
     }
+  }
+
+  /// 在 [s] 中扫描第一个「括号完整配对且能解码」的 JSON 值。
+  ///
+  /// 逐个尝试每个 `{` / `[` 起点，用 [_matchEnd] 找到配对结束位置再解码；
+  /// 这样即使前面夹着**未闭合**的 `<think>` 思考块（里面可能带 `{`）也不会被带偏。
+  static Object? _scanJson(String s) {
+    for (var i = 0; i < s.length; i++) {
+      final ch = s[i];
+      if (ch != '{' && ch != '[') continue;
+      final end = _matchEnd(s, i);
+      if (end != -1) {
+        final decoded = _tryDecode(s.substring(i, end + 1));
+        if (decoded != null) return decoded;
+        continue; // 能闭合但解码失败 → 多半是前面杂文里的假结构符，换下一个
+      }
+      // 未闭合：两种可能 —— ① 输出被 token 上限截断；② 这里根本不是 JSON 起点
+      // （例如未闭合的 <think> 思考块里有个 '{'）。
+      // ⚠️ 绝不能退而求其次去解析**内层片段**：
+      // `{"gaps":[{"name":"力","level":1},{"name":"加速` 里内层
+      // `{"name":"力","level":1}` 本身合法，但形状不对，调用方取不到 `gaps`
+      // 却以为成功。所以先尝试「抢救外层」，抢救不出来才换下一个起点。
+      final salvaged = _salvage(s, i);
+      if (salvaged != null) return salvaged;
+    }
+    return null;
+  }
+
+  /// 抢救被截断的输出：截到**最后一个完整元素**，补上未闭合的括号。
+  ///
+  /// 只保留完整的条目，被截断的那一条直接丢弃——绝不补全或编造内容。
+  static Object? _salvage(String s, int start) {
+    var k = -1;
+    for (var i = s.length - 1; i >= start; i--) {
+      final ch = s[i];
+      if (ch == '}' || ch == ']') {
+        k = i;
+        break;
+      }
+    }
+    if (k == -1) return null;
+    final stack = _stackAt(s, start, k);
+    if (stack == null || stack.isEmpty) return null;
+    final closers = stack.reversed.map((c) => c == '{' ? '}' : ']').join();
+    return _tryDecode(s.substring(start, k + 1) + closers);
+  }
+
+  /// 从 [start] 扫到 [end]（含），返回扫描结束时**仍未闭合**的开括号栈；
+  /// 括号不匹配返回 null。字符串内的括号不参与配对。
+  static List<String>? _stackAt(String s, int start, int end) {
+    final stack = <String>[];
+    var inString = false;
+    var escaped = false;
+    for (var i = start; i <= end && i < s.length; i++) {
+      final ch = s[i];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch == '\\') {
+          escaped = true;
+        } else if (ch == '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch == '"') {
+        inString = true;
+        continue;
+      }
+      if (ch == '{' || ch == '[') {
+        stack.add(ch);
+        continue;
+      }
+      if (ch == '}' || ch == ']') {
+        if (stack.isEmpty) return null;
+        final open = stack.removeLast();
+        if ((open == '{' && ch != '}') || (open == '[' && ch != ']')) return null;
+      }
+    }
+    return stack;
+  }
+
+  /// 从 [start]（必须是 `{` 或 `[`）扫到配对的 `}` / `]`，返回其下标；
+  /// 未闭合返回 -1。正确处理字符串与转义，避免把字符串里的括号当成结构符号。
+  static int _matchEnd(String s, int start) {
+    final stack = <String>[];
+    var inString = false;
+    var escaped = false;
+    for (var i = start; i < s.length; i++) {
+      final ch = s[i];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch == '\\') {
+          escaped = true;
+        } else if (ch == '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch == '"') {
+        inString = true;
+        continue;
+      }
+      if (ch == '{' || ch == '[') {
+        stack.add(ch);
+        continue;
+      }
+      if (ch == '}' || ch == ']') {
+        if (stack.isEmpty) return -1;
+        final open = stack.removeLast();
+        if ((open == '{' && ch != '}') || (open == '[' && ch != ']')) return -1;
+        if (stack.isEmpty) return i;
+      }
+    }
+    return -1;
   }
 }
 

@@ -107,6 +107,9 @@ workflow:
           mode: chat
           completion_params:
             temperature: 0.4
+            # 推理模型会先吐 <think> 思考块，吃掉 token 预算导致 JSON 被截断；
+            # 这里务必留足，否则深层/多建议时输出会截在半截（客户端解析失败）。
+            max_tokens: 4096
         context:
           enabled: false
           variable_selector: []

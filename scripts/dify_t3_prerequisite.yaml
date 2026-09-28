@@ -91,6 +91,8 @@ workflow:
           mode: chat
           completion_params:
             temperature: 0.3
+            # 同上：留足输出预算，知识点多 / 推理模型带 <think> 时避免 JSON 被截断。
+            max_tokens: 2048
         context:
           enabled: false
           variable_selector: []
