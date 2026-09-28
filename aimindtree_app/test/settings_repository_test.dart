@@ -4,6 +4,7 @@
 /// 跑前会抛 MissingPluginException 或 502，故加 `skip` 在真机启用。
 library;
 
+import 'package:aimindtree_app/ai/ai_task.dart';
 import 'package:aimindtree_app/ai/extraction_service.dart';
 import 'package:aimindtree_app/core/secret_store.dart';
 import 'package:aimindtree_app/data/db/drift_database.dart';
@@ -107,6 +108,61 @@ void main() {
       await repo.deleteProvider(row.id);
       expect(await store.get(row.apiKeyRef), isNull);
       expect(await repo.allProviders(), isEmpty);
+    });
+
+    test('bindTask 写入路由，重复绑定 = 覆盖', () async {
+      final t3 = await repo.addDifyProvider(
+        displayName: 'T3 工作流', baseUrl: 'http://h', apiKey: 'k3',
+      );
+      final t4 = await repo.addDifyProvider(
+        displayName: 'T4 工作流', baseUrl: 'http://h', apiKey: 'k4',
+      );
+
+      await repo.bindTask(AiTask.t3Prerequisite, t3.id);
+      var routes = await repo.allRoutes();
+      expect(routes.length, 1);
+      expect(routes.single.aiTask, 'T3');
+      expect(routes.single.providerId, t3.id);
+
+      // 同任务再绑一次：仍是 1 行，且指向新 provider
+      await repo.bindTask(AiTask.t3Prerequisite, t4.id);
+      routes = await repo.allRoutes();
+      expect(routes.length, 1, reason: 'bind 是先删后插，不能出现重复行');
+      expect(routes.single.providerId, t4.id);
+    });
+
+    test('unbindTask 只清指定任务', () async {
+      final p = await repo.addDifyProvider(
+        displayName: 'P', baseUrl: 'http://h', apiKey: 'k',
+      );
+      await repo.bindTask(AiTask.t3Prerequisite, p.id);
+      await repo.bindTask(AiTask.t4GapAnalysis, p.id);
+      expect((await repo.allRoutes()).length, 2);
+
+      await repo.unbindTask(AiTask.t3Prerequisite);
+      final routes = await repo.allRoutes();
+      expect(routes.length, 1);
+      expect(routes.single.aiTask, 'T4');
+    });
+
+    test('deleteProvider 连带解绑路由，返回解绑数量', () async {
+      final p = await repo.addDifyProvider(
+        displayName: 'P', baseUrl: 'http://h', apiKey: 'k',
+      );
+      final other = await repo.addDifyProvider(
+        displayName: 'O', baseUrl: 'http://h', apiKey: 'ko',
+      );
+      await repo.bindTask(AiTask.t3Prerequisite, p.id);
+      await repo.bindTask(AiTask.t4GapAnalysis, p.id);
+      await repo.bindTask(AiTask.t1Extract, other.id);
+
+      final unbound = await repo.deleteProvider(p.id);
+      expect(unbound, 2, reason: 'T3/T4 指向 p，应一起解绑');
+
+      final routes = await repo.allRoutes();
+      expect(routes.length, 1, reason: '指向 other 的 T1 路由不受影响');
+      expect(routes.single.aiTask, 'T1');
+      expect(routes.single.providerId, other.id);
     });
 
     test('enabledProviders 只返回 enabled=true 的行', () async {

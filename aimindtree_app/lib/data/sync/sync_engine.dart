@@ -3,8 +3,13 @@
 /// 推送：读 outbox pending → 批量走 SyncApi → markPushed / markFailed
 /// 拉取：走 SyncApi.pullSince → 自回声过滤 → 逐行 LWW merge → 更新 last_pulled_at
 ///
-/// 表覆盖范围（P0）：notebooks / notes / knowledge_points /
-/// prerequisite_edges / mastery_records。其他 SyncMeta 表留 TODO。
+/// 表覆盖范围（P1 已完成 11 张带 SyncMeta 的表）：
+/// notebooks / notes / knowledge_points / prerequisite_edges / mastery_records /
+/// cards / canvases / canvas_nodes / canvas_edges / ai_sessions / ai_messages。
+///
+/// 故意不同步 2 张：`ai_providers`（密钥引用本地化，跨设备命名空间不一致）、
+/// `ai_task_routes`（依赖 ai_providers，单独同步无意义）。
+/// 将来要同步它们需先加 SyncMeta mixin + schemaVersion=2 迁移。
 ///
 /// LWW 规则（MEMORY.md "Append-only 排序陷阱" 同源）：
 /// - `remote.baseVersion > local.version` → apply remote；

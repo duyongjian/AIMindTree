@@ -88,8 +88,9 @@ class ExtractionService {
     // 3) 映射为待校验的原始知识点
     final rawPoints = _mapToRaw(result.parsed);
     if (rawPoints == null) {
-      return Failure(StateError(
-          'T1 返回结构无法解析为知识点列表：${_preview(result.content)}'));
+      return Failure(
+        StateError('T1 返回结构无法解析为知识点列表：${_preview(result.content)}'),
+      );
     }
     if (rawPoints.isEmpty) {
       _log.w('T1 提取结果为空');
@@ -122,9 +123,11 @@ class ExtractionService {
             name: (m['name'] as String?) ?? '',
             type: (m['type'] as String?) ?? '',
             definition: (m['definition'] as String?) ?? '',
-            sourceQuote: (m['source_quote'] as String?) ??
+            sourceQuote:
+                (m['source_quote'] as String?) ??
                 (m['sourceQuote'] as String? ?? ''),
-            prerequisites: (m['prerequisites'] as List<dynamic>?)
+            prerequisites:
+                (m['prerequisites'] as List<dynamic>?)
                     ?.map((p) => p as String)
                     .toList() ??
                 const <String>[],
@@ -137,9 +140,7 @@ class ExtractionService {
 
   String _deriveTitle(String content) {
     final firstLine = content.split('\n').first;
-    return firstLine.length > 40
-        ? '${firstLine.substring(0, 40)}…'
-        : firstLine;
+    return firstLine.length > 40 ? '${firstLine.substring(0, 40)}…' : firstLine;
   }
 
   static String _preview(String s) =>
@@ -156,8 +157,16 @@ class ExtractionService {
   ///
   /// 注：P0 启动时一次性装载所有 provider；后续在设置页改动 provider
   /// 后需要重启 App 才生效（响应式监听留作 T09+ 增量）。
-  static Future<(ExtractionService, AppDatabase, AiTaskRouter, SettingsRepository,
-      SyncContext)> bootstrap({
+  static Future<
+    (
+      ExtractionService,
+      AppDatabase,
+      AiTaskRouter,
+      SettingsRepository,
+      SyncContext,
+    )
+  >
+  bootstrap({
     AppDatabase? db,
     SecretStore? secretStore,
     LocalAiConfig config = const LocalAiConfig(),
@@ -173,8 +182,26 @@ class ExtractionService {
 
     // === AI Provider ===
     final enabledRows = await settings.enabledProviders();
+
+    // 任务级绑定（ai_task_routes）。T3 / T4 的 Key 是各自工作流应用签发的，
+    // 用它们当通用回落会导致 T1 / T5「调错工作流」，所以这里要把它们排除掉。
+    final routeRows = await database.aiTaskRouteDao.all();
+    final dedicatedIds = <String>{
+      for (final r in routeRows)
+        if (r.aiTask == AiTask.t3Prerequisite.code ||
+            r.aiTask == AiTask.t4GapAnalysis.code)
+          r.providerId,
+    };
+    if (routeRows.isEmpty) {
+      _log.w('ai_task_routes 为空：T3/T4 未绑定，将走本地兜底（AI 不参与）');
+    } else {
+      _log.i(
+        '任务路由：${routeRows.map((r) => '${r.aiTask}→${r.providerId}').join(', ')}',
+      );
+    }
+
     final Map<String, AiProvider> providers = <String, AiProvider>{};
-    AiProvider? fallback;
+    final List<AiProviderRow> instantiated = <AiProviderRow>[];
     for (final row in enabledRows) {
       if (row.protocol == 'dify') {
         final apiKey = await settings.resolveApiKey(row.apiKeyRef);
@@ -182,7 +209,8 @@ class ExtractionService {
           _log.w('Provider ${row.id} (${row.name}) 密钥缺失，已跳过');
           continue;
         }
-        final isLocal = row.baseUrl.contains('localhost') ||
+        final isLocal =
+            row.baseUrl.contains('localhost') ||
             row.baseUrl.contains('127.0.0.1');
         final dify = DifyClient(
           id: row.id,
@@ -191,15 +219,29 @@ class ExtractionService {
           isLocal: isLocal,
         );
         providers[dify.id] = dify;
-        fallback ??= dify;
+        instantiated.add(row);
       } else {
         _log.w('暂不支持的 provider 协议：${row.protocol}（id=${row.id}）');
       }
     }
 
+    // 通用回落优先级：① isDefault ② 未被 T3/T4 专属绑定 ③ 第一个可用的。
+    AiProvider? pickFallback() {
+      for (final p in instantiated) {
+        if (p.isDefault) return providers[p.id];
+      }
+      for (final p in instantiated) {
+        if (!dedicatedIds.contains(p.id)) return providers[p.id];
+      }
+      for (final p in instantiated) {
+        return providers[p.id];
+      }
+      return null;
+    }
+
+    final fallback = pickFallback();
     if (fallback == null) {
-      throw StateError(
-          '没有可用的 AI provider。请到「设置」页添加并启用一个 Dify 提供商。');
+      throw StateError('没有可用的 AI provider。请到「设置」页添加并启用一个 Dify 提供商。');
     }
 
     final router = AiTaskRouter(

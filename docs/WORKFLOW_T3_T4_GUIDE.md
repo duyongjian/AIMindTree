@@ -247,3 +247,77 @@ Dify 控制台 → **DSL 导入** → 选对应 yaml 即可。导入后核对两
 2. `end` 节点输出变量名（`prerequisites` / `gaps`）与本文一致（客户端 `_taskOutputKey` 按这两个 key 取值）。
 
 变量名对不上才会「画对了也跑不通」，这是导入后第一件要检查的事。
+
+---
+
+## 5. 把画好的 T3 / T4 绑到 App（不绑 = 永远走本地兜底）
+
+### 5.1 为什么要绑：Dify 的 Key 是按「应用」签发的
+
+一个 Dify 工作流 = 一个 API Key = 一条 `ai_providers` 行。T1 / T3 / T4 是三个**不同的
+Dify 应用**，三个 Key 互不通用，所以不能复用同一个 provider。
+
+`ai_task_routes` 表负责把「任务 → provider」对上号：
+
+| 表 | 作用 |
+|----|------|
+| `ai_providers` | 存 baseUrl + 密钥**引用名**（`dify_<ulid>`），密钥本体在 SecretStore |
+| `ai_task_routes` | `ai_task`（`T1`/`T3`/`T4`）→ `provider_id` |
+
+### 5.2 操作步骤（设置页，4 步）
+
+1. **设置 → 右下角「添加 Dify」→ 建 T3 provider**
+   - 显示名：`Dify T3 前置推理`
+   - Base URL：`http://localhost:8080`
+   - API Key：`app-yR8zqEa56VDuXgHXpUaXywJj`（你的 T3 应用 Key）
+2. **同样再建一个 T4 provider**
+   - 显示名：`Dify T4 缺口分析`，Base URL 同上
+   - API Key：`app-PZelFIzkuqlbhOBNcXIm3Uae`
+3. **重启 App** —— provider 的实例化在 `ExtractionService.bootstrap()` 里一次性完成
+   （P0 简化：改 provider 必须重启，响应式监听留 T09+）
+4. **设置页 → 滚到「AI 任务路由」区**，逐个下拉：
+   - `T1 知识点提取` → 保持**未绑定**（会回落到第一个启用的 provider，即原来的「本地 Dify（默认）」）
+   - `T3 前置知识推断` → 选 `Dify T3 前置推理`
+   - `T4 知识缺口分析` → 选 `Dify T4 缺口分析`
+
+> **路由绑定即时生效，不需要重启** —— `AiTaskRouter.resolve()` 是每次调用现查 DB。
+> 需要重启的只有「新增 / 启用 / 停用 provider」这一步。
+
+### 5.3 副标题一眼看懂状态
+
+| 副标题 | 含义 | 该做什么 |
+|--------|------|----------|
+| `未绑定 → 走本地兜底，AI 不会参与` | T3/T4 没绑 | 选一个 provider |
+| `未绑定 → 回落默认 Provider` | T1 没绑，属正常 | 不用管 |
+| `http://localhost:8080` | 已绑定且密钥在位 | ✅ |
+| `http://… · ⚠️ 密钥缺失` | SecretStore 取不到 key | 删掉重建 provider |
+| `⚠️ 原绑定的 Provider 已删除或已停用` | 悬挂引用 | 重新选一个 |
+
+### 5.4 验证链路通了
+
+- 设置页：T3 / T4 两行副标题从「未绑定」变成 `http://localhost:8080`；
+- 启动日志出现 `任务路由：T3→<id>, T4→<id>`；若为 `ai_task_routes 为空：T3/T4 未绑定` 说明没绑上；
+- 在知识树点节点 → 「补充前置知识」，结果里的 `usedFallback` 应为 `false`；
+- 想单独验证工作流本身（绕开 App）：`scripts/test_dify_t3_t4.sh`。
+
+### 5.5 排查
+
+| 现象 | 原因 | 处理 |
+|------|------|------|
+| 下拉里没有刚建的 provider | 没重启，或该 provider 被停用 | 重启 / 打开启用开关 |
+| 绑了但仍走兜底 | 密钥缺失（bootstrap 会跳过） | 看启动日志「密钥缺失，已跳过」，重建 provider |
+| 删了 provider 后任务静默回落 | 已自动解绑（删除时连带清理路由） | 重新绑定即可 |
+| T1 突然调到了 T3 的工作流 | 不会发生了：bootstrap 选 fallback 时排除 T3/T4 绑定的 provider | — |
+
+### 5.6 相关代码
+
+| 文件 | 职责 |
+|------|------|
+| `lib/features/settings/settings_page.dart` | 任务路由绑定 UI（`kRoutableTasks` / `_routeTile` / `_bind`） |
+| `lib/data/repositories/settings_repository.dart` | `bindTask` / `unbindTask` / `allRoutes`；`deleteProvider` 连带解绑 |
+| `lib/data/daos/ai_task_route_dao.dart` | `bind`（先删后插，幂等覆盖）/ `unbindProvider` |
+| `lib/ai/ai_task_router.dart` | `resolve` ①②③ 优先级；T3/T4 未命中返回 `null` |
+| `lib/ai/extraction_service.dart` | `bootstrap`：实例化 provider + 挑 fallback（排除 T3/T4 专属） |
+
+> 想直接改库（App 必须**关闭**）：`C:\Users\ASUS\Documents\aimindtree.sqlite`，
+> 密钥在 `C:\Users\ASUS\Documents\.aimindtree\secrets.json`。

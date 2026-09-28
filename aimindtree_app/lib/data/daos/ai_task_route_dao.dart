@@ -21,10 +21,11 @@ class AiTaskRouteDao extends DatabaseAccessor<AppDatabase>
 
   /// 查该任务的路由绑定；未配置返回 null（走默认回落）。
   Future<AiTaskRouteRow?> findForTask(AiTask task) async {
-    final rows = await (select(attachedDatabase.aiTaskRoutes)
-          ..where((t) => t.aiTask.equals(task.code))
-          ..limit(1))
-        .get();
+    final rows =
+        await (select(attachedDatabase.aiTaskRoutes)
+              ..where((t) => t.aiTask.equals(task.code))
+              ..limit(1))
+            .get();
     return rows.isEmpty ? null : rows.first;
   }
 
@@ -38,20 +39,29 @@ class AiTaskRouteDao extends DatabaseAccessor<AppDatabase>
     String? apiKeyRefOverride,
     String? endpointOverride,
   }) async {
-    await (delete(attachedDatabase.aiTaskRoutes)
-          ..where((t) => t.aiTask.equals(task.code)))
-        .go();
-    await into(attachedDatabase.aiTaskRoutes).insert(AiTaskRoutesCompanion(
-      id: Value(task.code),
-      aiTask: Value(task.code),
-      providerId: Value(providerId),
-      apiKeyRefOverride: Value(apiKeyRefOverride),
-      endpointOverride: Value(endpointOverride),
-    ));
+    await (delete(
+      attachedDatabase.aiTaskRoutes,
+    )..where((t) => t.aiTask.equals(task.code))).go();
+    await into(attachedDatabase.aiTaskRoutes).insert(
+      AiTaskRoutesCompanion(
+        id: Value(task.code),
+        aiTask: Value(task.code),
+        providerId: Value(providerId),
+        apiKeyRefOverride: Value(apiKeyRefOverride),
+        endpointOverride: Value(endpointOverride),
+      ),
+    );
   }
 
-  Future<void> unbind(AiTask task) =>
-      (delete(attachedDatabase.aiTaskRoutes)
-            ..where((t) => t.aiTask.equals(task.code)))
-          .go();
+  Future<void> unbind(AiTask task) => (delete(
+    attachedDatabase.aiTaskRoutes,
+  )..where((t) => t.aiTask.equals(task.code))).go();
+
+  /// 解绑指向某 provider 的所有任务（删除 provider 时调用，避免悬挂引用）。
+  ///
+  /// 悬挂引用的后果：`resolve` 命中路由但 `providers[providerId]` 为 null，
+  /// 通用任务会静默回落、T3/T4 直接返回 null —— 比「未绑定」更难排查。
+  Future<int> unbindProvider(String providerId) => (delete(
+    attachedDatabase.aiTaskRoutes,
+  )..where((t) => t.providerId.equals(providerId))).go();
 }

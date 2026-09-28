@@ -9,6 +9,7 @@ import 'dart:io';
 
 import 'package:drift/drift.dart';
 
+import '../../ai/ai_task.dart';
 import '../../ai/extraction_service.dart';
 import '../../core/id.dart';
 import '../../core/logger.dart';
@@ -45,17 +46,21 @@ class SettingsRepository {
     final id = newUlid();
     final refName = 'dify_$id';
     await secretStore.set(refName, apiKey);
-    await _db.into(_db.aiProviders).insert(AiProvidersCompanion(
-          id: Value(id),
-          name: Value(displayName),
-          type: Value('dify'),
-          protocol: Value('dify'),
-          baseUrl: Value(baseUrl),
-          apiKeyRef: Value(refName),
-          models: const Value('[]'),
-          isDefault: const Value(false),
-          enabled: const Value(true),
-        ));
+    await _db
+        .into(_db.aiProviders)
+        .insert(
+          AiProvidersCompanion(
+            id: Value(id),
+            name: Value(displayName),
+            type: Value('dify'),
+            protocol: Value('dify'),
+            baseUrl: Value(baseUrl),
+            apiKeyRef: Value(refName),
+            models: const Value('[]'),
+            isDefault: const Value(false),
+            enabled: const Value(true),
+          ),
+        );
     return AiProviderRow(
       id: id,
       name: displayName,
@@ -72,23 +77,43 @@ class SettingsRepository {
 
   /// 启用/停用。
   Future<void> setEnabled(String id, bool enabled) async {
-    await (_db.update(_db.aiProviders)..where((t) => t.id.equals(id)))
-        .write(AiProvidersCompanion(enabled: Value(enabled)));
+    await (_db.update(_db.aiProviders)..where((t) => t.id.equals(id))).write(
+      AiProvidersCompanion(enabled: Value(enabled)),
+    );
   }
 
-  /// 删除：连带清理 SecretStore。
-  Future<void> deleteProvider(String id) async {
-    final row = await (_db.select(_db.aiProviders)
-          ..where((t) => t.id.equals(id))
-          ..limit(1))
-        .getSingleOrNull();
+  /// 删除：连带清理 SecretStore + 指向它的任务路由。
+  ///
+  /// 返回被解除绑定的任务数（用于 UI 提示）。
+  Future<int> deleteProvider(String id) async {
+    final row =
+        await (_db.select(_db.aiProviders)
+              ..where((t) => t.id.equals(id))
+              ..limit(1))
+            .getSingleOrNull();
     if (row != null) await secretStore.delete(row.apiKeyRef);
+    final unbound = await _db.aiTaskRouteDao.unbindProvider(id);
     await (_db.delete(_db.aiProviders)..where((t) => t.id.equals(id))).go();
+    return unbound;
   }
+
+  // ============ 任务级路由绑定 ============
+
+  /// 全部路由行（`ai_task` code → provider）。
+  Future<List<AiTaskRouteRow>> allRoutes() => _db.aiTaskRouteDao.all();
+
+  /// 绑定任务 → provider（同任务重复绑定 = 覆盖）。
+  ///
+  /// Dify 的 Key 按「应用」签发，一个工作流 = 一个 Key = 一个 Provider，
+  /// 所以 T3 / T4 必须各自绑到自己的 Provider 上；不绑就走本地兜底（AI 不跑）。
+  Future<void> bindTask(AiTask task, String providerId) =>
+      _db.aiTaskRouteDao.bind(task: task, providerId: providerId);
+
+  /// 解绑：通用任务回落默认 Provider；T3/T4 走本地兜底。
+  Future<void> unbindTask(AiTask task) => _db.aiTaskRouteDao.unbind(task);
 
   /// 取密钥（仅内部/Provider 构造用）。
-  Future<String?> resolveApiKey(String apiKeyRef) =>
-      secretStore.get(apiKeyRef);
+  Future<String?> resolveApiKey(String apiKeyRef) => secretStore.get(apiKeyRef);
 
   // ============ Seed ============
 
@@ -108,8 +133,11 @@ class SettingsRepository {
   // ============ 连接测试 ============
 
   /// 用 (baseUrl, apiKey) 试连 Dify 的 setup 接口（无需 auth），返回 null = OK。
-  Future<String?> testDify(String baseUrl, String apiKey,
-      {Duration timeout = const Duration(seconds: 8)}) async {
+  Future<String?> testDify(
+    String baseUrl,
+    String apiKey, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
     try {
       final client = HttpClient()..connectionTimeout = timeout;
       final url = Uri.parse('$baseUrl/console/api/setup');
