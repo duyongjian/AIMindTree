@@ -4,6 +4,7 @@
 /// - 列出 `ai_providers` 表所有 provider（已启用 / 已停用 / 密钥缺失）；
 /// - 新增 Dify provider（displayName + baseUrl + apiKey）；
 /// - 启用 / 停用 switch；
+/// - **编辑 provider（显示名 / Base URL / API Key 选填，密钥留空即不改）**；
 /// - 测试连接（探 `/console/api/setup`）；
 /// - 删除 provider（连带清理 SecretStore **和指向它的任务路由**）；
 /// - **「AI 任务路由」区：把 T1/T3/T4 绑到各自的 Dify 应用**（Dify Key 按应用签发）；
@@ -26,6 +27,7 @@ import '../../data/sync/sync_outbox.dart';
 import '../../data/sync/sync_scheduler.dart';
 import '../../data/sync/sync_status.dart';
 import 'dify_add_dialog.dart';
+import 'dify_edit_dialog.dart';
 import 'sync_settings_section.dart';
 
 /// 可在设置页绑定的任务。
@@ -186,6 +188,40 @@ class SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  /// 编辑 provider（显示名 / Base URL / API Key 选填）。
+  Future<void> _edit(AiProviderRow row) async {
+    final result = await showDialog<DifyEditResult>(
+      context: context,
+      builder: (_) =>
+          DifyEditDialog(initialName: row.name, initialBaseUrl: row.baseUrl),
+    );
+    if (result == null) return;
+    // Base URL / Key 变了 → bootstrap 里已实例化的 DifyClient 还是旧值
+    final needsRestart = result.baseUrl != row.baseUrl || result.changesApiKey;
+    try {
+      await widget.settings.updateProvider(
+        row.id,
+        name: result.displayName,
+        baseUrl: result.baseUrl,
+        apiKey: result.apiKey,
+      );
+      widget.onChanged?.call();
+      await _reload();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            needsRestart ? '已保存。改了 Base URL / API Key，需重启 App 才生效' : '已保存',
+          ),
+        ),
+      );
+    } on Object catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('保存失败：$e')));
+    }
+  }
+
   /// 绑定 / 解绑任务路由。`providerId` 为空串/null 视为解绑。
   Future<void> _bind(AiTask task, String? providerId) async {
     final unbind = providerId == null || providerId.isEmpty;
@@ -297,6 +333,7 @@ class SettingsPageState extends State<SettingsPage> {
           _ProviderTile(
             vm: vm,
             onToggle: (v) => _toggleEnabled(vm.row, v),
+            onEdit: () => _edit(vm.row),
             onDelete: () => _delete(vm.row),
             onTest: () => _test(vm.row),
           ),
@@ -313,6 +350,7 @@ class SettingsPageState extends State<SettingsPage> {
           child: Text(
             '• 密钥仅保存在本机 SecretStore，不写入数据库；\n'
             '• 增删 / 启停 Provider 后需重启 App 才生效（P0 简化）；\n'
+            '• 编辑 Provider：只改显示名即时生效，改 Base URL / API Key 需重启；\n'
             '• 任务路由绑定即时生效，无需重启；\n'
             '• 本地 Dify（http://localhost）仅桌面端开发期可用；\n'
             '• 公网 / Web 端请走 supabase ai-proxy（后续 T03+ 接入）。',
@@ -439,12 +477,14 @@ class _ProviderTile extends StatelessWidget {
   const _ProviderTile({
     required this.vm,
     required this.onToggle,
+    required this.onEdit,
     required this.onDelete,
     required this.onTest,
   });
 
   final _ProviderVM vm;
   final ValueChanged<bool> onToggle;
+  final VoidCallback onEdit;
   final VoidCallback onDelete;
   final VoidCallback onTest;
 
@@ -479,6 +519,11 @@ class _ProviderTile extends StatelessWidget {
             Switch(
               value: row.enabled,
               onChanged: vm.apiKeyMissing ? null : onToggle,
+            ),
+            IconButton(
+              tooltip: '编辑',
+              icon: const Icon(Icons.edit_outlined),
+              onPressed: onEdit,
             ),
             IconButton(
               tooltip: '测试连接',

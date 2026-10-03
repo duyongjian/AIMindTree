@@ -97,6 +97,44 @@ class SettingsRepository {
     return unbound;
   }
 
+  /// 编辑 provider：只更新传入的字段。
+  ///
+  /// - `apiKey` 为 null / 空 → **不改密钥**（大多数时候只是改个显示名）；
+  ///   非空则覆盖 SecretStore 里 `api_key_ref` 指向的值（引用名本身不变）。
+  /// - 返回更新后的行；id 不存在返回 null。
+  ///
+  /// ⚠️ 改 `baseUrl` / `apiKey` 后需要**重启 App** 才生效：bootstrap 在启动时
+  /// 已按旧值实例化了 `DifyClient`，内存里的实例不会跟着变。只改显示名无此问题。
+  Future<AiProviderRow?> updateProvider(
+    String id, {
+    String? name,
+    String? baseUrl,
+    String? apiKey,
+  }) async {
+    final row =
+        await (_db.select(_db.aiProviders)
+              ..where((t) => t.id.equals(id))
+              ..limit(1))
+            .getSingleOrNull();
+    if (row == null) return null;
+
+    if (apiKey != null && apiKey.isNotEmpty) {
+      await secretStore.set(row.apiKeyRef, apiKey);
+    }
+    if (name != null || baseUrl != null) {
+      await (_db.update(_db.aiProviders)..where((t) => t.id.equals(id))).write(
+        AiProvidersCompanion(
+          name: name == null ? const Value.absent() : Value(name),
+          baseUrl: baseUrl == null ? const Value.absent() : Value(baseUrl),
+        ),
+      );
+    }
+    return (_db.select(_db.aiProviders)
+          ..where((t) => t.id.equals(id))
+          ..limit(1))
+        .getSingleOrNull();
+  }
+
   // ============ 任务级路由绑定 ============
 
   /// 全部路由行（`ai_task` code → provider）。
