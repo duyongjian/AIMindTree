@@ -4479,6 +4479,22 @@ class $CanvasNodesTable extends CanvasNodes
     ),
     defaultValue: const Constant(false),
   );
+  static const VerificationMeta _pinnedMeta = const VerificationMeta(
+    'pinned',
+  );
+  @override
+  late final GeneratedColumn<bool> pinned = GeneratedColumn<bool>(
+    'pinned',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("pinned" IN (0, 1))',
+    ),
+    defaultValue: const Constant(true),
+  );
+
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -4495,6 +4511,7 @@ class $CanvasNodesTable extends CanvasNodes
     h,
     z,
     collapsed,
+    pinned,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -4580,10 +4597,10 @@ class $CanvasNodesTable extends CanvasNodes
     if (data.containsKey('z')) {
       context.handle(_zMeta, z.isAcceptableOrUnknown(data['z']!, _zMeta));
     }
-    if (data.containsKey('collapsed')) {
+    if (data.containsKey('pinned')) {
       context.handle(
-        _collapsedMeta,
-        collapsed.isAcceptableOrUnknown(data['collapsed']!, _collapsedMeta),
+        _pinnedMeta,
+        pinned.isAcceptableOrUnknown(data['pinned']!, _pinnedMeta),
       );
     }
     return context;
@@ -4651,6 +4668,10 @@ class $CanvasNodesTable extends CanvasNodes
         DriftSqlType.bool,
         data['${effectivePrefix}collapsed'],
       )!,
+      pinned: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}pinned'],
+      )!,
     );
   }
 
@@ -4684,6 +4705,7 @@ class CanvasNodeRow extends DataClass implements Insertable<CanvasNodeRow> {
   final double h;
   final int z;
   final bool collapsed;
+  final bool pinned;
   const CanvasNodeRow({
     required this.id,
     required this.version,
@@ -4699,6 +4721,7 @@ class CanvasNodeRow extends DataClass implements Insertable<CanvasNodeRow> {
     required this.h,
     required this.z,
     required this.collapsed,
+    required this.pinned,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -4719,6 +4742,7 @@ class CanvasNodeRow extends DataClass implements Insertable<CanvasNodeRow> {
     map['h'] = Variable<double>(h);
     map['z'] = Variable<int>(z);
     map['collapsed'] = Variable<bool>(collapsed);
+    map['pinned'] = Variable<bool>(pinned);
     return map;
   }
 
@@ -4740,6 +4764,7 @@ class CanvasNodeRow extends DataClass implements Insertable<CanvasNodeRow> {
       h: Value(h),
       z: Value(z),
       collapsed: Value(collapsed),
+      pinned: Value(pinned),
     );
   }
 
@@ -4763,6 +4788,7 @@ class CanvasNodeRow extends DataClass implements Insertable<CanvasNodeRow> {
       h: serializer.fromJson<double>(json['h']),
       z: serializer.fromJson<int>(json['z']),
       collapsed: serializer.fromJson<bool>(json['collapsed']),
+      pinned: serializer.fromJson<bool>(json['pinned']),
     );
   }
   @override
@@ -4783,6 +4809,7 @@ class CanvasNodeRow extends DataClass implements Insertable<CanvasNodeRow> {
       'h': serializer.toJson<double>(h),
       'z': serializer.toJson<int>(z),
       'collapsed': serializer.toJson<bool>(collapsed),
+      'pinned': serializer.toJson<bool>(pinned),
     };
   }
 
@@ -4801,6 +4828,7 @@ class CanvasNodeRow extends DataClass implements Insertable<CanvasNodeRow> {
     double? h,
     int? z,
     bool? collapsed,
+    bool? pinned,
   }) => CanvasNodeRow(
     id: id ?? this.id,
     version: version ?? this.version,
@@ -4816,6 +4844,7 @@ class CanvasNodeRow extends DataClass implements Insertable<CanvasNodeRow> {
     h: h ?? this.h,
     z: z ?? this.z,
     collapsed: collapsed ?? this.collapsed,
+    pinned: pinned ?? this.pinned,
   );
   CanvasNodeRow copyWithCompanion(CanvasNodesCompanion data) {
     return CanvasNodeRow(
@@ -4835,6 +4864,7 @@ class CanvasNodeRow extends DataClass implements Insertable<CanvasNodeRow> {
       h: data.h.present ? data.h.value : this.h,
       z: data.z.present ? data.z.value : this.z,
       collapsed: data.collapsed.present ? data.collapsed.value : this.collapsed,
+      pinned: data.pinned.present ? data.pinned.value : this.pinned,
     );
   }
 
@@ -4855,6 +4885,7 @@ class CanvasNodeRow extends DataClass implements Insertable<CanvasNodeRow> {
           ..write('h: $h, ')
           ..write('z: $z, ')
           ..write('collapsed: $collapsed')
+          ..write('pinned: $pinned')
           ..write(')'))
         .toString();
   }
@@ -4875,6 +4906,7 @@ class CanvasNodeRow extends DataClass implements Insertable<CanvasNodeRow> {
     h,
     z,
     collapsed,
+    pinned,
   );
   @override
   bool operator ==(Object other) =>
@@ -4893,7 +4925,8 @@ class CanvasNodeRow extends DataClass implements Insertable<CanvasNodeRow> {
           other.w == this.w &&
           other.h == this.h &&
           other.z == this.z &&
-          other.collapsed == this.collapsed);
+          other.collapsed == this.collapsed &&
+          other.pinned == this.pinned);
 }
 
 class CanvasNodesCompanion extends UpdateCompanion<CanvasNodeRow> {
@@ -4911,6 +4944,7 @@ class CanvasNodesCompanion extends UpdateCompanion<CanvasNodeRow> {
   final Value<double> h;
   final Value<int> z;
   final Value<bool> collapsed;
+  final Value<bool> pinned;
   final Value<int> rowid;
   const CanvasNodesCompanion({
     this.id = const Value.absent(),
@@ -4927,6 +4961,7 @@ class CanvasNodesCompanion extends UpdateCompanion<CanvasNodeRow> {
     this.h = const Value.absent(),
     this.z = const Value.absent(),
     this.collapsed = const Value.absent(),
+    this.pinned = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   CanvasNodesCompanion.insert({
@@ -4944,6 +4979,7 @@ class CanvasNodesCompanion extends UpdateCompanion<CanvasNodeRow> {
     this.h = const Value.absent(),
     this.z = const Value.absent(),
     this.collapsed = const Value.absent(),
+    this.pinned = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        updatedAt = Value(updatedAt),
@@ -4966,6 +5002,7 @@ class CanvasNodesCompanion extends UpdateCompanion<CanvasNodeRow> {
     Expression<double>? h,
     Expression<int>? z,
     Expression<bool>? collapsed,
+    Expression<bool>? pinned,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -4983,6 +5020,7 @@ class CanvasNodesCompanion extends UpdateCompanion<CanvasNodeRow> {
       if (h != null) 'h': h,
       if (z != null) 'z': z,
       if (collapsed != null) 'collapsed': collapsed,
+      if (pinned != null) 'pinned': pinned,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -5002,6 +5040,7 @@ class CanvasNodesCompanion extends UpdateCompanion<CanvasNodeRow> {
     Value<double>? h,
     Value<int>? z,
     Value<bool>? collapsed,
+    Value<bool>? pinned,
     Value<int>? rowid,
   }) {
     return CanvasNodesCompanion(
@@ -5019,6 +5058,7 @@ class CanvasNodesCompanion extends UpdateCompanion<CanvasNodeRow> {
       h: h ?? this.h,
       z: z ?? this.z,
       collapsed: collapsed ?? this.collapsed,
+      pinned: pinned ?? this.pinned,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -5068,6 +5108,9 @@ class CanvasNodesCompanion extends UpdateCompanion<CanvasNodeRow> {
     if (collapsed.present) {
       map['collapsed'] = Variable<bool>(collapsed.value);
     }
+    if (pinned.present) {
+      map['pinned'] = Variable<bool>(pinned.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -5091,6 +5134,7 @@ class CanvasNodesCompanion extends UpdateCompanion<CanvasNodeRow> {
           ..write('h: $h, ')
           ..write('z: $z, ')
           ..write('collapsed: $collapsed, ')
+          ..write('pinned: $pinned, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -5716,6 +5760,1206 @@ class CanvasEdgesCompanion extends UpdateCompanion<CanvasEdgeRow> {
           ..write('toNodeId: $toNodeId, ')
           ..write('edgeType: $edgeType, ')
           ..write('prereqEdgeId: $prereqEdgeId, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $KpGroupsTable extends KpGroups
+    with TableInfo<$KpGroupsTable, KpGroupRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $KpGroupsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _versionMeta = const VerificationMeta(
+    'version',
+  );
+  @override
+  late final GeneratedColumn<int> version = GeneratedColumn<int>(
+    'version',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(1),
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _deviceIdMeta = const VerificationMeta(
+    'deviceId',
+  );
+  @override
+  late final GeneratedColumn<String> deviceId = GeneratedColumn<String>(
+    'device_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _deletedAtMeta = const VerificationMeta(
+    'deletedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> deletedAt = GeneratedColumn<DateTime>(
+    'deleted_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _canvasIdMeta = const VerificationMeta(
+    'canvasId',
+  );
+  @override
+  late final GeneratedColumn<String> canvasId = GeneratedColumn<String>(
+    'canvas_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _nameMeta = const VerificationMeta('name');
+  @override
+  late final GeneratedColumn<String> name = GeneratedColumn<String>(
+    'name',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(''),
+  );
+  static const VerificationMeta _orderIndexMeta = const VerificationMeta(
+    'orderIndex',
+  );
+  @override
+  late final GeneratedColumn<int> orderIndex = GeneratedColumn<int>(
+    'order_index',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _foundationalLevelMeta = const VerificationMeta(
+    'foundationalLevel',
+  );
+  @override
+  late final GeneratedColumn<int> foundationalLevel = GeneratedColumn<int>(
+    'foundational_level',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _membersJsonMeta = const VerificationMeta(
+    'membersJson',
+  );
+  @override
+  late final GeneratedColumn<String> membersJson = GeneratedColumn<String>(
+    'members_json',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('[]'),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    version,
+    updatedAt,
+    deviceId,
+    deletedAt,
+    canvasId,
+    name,
+    orderIndex,
+    foundationalLevel,
+    membersJson,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'kp_groups';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<KpGroupRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('version')) {
+      context.handle(
+        _versionMeta,
+        version.isAcceptableOrUnknown(data['version']!, _versionMeta),
+      );
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    if (data.containsKey('device_id')) {
+      context.handle(
+        _deviceIdMeta,
+        deviceId.isAcceptableOrUnknown(data['device_id']!, _deviceIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_deviceIdMeta);
+    }
+    if (data.containsKey('deleted_at')) {
+      context.handle(
+        _deletedAtMeta,
+        deletedAt.isAcceptableOrUnknown(data['deleted_at']!, _deletedAtMeta),
+      );
+    }
+    if (data.containsKey('canvas_id')) {
+      context.handle(
+        _canvasIdMeta,
+        canvasId.isAcceptableOrUnknown(data['canvas_id']!, _canvasIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_canvasIdMeta);
+    }
+    if (data.containsKey('name')) {
+      context.handle(
+        _nameMeta,
+        name.isAcceptableOrUnknown(data['name']!, _nameMeta),
+      );
+    }
+    if (data.containsKey('order_index')) {
+      context.handle(
+        _orderIndexMeta,
+        orderIndex.isAcceptableOrUnknown(data['order_index']!, _orderIndexMeta),
+      );
+    }
+    if (data.containsKey('foundational_level')) {
+      context.handle(
+        _foundationalLevelMeta,
+        foundationalLevel.isAcceptableOrUnknown(
+          data['foundational_level']!,
+          _foundationalLevelMeta,
+        ),
+      );
+    }
+    if (data.containsKey('members_json')) {
+      context.handle(
+        _membersJsonMeta,
+        membersJson.isAcceptableOrUnknown(
+          data['members_json']!,
+          _membersJsonMeta,
+        ),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  KpGroupRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return KpGroupRow(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      version: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}version'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at'],
+      )!,
+      deviceId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}device_id'],
+      )!,
+      deletedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}deleted_at'],
+      ),
+      canvasId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}canvas_id'],
+      )!,
+      name: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}name'],
+      )!,
+      orderIndex: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}order_index'],
+      )!,
+      foundationalLevel: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}foundational_level'],
+      )!,
+      membersJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}members_json'],
+      )!,
+    );
+  }
+
+  @override
+  $KpGroupsTable createAlias(String alias) {
+    return $KpGroupsTable(attachedDatabase, alias);
+  }
+}
+
+class KpGroupRow extends DataClass implements Insertable<KpGroupRow> {
+  /// ULID 主键。
+  final String id;
+
+  /// 本地递增版本号，服务端接管后用于 LWW 冲突判定。
+  final int version;
+  final DateTime updatedAt;
+
+  /// 产生该次变更的设备，用于同步自回声过滤。
+  final String deviceId;
+
+  /// tombstone 软删除：非空即删除，删除靠它传播，不物理删（§11）。
+  final DateTime? deletedAt;
+
+  /// 所属知识树（canvases.id）。
+  final String canvasId;
+  final String name;
+
+  /// 组序（第几组），从 0 开始；越小越基础（越先掌握）。
+  final int orderIndex;
+
+  /// 组级基础度（0 = 最基础）。成员未单独标注时用它。
+  final int foundationalLevel;
+
+  /// 成员 JSON：`[{"kpId":"...","level":1}]`；`level` 是点级基础度覆盖（缺省用组级）。
+  final String membersJson;
+  const KpGroupRow({
+    required this.id,
+    required this.version,
+    required this.updatedAt,
+    required this.deviceId,
+    this.deletedAt,
+    required this.canvasId,
+    required this.name,
+    required this.orderIndex,
+    required this.foundationalLevel,
+    required this.membersJson,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['version'] = Variable<int>(version);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    map['device_id'] = Variable<String>(deviceId);
+    if (!nullToAbsent || deletedAt != null) {
+      map['deleted_at'] = Variable<DateTime>(deletedAt);
+    }
+    map['canvas_id'] = Variable<String>(canvasId);
+    map['name'] = Variable<String>(name);
+    map['order_index'] = Variable<int>(orderIndex);
+    map['foundational_level'] = Variable<int>(foundationalLevel);
+    map['members_json'] = Variable<String>(membersJson);
+    return map;
+  }
+
+  KpGroupsCompanion toCompanion(bool nullToAbsent) {
+    return KpGroupsCompanion(
+      id: Value(id),
+      version: Value(version),
+      updatedAt: Value(updatedAt),
+      deviceId: Value(deviceId),
+      deletedAt: deletedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(deletedAt),
+      canvasId: Value(canvasId),
+      name: Value(name),
+      orderIndex: Value(orderIndex),
+      foundationalLevel: Value(foundationalLevel),
+      membersJson: Value(membersJson),
+    );
+  }
+
+  factory KpGroupRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return KpGroupRow(
+      id: serializer.fromJson<String>(json['id']),
+      version: serializer.fromJson<int>(json['version']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+      deviceId: serializer.fromJson<String>(json['deviceId']),
+      deletedAt: serializer.fromJson<DateTime?>(json['deletedAt']),
+      canvasId: serializer.fromJson<String>(json['canvasId']),
+      name: serializer.fromJson<String>(json['name']),
+      orderIndex: serializer.fromJson<int>(json['orderIndex']),
+      foundationalLevel: serializer.fromJson<int>(json['foundationalLevel']),
+      membersJson: serializer.fromJson<String>(json['membersJson']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'version': serializer.toJson<int>(version),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+      'deviceId': serializer.toJson<String>(deviceId),
+      'deletedAt': serializer.toJson<DateTime?>(deletedAt),
+      'canvasId': serializer.toJson<String>(canvasId),
+      'name': serializer.toJson<String>(name),
+      'orderIndex': serializer.toJson<int>(orderIndex),
+      'foundationalLevel': serializer.toJson<int>(foundationalLevel),
+      'membersJson': serializer.toJson<String>(membersJson),
+    };
+  }
+
+  KpGroupRow copyWith({
+    String? id,
+    int? version,
+    DateTime? updatedAt,
+    String? deviceId,
+    Value<DateTime?> deletedAt = const Value.absent(),
+    String? canvasId,
+    String? name,
+    int? orderIndex,
+    int? foundationalLevel,
+    String? membersJson,
+  }) => KpGroupRow(
+    id: id ?? this.id,
+    version: version ?? this.version,
+    updatedAt: updatedAt ?? this.updatedAt,
+    deviceId: deviceId ?? this.deviceId,
+    deletedAt: deletedAt.present ? deletedAt.value : this.deletedAt,
+    canvasId: canvasId ?? this.canvasId,
+    name: name ?? this.name,
+    orderIndex: orderIndex ?? this.orderIndex,
+    foundationalLevel: foundationalLevel ?? this.foundationalLevel,
+    membersJson: membersJson ?? this.membersJson,
+  );
+  KpGroupRow copyWithCompanion(KpGroupsCompanion data) {
+    return KpGroupRow(
+      id: data.id.present ? data.id.value : this.id,
+      version: data.version.present ? data.version.value : this.version,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      deviceId: data.deviceId.present ? data.deviceId.value : this.deviceId,
+      deletedAt: data.deletedAt.present ? data.deletedAt.value : this.deletedAt,
+      canvasId: data.canvasId.present ? data.canvasId.value : this.canvasId,
+      name: data.name.present ? data.name.value : this.name,
+      orderIndex: data.orderIndex.present
+          ? data.orderIndex.value
+          : this.orderIndex,
+      foundationalLevel: data.foundationalLevel.present
+          ? data.foundationalLevel.value
+          : this.foundationalLevel,
+      membersJson: data.membersJson.present
+          ? data.membersJson.value
+          : this.membersJson,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('KpGroupRow(')
+          ..write('id: $id, ')
+          ..write('version: $version, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('deviceId: $deviceId, ')
+          ..write('deletedAt: $deletedAt, ')
+          ..write('canvasId: $canvasId, ')
+          ..write('name: $name, ')
+          ..write('orderIndex: $orderIndex, ')
+          ..write('foundationalLevel: $foundationalLevel, ')
+          ..write('membersJson: $membersJson')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    version,
+    updatedAt,
+    deviceId,
+    deletedAt,
+    canvasId,
+    name,
+    orderIndex,
+    foundationalLevel,
+    membersJson,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is KpGroupRow &&
+          other.id == this.id &&
+          other.version == this.version &&
+          other.updatedAt == this.updatedAt &&
+          other.deviceId == this.deviceId &&
+          other.deletedAt == this.deletedAt &&
+          other.canvasId == this.canvasId &&
+          other.name == this.name &&
+          other.orderIndex == this.orderIndex &&
+          other.foundationalLevel == this.foundationalLevel &&
+          other.membersJson == this.membersJson);
+}
+
+class KpGroupsCompanion extends UpdateCompanion<KpGroupRow> {
+  final Value<String> id;
+  final Value<int> version;
+  final Value<DateTime> updatedAt;
+  final Value<String> deviceId;
+  final Value<DateTime?> deletedAt;
+  final Value<String> canvasId;
+  final Value<String> name;
+  final Value<int> orderIndex;
+  final Value<int> foundationalLevel;
+  final Value<String> membersJson;
+  final Value<int> rowid;
+  const KpGroupsCompanion({
+    this.id = const Value.absent(),
+    this.version = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.deviceId = const Value.absent(),
+    this.deletedAt = const Value.absent(),
+    this.canvasId = const Value.absent(),
+    this.name = const Value.absent(),
+    this.orderIndex = const Value.absent(),
+    this.foundationalLevel = const Value.absent(),
+    this.membersJson = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  KpGroupsCompanion.insert({
+    required String id,
+    this.version = const Value.absent(),
+    required DateTime updatedAt,
+    required String deviceId,
+    this.deletedAt = const Value.absent(),
+    required String canvasId,
+    this.name = const Value.absent(),
+    this.orderIndex = const Value.absent(),
+    this.foundationalLevel = const Value.absent(),
+    this.membersJson = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       updatedAt = Value(updatedAt),
+       deviceId = Value(deviceId),
+       canvasId = Value(canvasId);
+  static Insertable<KpGroupRow> custom({
+    Expression<String>? id,
+    Expression<int>? version,
+    Expression<DateTime>? updatedAt,
+    Expression<String>? deviceId,
+    Expression<DateTime>? deletedAt,
+    Expression<String>? canvasId,
+    Expression<String>? name,
+    Expression<int>? orderIndex,
+    Expression<int>? foundationalLevel,
+    Expression<String>? membersJson,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (version != null) 'version': version,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (deviceId != null) 'device_id': deviceId,
+      if (deletedAt != null) 'deleted_at': deletedAt,
+      if (canvasId != null) 'canvas_id': canvasId,
+      if (name != null) 'name': name,
+      if (orderIndex != null) 'order_index': orderIndex,
+      if (foundationalLevel != null) 'foundational_level': foundationalLevel,
+      if (membersJson != null) 'members_json': membersJson,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  KpGroupsCompanion copyWith({
+    Value<String>? id,
+    Value<int>? version,
+    Value<DateTime>? updatedAt,
+    Value<String>? deviceId,
+    Value<DateTime?>? deletedAt,
+    Value<String>? canvasId,
+    Value<String>? name,
+    Value<int>? orderIndex,
+    Value<int>? foundationalLevel,
+    Value<String>? membersJson,
+    Value<int>? rowid,
+  }) {
+    return KpGroupsCompanion(
+      id: id ?? this.id,
+      version: version ?? this.version,
+      updatedAt: updatedAt ?? this.updatedAt,
+      deviceId: deviceId ?? this.deviceId,
+      deletedAt: deletedAt ?? this.deletedAt,
+      canvasId: canvasId ?? this.canvasId,
+      name: name ?? this.name,
+      orderIndex: orderIndex ?? this.orderIndex,
+      foundationalLevel: foundationalLevel ?? this.foundationalLevel,
+      membersJson: membersJson ?? this.membersJson,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (version.present) {
+      map['version'] = Variable<int>(version.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (deviceId.present) {
+      map['device_id'] = Variable<String>(deviceId.value);
+    }
+    if (deletedAt.present) {
+      map['deleted_at'] = Variable<DateTime>(deletedAt.value);
+    }
+    if (canvasId.present) {
+      map['canvas_id'] = Variable<String>(canvasId.value);
+    }
+    if (name.present) {
+      map['name'] = Variable<String>(name.value);
+    }
+    if (orderIndex.present) {
+      map['order_index'] = Variable<int>(orderIndex.value);
+    }
+    if (foundationalLevel.present) {
+      map['foundational_level'] = Variable<int>(foundationalLevel.value);
+    }
+    if (membersJson.present) {
+      map['members_json'] = Variable<String>(membersJson.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('KpGroupsCompanion(')
+          ..write('id: $id, ')
+          ..write('version: $version, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('deviceId: $deviceId, ')
+          ..write('deletedAt: $deletedAt, ')
+          ..write('canvasId: $canvasId, ')
+          ..write('name: $name, ')
+          ..write('orderIndex: $orderIndex, ')
+          ..write('foundationalLevel: $foundationalLevel, ')
+          ..write('membersJson: $membersJson, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $HomeworksTable extends Homeworks
+    with TableInfo<$HomeworksTable, HomeworkRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $HomeworksTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta(
+    'id',
+  );
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _versionMeta = const VerificationMeta(
+    'version',
+  );
+  @override
+  late final GeneratedColumn<int> version = GeneratedColumn<int>(
+    'version',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(1),
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _deviceIdMeta = const VerificationMeta(
+    'deviceId',
+  );
+  @override
+  late final GeneratedColumn<String> deviceId = GeneratedColumn<String>(
+    'device_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _deletedAtMeta = const VerificationMeta(
+    'deletedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> deletedAt = GeneratedColumn<DateTime>(
+    'deleted_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _canvasIdMeta = const VerificationMeta(
+    'canvasId',
+  );
+  @override
+  late final GeneratedColumn<String> canvasId = GeneratedColumn<String>(
+    'canvas_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _titleMeta = const VerificationMeta(
+    'title',
+  );
+  @override
+  late final GeneratedColumn<String> title = GeneratedColumn<String>(
+    'title',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(''),
+  );
+  static const VerificationMeta _kpIdsJsonMeta = const VerificationMeta(
+    'kpIdsJson',
+  );
+  @override
+  late final GeneratedColumn<String> kpIdsJson = GeneratedColumn<String>(
+    'kp_ids_json',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('[]'),
+  );
+  static const VerificationMeta _itemsJsonMeta = const VerificationMeta(
+    'itemsJson',
+  );
+  @override
+  late final GeneratedColumn<String> itemsJson = GeneratedColumn<String>(
+    'items_json',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('[]'),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    version,
+    updatedAt,
+    deviceId,
+    deletedAt,
+    canvasId,
+    title,
+    kpIdsJson,
+    itemsJson,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'homeworks';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<HomeworkRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(
+        _idMeta,
+        id.isAcceptableOrUnknown(data['id']!, _idMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('version')) {
+      context.handle(
+        _versionMeta,
+        version.isAcceptableOrUnknown(data['version']!, _versionMeta),
+      );
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    if (data.containsKey('device_id')) {
+      context.handle(
+        _deviceIdMeta,
+        deviceId.isAcceptableOrUnknown(data['device_id']!, _deviceIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_deviceIdMeta);
+    }
+    if (data.containsKey('deleted_at')) {
+      context.handle(
+        _deletedAtMeta,
+        deletedAt.isAcceptableOrUnknown(data['deleted_at']!, _deletedAtMeta),
+      );
+    }
+    if (data.containsKey('canvas_id')) {
+      context.handle(
+        _canvasIdMeta,
+        canvasId.isAcceptableOrUnknown(data['canvas_id']!, _canvasIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_canvasIdMeta);
+    }
+    if (data.containsKey('title')) {
+      context.handle(
+        _titleMeta,
+        title.isAcceptableOrUnknown(data['title']!, _titleMeta),
+      );
+    }
+    if (data.containsKey('kp_ids_json')) {
+      context.handle(
+        _kpIdsJsonMeta,
+        kpIdsJson.isAcceptableOrUnknown(data['kp_ids_json']!, _kpIdsJsonMeta),
+      );
+    }
+    if (data.containsKey('items_json')) {
+      context.handle(
+        _itemsJsonMeta,
+        itemsJson.isAcceptableOrUnknown(data['items_json']!, _itemsJsonMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  HomeworkRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return HomeworkRow(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      version: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}version'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at'],
+      )!,
+      deviceId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}device_id'],
+      )!,
+      deletedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}deleted_at'],
+      ),
+      canvasId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}canvas_id'],
+      )!,
+      title: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}title'],
+      )!,
+      kpIdsJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}kp_ids_json'],
+      )!,
+      itemsJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}items_json'],
+      )!,
+    );
+  }
+
+  @override
+  $HomeworksTable createAlias(String alias) {
+    return $HomeworksTable(attachedDatabase, alias);
+  }
+}
+
+class HomeworkRow extends DataClass implements Insertable<HomeworkRow> {
+  /// ULID 主键。
+  final String id;
+
+  /// 本地递增版本号，服务端接管后用于 LWW 冲突判定。
+  final int version;
+
+  final DateTime updatedAt;
+
+  /// 产生该次变更的设备，用于同步自回声过滤。
+  final String deviceId;
+
+  /// tombstone 软删除：非空即删除，删除靠它传播，不物理删（§11）。
+  final DateTime? deletedAt;
+
+  /// 所属知识树（canvases.id）。
+  final String canvasId;
+
+  /// 作业标题。
+  final String title;
+
+  /// 布置时选中的薄弱点 id（快照）。
+  final String kpIdsJson;
+
+  /// 题目 JSON。
+  final String itemsJson;
+
+  const HomeworkRow({
+    required this.id,
+    required this.version,
+    required this.updatedAt,
+    required this.deviceId,
+    this.deletedAt,
+    required this.canvasId,
+    required this.title,
+    required this.kpIdsJson,
+    required this.itemsJson,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['version'] = Variable<int>(version);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    map['device_id'] = Variable<String>(deviceId);
+    if (!nullToAbsent || deletedAt != null) {
+      map['deleted_at'] = Variable<DateTime>(deletedAt);
+    }
+    map['canvas_id'] = Variable<String>(canvasId);
+    map['title'] = Variable<String>(title);
+    map['kp_ids_json'] = Variable<String>(kpIdsJson);
+    map['items_json'] = Variable<String>(itemsJson);
+    return map;
+  }
+
+  HomeworksCompanion toCompanion(bool nullToAbsent) {
+    return HomeworksCompanion(
+      id: Value(id),
+      version: Value(version),
+      updatedAt: Value(updatedAt),
+      deviceId: Value(deviceId),
+      deletedAt: deletedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(deletedAt),
+      canvasId: Value(canvasId),
+      title: Value(title),
+      kpIdsJson: Value(kpIdsJson),
+      itemsJson: Value(itemsJson),
+    );
+  }
+
+  factory HomeworkRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return HomeworkRow(
+      id: serializer.fromJson<String>(json['id']),
+      version: serializer.fromJson<int>(json['version']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+      deviceId: serializer.fromJson<String>(json['deviceId']),
+      deletedAt: serializer.fromJson<DateTime?>(json['deletedAt']),
+      canvasId: serializer.fromJson<String>(json['canvasId']),
+      title: serializer.fromJson<String>(json['title']),
+      kpIdsJson: serializer.fromJson<String>(json['kpIdsJson']),
+      itemsJson: serializer.fromJson<String>(json['itemsJson']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'version': serializer.toJson<int>(version),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+      'deviceId': serializer.toJson<String>(deviceId),
+      'deletedAt': serializer.toJson<DateTime?>(deletedAt),
+      'canvasId': serializer.toJson<String>(canvasId),
+      'title': serializer.toJson<String>(title),
+      'kpIdsJson': serializer.toJson<String>(kpIdsJson),
+      'itemsJson': serializer.toJson<String>(itemsJson),
+    };
+  }
+
+  HomeworkRow copyWith({
+    String? id,
+    int? version,
+    DateTime? updatedAt,
+    String? deviceId,
+    Value<DateTime?> deletedAt = const Value.absent(),
+    String? canvasId,
+    String? title,
+    String? kpIdsJson,
+    String? itemsJson,
+  }) => HomeworkRow(
+    id: id ?? this.id,
+    version: version ?? this.version,
+    updatedAt: updatedAt ?? this.updatedAt,
+    deviceId: deviceId ?? this.deviceId,
+    deletedAt: deletedAt.present ? deletedAt.value : this.deletedAt,
+    canvasId: canvasId ?? this.canvasId,
+    title: title ?? this.title,
+    kpIdsJson: kpIdsJson ?? this.kpIdsJson,
+    itemsJson: itemsJson ?? this.itemsJson,
+  );
+  HomeworkRow copyWithCompanion(HomeworksCompanion data) {
+    return HomeworkRow(
+      id: data.id.present ? data.id.value : this.id,
+      version: data.version.present ? data.version.value : this.version,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      deviceId: data.deviceId.present ? data.deviceId.value : this.deviceId,
+      deletedAt: data.deletedAt.present ? data.deletedAt.value : this.deletedAt,
+      canvasId: data.canvasId.present ? data.canvasId.value : this.canvasId,
+      title: data.title.present ? data.title.value : this.title,
+      kpIdsJson: data.kpIdsJson.present ? data.kpIdsJson.value : this.kpIdsJson,
+      itemsJson: data.itemsJson.present ? data.itemsJson.value : this.itemsJson,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('HomeworkRow(')
+          ..write('id: $id, ')
+          ..write('version: $version, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('deviceId: $deviceId, ')
+          ..write('deletedAt: $deletedAt, ')
+          ..write('canvasId: $canvasId, ')
+          ..write('title: $title, ')
+          ..write('kpIdsJson: $kpIdsJson, ')
+          ..write('itemsJson: $itemsJson')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    version,
+    updatedAt,
+    deviceId,
+    deletedAt,
+    canvasId,
+    title,
+    kpIdsJson,
+    itemsJson,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is HomeworkRow &&
+          other.id == this.id &&
+          other.version == this.version &&
+          other.updatedAt == this.updatedAt &&
+          other.deviceId == this.deviceId &&
+          other.deletedAt == this.deletedAt &&
+          other.canvasId == this.canvasId &&
+          other.title == this.title &&
+          other.kpIdsJson == this.kpIdsJson &&
+          other.itemsJson == this.itemsJson);
+}
+
+class HomeworksCompanion extends UpdateCompanion<HomeworkRow> {
+  final Value<String> id;
+  final Value<int> version;
+  final Value<DateTime> updatedAt;
+  final Value<String> deviceId;
+  final Value<DateTime?> deletedAt;
+  final Value<String> canvasId;
+  final Value<String> title;
+  final Value<String> kpIdsJson;
+  final Value<String> itemsJson;
+  final Value<int> rowid;
+  const HomeworksCompanion({
+    this.id = const Value.absent(),
+    this.version = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.deviceId = const Value.absent(),
+    this.deletedAt = const Value.absent(),
+    this.canvasId = const Value.absent(),
+    this.title = const Value.absent(),
+    this.kpIdsJson = const Value.absent(),
+    this.itemsJson = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  HomeworksCompanion.insert({
+    required String id,
+    this.version = const Value.absent(),
+    required DateTime updatedAt,
+    required String deviceId,
+    this.deletedAt = const Value.absent(),
+    required String canvasId,
+    this.title = const Value.absent(),
+    this.kpIdsJson = const Value.absent(),
+    this.itemsJson = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) :
+       id = Value(id),
+       updatedAt = Value(updatedAt),
+       deviceId = Value(deviceId),
+       canvasId = Value(canvasId);
+  static Insertable<HomeworkRow> custom({
+    Expression<String>? id,
+    Expression<int>? version,
+    Expression<DateTime>? updatedAt,
+    Expression<String>? deviceId,
+    Expression<DateTime>? deletedAt,
+    Expression<String>? canvasId,
+    Expression<String>? title,
+    Expression<String>? kpIdsJson,
+    Expression<String>? itemsJson,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (version != null) 'version': version,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (deviceId != null) 'device_id': deviceId,
+      if (deletedAt != null) 'deleted_at': deletedAt,
+      if (canvasId != null) 'canvas_id': canvasId,
+      if (title != null) 'title': title,
+      if (kpIdsJson != null) 'kp_ids_json': kpIdsJson,
+      if (itemsJson != null) 'items_json': itemsJson,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  HomeworksCompanion copyWith({
+    Value<String>? id,
+    Value<int>? version,
+    Value<DateTime>? updatedAt,
+    Value<String>? deviceId,
+    Value<DateTime?>? deletedAt,
+    Value<String>? canvasId,
+    Value<String>? title,
+    Value<String>? kpIdsJson,
+    Value<String>? itemsJson,
+    Value<int>? rowid,
+  }) {
+    return HomeworksCompanion(
+      id: id ?? this.id,
+      version: version ?? this.version,
+      updatedAt: updatedAt ?? this.updatedAt,
+      deviceId: deviceId ?? this.deviceId,
+      deletedAt: deletedAt ?? this.deletedAt,
+      canvasId: canvasId ?? this.canvasId,
+      title: title ?? this.title,
+      kpIdsJson: kpIdsJson ?? this.kpIdsJson,
+      itemsJson: itemsJson ?? this.itemsJson,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (version.present) {
+      map['version'] = Variable<int>(version.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (deviceId.present) {
+      map['device_id'] = Variable<String>(deviceId.value);
+    }
+    if (deletedAt.present) {
+      map['deleted_at'] = Variable<DateTime>(deletedAt.value);
+    }
+    if (canvasId.present) {
+      map['canvas_id'] = Variable<String>(canvasId.value);
+    }
+    if (title.present) {
+      map['title'] = Variable<String>(title.value);
+    }
+    if (kpIdsJson.present) {
+      map['kp_ids_json'] = Variable<String>(kpIdsJson.value);
+    }
+    if (itemsJson.present) {
+      map['items_json'] = Variable<String>(itemsJson.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('HomeworksCompanion(')
+          ..write('id: $id, ')
+          ..write('version: $version, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('deviceId: $deviceId, ')
+          ..write('deletedAt: $deletedAt, ')
+          ..write('canvasId: $canvasId, ')
+          ..write('title: $title, ')
+          ..write('kpIdsJson: $kpIdsJson, ')
+          ..write('itemsJson: $itemsJson, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -8656,6 +9900,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $CanvasesTable canvases = $CanvasesTable(this);
   late final $CanvasNodesTable canvasNodes = $CanvasNodesTable(this);
   late final $CanvasEdgesTable canvasEdges = $CanvasEdgesTable(this);
+  late final $KpGroupsTable kpGroups = $KpGroupsTable(this);
+  late final $HomeworksTable homeworks = $HomeworksTable(this);
   late final $AiSessionsTable aiSessions = $AiSessionsTable(this);
   late final $AiMessagesTable aiMessages = $AiMessagesTable(this);
   late final $AiProvidersTable aiProviders = $AiProvidersTable(this);
@@ -8678,6 +9924,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     canvases,
     canvasNodes,
     canvasEdges,
+    kpGroups,
+    homeworks,
     aiSessions,
     aiMessages,
     aiProviders,
@@ -10853,6 +12101,7 @@ typedef $$CanvasNodesTableCreateCompanionBuilder =
       Value<double> h,
       Value<int> z,
       Value<bool> collapsed,
+      Value<bool> pinned,
       Value<int> rowid,
     });
 typedef $$CanvasNodesTableUpdateCompanionBuilder =
@@ -10871,6 +12120,7 @@ typedef $$CanvasNodesTableUpdateCompanionBuilder =
       Value<double> h,
       Value<int> z,
       Value<bool> collapsed,
+      Value<bool> pinned,
       Value<int> rowid,
     });
 
@@ -11133,6 +12383,7 @@ class $$CanvasNodesTableTableManager
                 Value<double> h = const Value.absent(),
                 Value<int> z = const Value.absent(),
                 Value<bool> collapsed = const Value.absent(),
+                Value<bool> pinned = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => CanvasNodesCompanion(
                 id: id,
@@ -11149,6 +12400,7 @@ class $$CanvasNodesTableTableManager
                 h: h,
                 z: z,
                 collapsed: collapsed,
+                pinned: pinned,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -11167,6 +12419,7 @@ class $$CanvasNodesTableTableManager
                 Value<double> h = const Value.absent(),
                 Value<int> z = const Value.absent(),
                 Value<bool> collapsed = const Value.absent(),
+                Value<bool> pinned = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => CanvasNodesCompanion.insert(
                 id: id,
@@ -11183,6 +12436,7 @@ class $$CanvasNodesTableTableManager
                 h: h,
                 z: z,
                 collapsed: collapsed,
+                pinned: pinned,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
@@ -11525,6 +12779,311 @@ typedef $$CanvasEdgesTableProcessedTableManager =
         BaseReferences<_$AppDatabase, $CanvasEdgesTable, CanvasEdgeRow>,
       ),
       CanvasEdgeRow,
+      PrefetchHooks Function()
+    >;
+typedef $$KpGroupsTableCreateCompanionBuilder = KpGroupsCompanion Function({
+  required String id,
+  Value<int> version,
+  required DateTime updatedAt,
+  required String deviceId,
+  Value<DateTime?> deletedAt,
+  required String canvasId,
+  Value<String> name,
+  Value<int> orderIndex,
+  Value<int> foundationalLevel,
+  Value<String> membersJson,
+  Value<int> rowid,
+});
+typedef $$KpGroupsTableUpdateCompanionBuilder = KpGroupsCompanion Function({
+  Value<String> id,
+  Value<int> version,
+  Value<DateTime> updatedAt,
+  Value<String> deviceId,
+  Value<DateTime?> deletedAt,
+  Value<String> canvasId,
+  Value<String> name,
+  Value<int> orderIndex,
+  Value<int> foundationalLevel,
+  Value<String> membersJson,
+  Value<int> rowid,
+});
+
+class $$KpGroupsTableFilterComposer
+    extends Composer<_$AppDatabase, $KpGroupsTable> {
+  $$KpGroupsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get version => $composableBuilder(
+    column: $table.version,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get deviceId => $composableBuilder(
+    column: $table.deviceId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get deletedAt => $composableBuilder(
+    column: $table.deletedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get canvasId => $composableBuilder(
+    column: $table.canvasId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get orderIndex => $composableBuilder(
+    column: $table.orderIndex,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get foundationalLevel => $composableBuilder(
+    column: $table.foundationalLevel,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get membersJson => $composableBuilder(
+    column: $table.membersJson,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$KpGroupsTableOrderingComposer
+    extends Composer<_$AppDatabase, $KpGroupsTable> {
+  $$KpGroupsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get version => $composableBuilder(
+    column: $table.version,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get deviceId => $composableBuilder(
+    column: $table.deviceId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get deletedAt => $composableBuilder(
+    column: $table.deletedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get canvasId => $composableBuilder(
+    column: $table.canvasId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get orderIndex => $composableBuilder(
+    column: $table.orderIndex,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get foundationalLevel => $composableBuilder(
+    column: $table.foundationalLevel,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get membersJson => $composableBuilder(
+    column: $table.membersJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$KpGroupsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $KpGroupsTable> {
+  $$KpGroupsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<int> get version =>
+      $composableBuilder(column: $table.version, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get deviceId =>
+      $composableBuilder(column: $table.deviceId, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get deletedAt =>
+      $composableBuilder(column: $table.deletedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get canvasId =>
+      $composableBuilder(column: $table.canvasId, builder: (column) => column);
+
+  GeneratedColumn<String> get name =>
+      $composableBuilder(column: $table.name, builder: (column) => column);
+
+  GeneratedColumn<int> get orderIndex => $composableBuilder(
+    column: $table.orderIndex,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get foundationalLevel => $composableBuilder(
+    column: $table.foundationalLevel,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get membersJson => $composableBuilder(
+    column: $table.membersJson,
+    builder: (column) => column,
+  );
+}
+
+class $$KpGroupsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $KpGroupsTable,
+          KpGroupRow,
+          $$KpGroupsTableFilterComposer,
+          $$KpGroupsTableOrderingComposer,
+          $$KpGroupsTableAnnotationComposer,
+          $$KpGroupsTableCreateCompanionBuilder,
+          $$KpGroupsTableUpdateCompanionBuilder,
+          (
+            KpGroupRow,
+            BaseReferences<_$AppDatabase, $KpGroupsTable, KpGroupRow>,
+          ),
+          KpGroupRow,
+          PrefetchHooks Function()
+        > {
+  $$KpGroupsTableTableManager(_$AppDatabase db, $KpGroupsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$KpGroupsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$KpGroupsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$KpGroupsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<int> version = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<String> deviceId = const Value.absent(),
+                Value<DateTime?> deletedAt = const Value.absent(),
+                Value<String> canvasId = const Value.absent(),
+                Value<String> name = const Value.absent(),
+                Value<int> orderIndex = const Value.absent(),
+                Value<int> foundationalLevel = const Value.absent(),
+                Value<String> membersJson = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => KpGroupsCompanion(
+                id: id,
+                version: version,
+                updatedAt: updatedAt,
+                deviceId: deviceId,
+                deletedAt: deletedAt,
+                canvasId: canvasId,
+                name: name,
+                orderIndex: orderIndex,
+                foundationalLevel: foundationalLevel,
+                membersJson: membersJson,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                Value<int> version = const Value.absent(),
+                required DateTime updatedAt,
+                required String deviceId,
+                Value<DateTime?> deletedAt = const Value.absent(),
+                required String canvasId,
+                Value<String> name = const Value.absent(),
+                Value<int> orderIndex = const Value.absent(),
+                Value<int> foundationalLevel = const Value.absent(),
+                Value<String> membersJson = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => KpGroupsCompanion.insert(
+                id: id,
+                version: version,
+                updatedAt: updatedAt,
+                deviceId: deviceId,
+                deletedAt: deletedAt,
+                canvasId: canvasId,
+                name: name,
+                orderIndex: orderIndex,
+                foundationalLevel: foundationalLevel,
+                membersJson: membersJson,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$KpGroupsTable, KpGroupRow>(table),
+                  BaseReferences<_$AppDatabase, $KpGroupsTable, KpGroupRow>(
+                    db,
+                    table,
+                    e,
+                  ),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$KpGroupsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $KpGroupsTable,
+      KpGroupRow,
+      $$KpGroupsTableFilterComposer,
+      $$KpGroupsTableOrderingComposer,
+      $$KpGroupsTableAnnotationComposer,
+      $$KpGroupsTableCreateCompanionBuilder,
+      $$KpGroupsTableUpdateCompanionBuilder,
+      (KpGroupRow, BaseReferences<_$AppDatabase, $KpGroupsTable, KpGroupRow>),
+      KpGroupRow,
       PrefetchHooks Function()
     >;
 typedef $$AiSessionsTableCreateCompanionBuilder = AiSessionsCompanion Function({
@@ -13018,6 +14577,8 @@ class $AppDatabaseManager {
       $$CanvasNodesTableTableManager(_db, _db.canvasNodes);
   $$CanvasEdgesTableTableManager get canvasEdges =>
       $$CanvasEdgesTableTableManager(_db, _db.canvasEdges);
+  $$KpGroupsTableTableManager get kpGroups =>
+      $$KpGroupsTableTableManager(_db, _db.kpGroups);
   $$AiSessionsTableTableManager get aiSessions =>
       $$AiSessionsTableTableManager(_db, _db.aiSessions);
   $$AiMessagesTableTableManager get aiMessages =>

@@ -15,15 +15,20 @@ import 'package:flutter/material.dart';
 import '../../ai/auto_graph_service.dart';
 import '../../ai/extraction_service.dart';
 import '../../ai/prereq_depth.dart';
+import '../../canvas/layout_autoplace.dart';
+import '../../canvas/render/layout_engine.dart';
 import '../../canvas/render/tree_canvas.dart';
 import '../../core/id.dart';
 import '../../core/result.dart';
 import '../../data/db/drift_database.dart';
+import '../../data/models/homework.dart';
 import '../../data/models/knowledge_point.dart';
 import '../../data/models/knowledge_tree.dart';
 import '../../data/models/suggested_prerequisite.dart';
+import '../../data/repositories/homework_repository.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
+import '../../features/homework/homework_page.dart';
 
 class CanvasPage extends StatefulWidget {
   const CanvasPage({
@@ -52,6 +57,16 @@ class CanvasPageState extends State<CanvasPage> {
 
   /// 当前在画布上点选的节点（T4 深度补前置的入口）。
   KnowledgePoint? _selectedPoint;
+
+  /// 作业模式：开启后可在画布上框选薄弱点，再「布置作业」。
+  bool _homeworkMode = false;
+
+  /// 作业模式下已框选的薄弱点 id。
+  Set<String> _selectedForHomework = <String>{};
+
+  /// 作业仓储（落库 + 历史）。
+  late final HomeworkRepository _homeworks =
+      HomeworkRepository(widget.db, deviceId: DeviceId.orEmpty);
 
   /// 「重新布局」计数器，改变它会强制重建 [TreeCanvas] 让布局重跑。
   int _relayoutVersion = 0;
@@ -147,6 +162,7 @@ class CanvasPageState extends State<CanvasPage> {
       _points = points;
       _edges = edges;
       _positions = positions;
+      _selectedForHomework = <String>{};
       _mastery.clear();
       for (final p in points) {
         _mastery[p.id] = MasteryStatus.unknown;
@@ -171,8 +187,9 @@ class CanvasPageState extends State<CanvasPage> {
     if (!mounted) return;
     res.fold(
       (_) => _toast('已建立前置关系'),
-      (e, _) => _toast('建立前置关系失败：$e'),
+      (e, _) => _toast(e is StateError ? e.message : '建立前置关系失败：$e'),
     );
+    // 连完新线不再自动重排（用户要求）：只刷新让新边显示，不挪动任何节点。
     await _loadForTree(treeId);
   }
 
@@ -185,6 +202,7 @@ class CanvasPageState extends State<CanvasPage> {
       (_) => _toast('已删除该关系'),
       (e, _) => _toast('删除失败：$e'),
     );
+    // 删线不再自动重排（用户要求）：只刷新让删除生效，不挪动任何节点。
     await _loadForTree(treeId);
   }
 
@@ -197,31 +215,60 @@ class CanvasPageState extends State<CanvasPage> {
   Future<void> _onRelayout() async {
     final treeId = _selectedTree?.id;
     if (treeId == null) return;
-    await _repo.clearNodePositions(treeId);
+    // 手动「重新布局」= 用布局引擎重算所有成员坐标并写回，绝不删除 canvas_nodes 行
+    // （那一行同时是「树成员关系」，删除会把知识点从树里移除，见已修 bug）。
+    // 全量重排后所有节点一并「锁定」（pinned=true）：之后结构变化不再自动挪动它们，
+    // 直到用户再次手动重排或拖动某个节点（拖动会单独锁定那个节点）。
+    final layout = layoutForest(_points, _edges, config: const LayoutConfig());
+    for (final n in layout.nodes) {
+      await _repo.saveNodePosition(treeId, n.kpId, n.x, n.y, pinned: true);
+    }
     setState(() => _relayoutVersion++);
     await _loadForTree(treeId);
-    _toast('已重新布局');
+    _toast('已重新布局（全部锁定）');
   }
+
+  /// 给一批「刚并入树、还没摆位置」的知识点算不重叠的布局坐标并写回 DB。
+  ///
+  /// 根因：TreeRepository.addPoints 写出的 canvas_nodes 行 x/y 默认 0，而布局引擎
+  /// 把「库里有位置 (0,0)」当成「已放在原点」，导致新点全挤在 (0,0)、也拖不动。
+  /// 具体算坐标的逻辑抽到 [autoPlaceNewPointsInTree]（canvas 与 Agent 共用）。
+  Future<void> _autoPlaceNewPoints(String treeId, List<String> newIds) =>
+      autoPlaceNewPointsInTree(
+        db: widget.db,
+        trees: _treesRepo,
+        repo: _repo,
+        treeId: treeId,
+        newIds: newIds,
+      );
 
   // ================= 知识树管理 =================
 
-  Future<void> _newTree() async {
+  /// 新建一棵树并刷新页面状态，返回新建的树（失败 / 取消返回 null）。
+  ///
+  /// 工具栏「＋ 新建知识树」与建议 sheet 的「＋ 新建知识树」共用同一逻辑。
+  Future<KnowledgeTree?> _createTreeInline() async {
     final name = await _askName('新建知识树', '给这棵树起个名字', '');
-    if (name == null || name.trim().isEmpty) return;
+    if (name == null || name.trim().isEmpty) return null;
     final res = await _treesRepo.createTree(name.trim());
-    if (!mounted) return;
+    if (!mounted) return null;
     final created = res.valueOrNull;
     if (created == null) {
       res.fold((_) => null, (e, _) => _toast('新建失败：$e'));
-      return;
+      return null;
     }
     await _load();
-    if (!mounted) return;
+    if (!mounted) return created;
     // 新建后自动切过去
     final idx = _trees.indexWhere((t) => t.id == created.id);
     final target = idx == -1 ? created : _trees[idx];
     setState(() => _selectedTree = target);
     await _loadForTree(target.id);
+    return created;
+  }
+
+  Future<void> _newTree() async {
+    await _createTreeInline();
   }
 
   Future<void> _renameTree() async {
@@ -309,13 +356,21 @@ class CanvasPageState extends State<CanvasPage> {
       _toast('这篇笔记还没有知识点，先去「提取」页跑一次 T1');
       return;
     }
+    final existing = await _treesRepo.memberPointIds(tree.id);
+    final newIds =
+        kps.where((p) => !existing.contains(p.id)).map((p) => p.id).toList();
     final res =
         await _treesRepo.addPoints(tree.id, kps.map((p) => p.id).toList());
     if (!mounted) return;
-    res.fold(
-      (added) =>
-          _toast(added == 0 ? '这些知识点已经在树里了' : '已并入 $added 个知识点'),
-      (e, _) => _toast('并入失败：$e'),
+    await res.fold(
+      (added) async {
+        // 新并入的点用布局引擎铺开，避免全挤在 (0,0)。
+        await _autoPlaceNewPoints(tree.id, newIds);
+        _toast(added == 0 && newIds.isEmpty
+            ? '这些知识点已经在树里了'
+            : '已并入 $added 个知识点');
+      },
+      (e, _) async => _toast('并入失败：$e'),
     );
     await _loadForTree(tree.id);
   }
@@ -326,13 +381,31 @@ class CanvasPageState extends State<CanvasPage> {
   Future<void> _autoLink() async {
     final tree = _selectedTree;
     if (tree == null) return;
+    final loading = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Expanded(child: Text('正在分析知识点之间的前置关系…')),
+          ],
+        ),
+      ),
+    );
     final res = await _auto.autoLink(tree.id);
-    if (!mounted) return;
+    if (mounted) {
+      Navigator.of(context, rootNavigator: true).pop();
+    } else {
+      return;
+    }
     res.fold(
       (r) {
         if (r.created > 0) {
-          final how = r.usedFallback ? '（本地启发式）' : '（AI）';
-          _toast('已自动建立$how ${r.created} 条前置关系');
+          // 仅 AI（T3 失败即 Failure，无本地启发式兜底，见决策 15）。
+          _toast('已自动建立 ${r.created} 条前置关系（AI）');
+          // 连完新线不再自动重排（用户要求）：只刷新让新边显示。
           _loadForTree(tree.id);
         } else {
           _toast(r.note.isNotEmpty
@@ -342,6 +415,7 @@ class CanvasPageState extends State<CanvasPage> {
       },
       (e, _) => _toast('自动连线失败：$e'),
     );
+    await loading.catchError((_) {});
   }
 
   /// 节点点选回调：记录选中态并弹出操作浮层（标记掌握 / 连接前置 / 补充前置知识）。
@@ -518,17 +592,59 @@ class CanvasPageState extends State<CanvasPage> {
   }
 
   /// 跑深度补前置：Success → 弹建议 BottomSheet；Failure → toast。
+  ///
+  /// T4 走 Dify 网络调用（ollama 可能耗十几秒），点击「生成」后立即弹加载框，
+  /// 并通过 [AutoPrereqProgress] 实时刷新「第 X/Y 层，本层已完成 a/b」，避免
+  /// 「点击没反应」的错觉；空结果也给出明确提示而非空白 sheet。
   Future<void> _runPrereq(
     KnowledgePoint p,
     PrereqDepth depth,
     String? custom,
   ) async {
-    final res = await _auto.autoPrerequisites(p, depth, customInstruction: custom);
     if (!mounted) return;
+    final progress = ValueNotifier<String>('正在向 AI 请求前置知识点…');
+    final loading = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        content: Row(
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(width: 16),
+            Expanded(
+              child: ValueListenableBuilder<String>(
+                valueListenable: progress,
+                builder: (_, msg, __) => Text(msg),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    final res = await _auto.autoPrerequisites(
+      p,
+      depth,
+      customInstruction: custom,
+      onProgress: (pr) => progress.value = pr.label,
+    );
+    if (mounted) {
+      Navigator.of(context, rootNavigator: true).pop();
+    } else {
+      return;
+    }
     res.fold(
-      (r) => _showSuggestions(r),
+      (r) {
+        if (r.suggestions.isEmpty) {
+          _toast('AI 未返回前置建议（该知识点可能已是最基础，或结果被过滤）。'
+              '${r.usedFallback ? '已改用本地启发式，建议以 AI 结果为准。' : ''}');
+        } else {
+          _showSuggestions(r);
+        }
+      },
       (e, _) => _toast('自动补前置失败：$e'),
     );
+    // 显式消费 loading Future，避免「未使用变量」提示。
+    await loading.catchError((_) {});
   }
 
   /// 工具栏「补前置」按钮：有选中点 → 对该点跑深度补前置；无选中点 → 提示先点选。
@@ -540,7 +656,222 @@ class CanvasPageState extends State<CanvasPage> {
     }
   }
 
-  /// 建议结果 BottomSheet：顶部固定「仅为建议」提示，按 level 分组缩进展示。
+  // ============ 作业模式（框选薄弱点 → 布置作业 / 历史）============
+
+  void _toggleHomeworkMode() {
+    setState(() {
+      _homeworkMode = !_homeworkMode;
+      if (!_homeworkMode) {
+        _selectedForHomework = <String>{};
+      }
+    });
+    if (_homeworkMode) {
+      _toast('作业模式：在画布上拖拽框选薄弱点，再点「布置作业」');
+    }
+  }
+
+  Widget _buildHomeworkBar() {
+    final n = _selectedForHomework.length;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      color: Colors.green.shade50,
+      child: Row(
+        children: [
+          const Icon(Icons.assignment_outlined, size: 18, color: Colors.green),
+          const SizedBox(width: 8),
+          Text('作业模式 · 已选 $n 个薄弱点',
+              style: const TextStyle(fontSize: 13)),
+          const Spacer(),
+          TextButton.icon(
+            onPressed: _selectWeakPoints,
+            icon: const Icon(Icons.auto_awesome, size: 16),
+            label: const Text('全选薄弱点'),
+          ),
+          TextButton.icon(
+            onPressed: n == 0 ? null : _openHomeworkPage,
+            icon: const Icon(Icons.assignment, size: 16),
+            label: const Text('布置作业'),
+          ),
+          TextButton.icon(
+            onPressed: _showHomeworkHistory,
+            icon: const Icon(Icons.history, size: 16),
+            label: const Text('历史'),
+          ),
+          TextButton(
+            onPressed: _toggleHomeworkMode,
+            child: const Text('退出'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 薄弱 = 掌握状态为「未掌握」或「学习中」。
+  bool _isWeak(String kpId) {
+    final m = _masteryOf(kpId);
+    return m == MasteryStatus.notMastered || m == MasteryStatus.learning;
+  }
+
+  /// 一键选中当前树上所有薄弱点（空则给提示）。
+  void _selectWeakPoints() {
+    final weak = <String>{
+      for (final p in _points)
+        if (_isWeak(p.id)) p.id,
+    };
+    setState(() => _selectedForHomework = weak);
+    if (weak.isEmpty) {
+      _toast('当前没有标记为「未掌握 / 学习中」的薄弱点。'
+          '可手动框选任意知识点作为作业对象。');
+    }
+  }
+
+  /// 把框选的薄弱点交给作业页出题。
+  Future<void> _openHomeworkPage() async {
+    final tree = _selectedTree;
+    if (tree == null) return;
+    final sel =
+        _points.where((p) => _selectedForHomework.contains(p.id)).toList();
+    if (sel.isEmpty) {
+      _toast('请先框选薄弱点，或点「全选薄弱点」');
+      return;
+    }
+    await Navigator.of(context).push<bool>(MaterialPageRoute(
+      builder: (_) => HomeworkPage(
+        ai: widget.service.ai,
+        db: widget.db,
+        canvasId: tree.id,
+        points: sel,
+      ),
+    ));
+    if (!mounted) return;
+    // 布置完退出作业模式，回到正常浏览。
+    setState(() => _homeworkMode = false);
+  }
+
+  /// 历史作业列表（BottomSheet）：打开可编辑，也可删除。
+  Future<void> _showHomeworkHistory() async {
+    final tree = _selectedTree;
+    if (tree == null) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => _homeworkHistorySheet(tree.id),
+    );
+  }
+
+  Widget _homeworkHistorySheet(String canvasId) => FutureBuilder<List<Homework>>(
+        future: _homeworks.listByCanvas(canvasId),
+        builder: (ctx, snap) {
+          if (!snap.hasData) {
+            return const SizedBox(
+              height: 120,
+              child: Center(child: CircularProgressIndicator()),
+            );
+          }
+          final list = snap.data!;
+          return SizedBox(
+            height: MediaQuery.of(ctx).size.height * 0.7,
+            child: Column(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  color: Colors.grey.shade100,
+                  child: Row(
+                    children: [
+                      const Icon(Icons.history, size: 18),
+                      const SizedBox(width: 8),
+                      Text('作业历史（${list.length}）',
+                          style: const TextStyle(fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: list.isEmpty
+                      ? const Center(
+                          child: Text('还没有布置过作业。',
+                              style: TextStyle(color: Colors.grey)))
+                      : ListView(
+                          children: [
+                            for (final hw in list)
+                              ListTile(
+                                leading:
+                                    const Icon(Icons.assignment_outlined),
+                                title: Text(hw.title.isEmpty
+                                    ? '(未命名)'
+                                    : hw.title),
+                                subtitle: Text(
+                                  '${hw.itemCount} 题',
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                                trailing: IconButton(
+                                  icon: const Icon(Icons.delete_outline,
+                                      color: Colors.red),
+                                  tooltip: '删除作业',
+                                  onPressed: () async {
+                                    final ok = await showDialog<bool>(
+                                      context: ctx,
+                                      builder: (d) => AlertDialog(
+                                        title: const Text('删除作业'),
+                                        content: const Text(
+                                            '删除后将从历史中移除，确定？'),
+                                        actions: [
+                                          TextButton(
+                                            onPressed: () =>
+                                                Navigator.pop(d, false),
+                                            child: const Text('取消'),
+                                          ),
+                                          TextButton(
+                                            onPressed: () =>
+                                                Navigator.pop(d, true),
+                                            child: const Text('删除',
+                                                style: TextStyle(
+                                                    color: Colors.red)),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                    if (ok == true) {
+                                      await _homeworks.softDelete(hw.id);
+                                      if (!mounted) return;
+                                      Navigator.of(ctx).pop();
+                                      _showHomeworkHistory();
+                                    }
+                                  },
+                                ),
+                                onTap: () async {
+                                  // 用作业记录的 kpIds 重新取知识点作为出题上下文。
+                                  final pts =
+                                      await _repo.pointsByIds(hw.kpIds);
+                                  if (!mounted) return;
+                                  Navigator.of(ctx).pop();
+                                  await Navigator.of(context)
+                                      .push<bool>(MaterialPageRoute(
+                                    builder: (_) => HomeworkPage(
+                                      ai: widget.service.ai,
+                                      db: widget.db,
+                                      canvasId: canvasId,
+                                      points: pts,
+                                      existingId: hw.id,
+                                    ),
+                                  ));
+                                  if (!mounted) return;
+                                  setState(() => _homeworkMode = false);
+                                },
+                              ),
+                          ],
+                        ),
+                ),
+              ],
+            ),
+          );
+        },
+      );
+
+
+  /// 建议结果 BottomSheet（改版）：
+  /// - 每条建议可勾选，用户决定「补充多少进去树」；
+  /// - 顶部选择目标知识树（或当场「＋ 新建知识树」）；
+  /// - 点「补充进树」把勾选的建议经 T1 锚定后并入所选树，全程遵守锚点铁律。
   void _showSuggestions(AutoPrereqResult r) {
     if (!mounted) return;
     final byLevel = <int, List<SuggestedPrerequisite>>{};
@@ -548,85 +879,299 @@ class CanvasPageState extends State<CanvasPage> {
       byLevel.putIfAbsent(s.level, () => <SuggestedPrerequisite>[]).add(s);
     }
     final levels = byLevel.keys.toList()..sort();
+
+    // 默认全选，用户可取消勾选来减少补充数量。
+    final selected = <SuggestedPrerequisite>{...r.suggestions};
+    final trees = <KnowledgeTree>[..._trees];
+    var targetTree = _selectedTree;
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      builder: (ctx) => SizedBox(
-        height: MediaQuery.of(ctx).size.height * 0.7,
-        child: Column(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(12),
-              color: Colors.amber.shade50,
-              child: Row(
-                children: [
-                  const Icon(Icons.warning_amber_rounded, color: Colors.amber),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      '仅为建议，需自行新建笔记'
-                      '${r.usedFallback ? '（本地启发式，建议以 AI 为准）' : ''}',
-                      style: const TextStyle(fontSize: 13),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.all(8),
-                children: [
-                  for (final lv in levels)
-                    ...[
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(4, 10, 4, 4),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSt) {
+          final selectedCount = selected.length;
+          final allSelected =
+              r.suggestions.isNotEmpty && selectedCount == r.suggestions.length;
+          return SizedBox(
+            height: MediaQuery.of(ctx).size.height * 0.8,
+            child: Column(
+              children: [
+                // 顶部提示条
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  color: Colors.amber.shade50,
+                  child: Row(
+                    children: [
+                      const Icon(Icons.warning_amber_rounded, color: Colors.amber),
+                      const SizedBox(width: 8),
+                      Expanded(
                         child: Text(
-                          '第 $lv 层（${lv == 1 ? '最接近该点' : '更基础'}）',
-                          style: const TextStyle(fontWeight: FontWeight.bold),
+                          '仅为建议。勾选后「补充进树」会经 T1 锚定'
+                          '（无原文出处的不入库）'
+                          '${r.usedFallback ? '（本地启发式，建议以 AI 为准）' : ''}',
+                          style: const TextStyle(fontSize: 13),
                         ),
                       ),
-                      for (final s in byLevel[lv]!)
-                        ListTile(
-                          contentPadding: const EdgeInsets.only(left: 12),
-                          leading: const Icon(Icons.add_circle_outline,
-                              color: Colors.amber, size: 18),
-                          title: Text(s.name),
-                          subtitle: Text(
-                            s.reason,
-                            maxLines: 3,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 12),
-                          ),
-                          dense: true,
-                          trailing: TextButton(
-                            onPressed: () => _createNoteFor(s),
-                            child: const Text('去新建笔记'),
+                    ],
+                  ),
+                ),
+                // 目标树选择
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.account_tree_outlined,
+                          size: 18, color: Colors.grey),
+                      const SizedBox(width: 8),
+                      const Text('并入：', style: TextStyle(fontSize: 13)),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<KnowledgeTree?>(
+                            isExpanded: true,
+                            hint: const Text('选择知识树'),
+                            value: targetTree,
+                            items: [
+                              for (final t in trees)
+                                DropdownMenuItem(
+                                  value: t,
+                                  child: Text(
+                                    t.name.isEmpty ? '(未命名)' : t.name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              const DropdownMenuItem<KnowledgeTree?>(
+                                value: null,
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.add, size: 18),
+                                    SizedBox(width: 4),
+                                    Text('＋ 新建知识树'),
+                                  ],
+                                ),
+                              ),
+                            ],
+                            onChanged: (v) async {
+                              if (v == null) {
+                                final created = await _createTreeInline();
+                                if (created != null) {
+                                  setSt(() {
+                                    trees.add(created);
+                                    targetTree = created;
+                                  });
+                                }
+                              } else {
+                                setSt(() => targetTree = v);
+                              }
+                            },
                           ),
                         ),
+                      ),
                     ],
-                ],
-              ),
+                  ),
+                ),
+                // 全选 / 计数
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+                  child: Row(
+                    children: [
+                      Checkbox(
+                        value: allSelected,
+                        onChanged: (v) {
+                          setSt(() {
+                            if (v == true) {
+                              selected.addAll(r.suggestions);
+                            } else {
+                              selected.clear();
+                            }
+                          });
+                        },
+                      ),
+                      const Text('全选', style: TextStyle(fontSize: 13)),
+                      const Spacer(),
+                      Text(
+                        '已选 $selectedCount / ${r.suggestions.length}',
+                        style: const TextStyle(fontSize: 13, color: Colors.grey),
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1),
+                // 建议列表（可勾选）
+                Expanded(
+                  child: ListView(
+                    padding: const EdgeInsets.all(8),
+                    children: [
+                      for (final lv in levels)
+                        ...[
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(4, 10, 4, 4),
+                            child: Text(
+                              '第 $lv 层（${lv == 1 ? '最接近该点' : '更基础'}）',
+                              style: const TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                          ),
+                          for (final s in byLevel[lv]!)
+                            CheckboxListTile(
+                              contentPadding:
+                                  const EdgeInsets.only(left: 12, right: 8),
+                              controlAffinity: ListTileControlAffinity.leading,
+                              value: selected.contains(s),
+                              onChanged: (v) {
+                                setSt(() {
+                                  if (v == true) {
+                                    selected.add(s);
+                                  } else {
+                                    selected.remove(s);
+                                  }
+                                });
+                              },
+                              secondary: IconButton(
+                                icon: const Icon(Icons.note_add_outlined, size: 18),
+                                tooltip: '仅新建为笔记（不并入树）',
+                                onPressed: () => _createNoteFor(s),
+                              ),
+                              title: Text(s.name),
+                              subtitle: Text(
+                                s.reason,
+                                maxLines: 3,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                              dense: true,
+                            ),
+                        ],
+                    ],
+                  ),
+                ),
+                // 底部动作
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        child: const Text('取消'),
+                      ),
+                      const SizedBox(width: 8),
+                      TextButton.icon(
+                        onPressed: () => _createAllNotes(r.suggestions),
+                        icon: const Icon(Icons.note_add_outlined),
+                        label: const Text('全部新建为笔记'),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton.icon(
+                        icon: const Icon(Icons.add),
+                        onPressed: selectedCount == 0 || targetTree == null
+                            ? null
+                            : () {
+                                Navigator.pop(ctx);
+                                _supplementIntoTree(selected.toList(), targetTree!);
+                              },
+                        label: Text('补充进树（$selectedCount）'),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  TextButton.icon(
-                    onPressed: () => _createAllNotes(r.suggestions),
-                    icon: const Icon(Icons.note_add_outlined),
-                    label: const Text('全部新建为笔记'),
-                  ),
-                  TextButton(
-                    onPressed: () => Navigator.pop(ctx),
-                    child: const Text('知道了'),
-                  ),
-                ],
+          );
+        },
+      ),
+    );
+  }
+
+  /// 把勾选的补前置建议直接并入目标树。
+  ///
+  /// 锚点铁律：建议本身没有可逐字锚定的原文，不能直接 `new KnowledgePoint` 入库。
+  /// 这里把它们拼成一篇 Markdown 笔记 → 调 [ExtractionService.extract] 跑一次 T1，
+  /// 由 T1 负责锚点校验、剔除无出处的幻觉点，再把**真正落库**的知识点 `addPoints` 进树。
+  Future<void> _supplementIntoTree(
+    List<SuggestedPrerequisite> items,
+    KnowledgeTree tree,
+  ) async {
+    if (items.isEmpty) return;
+
+    // 1) 拼成一篇 Markdown 笔记：每条建议一个 `# 标题` + 定义段落。
+    final buffer = StringBuffer();
+    for (final s in items) {
+      buffer
+        ..writeln('# ${s.name}')
+        ..writeln()
+        ..writeln(s.definition)
+        ..writeln();
+    }
+    final md = buffer.toString().trim();
+
+    // 2) 加载框：T1 走 Dify 网络调用，可能耗时数秒。
+    if (!mounted) return;
+    final progress = ValueNotifier<String>('正在通过 T1 锚定知识点…');
+    final loading = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        content: Row(
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(width: 16),
+            Expanded(
+              child: ValueListenableBuilder<String>(
+                valueListenable: progress,
+                builder: (_, msg, __) => Text('$msg\n并入「${tree.name}」'),
               ),
             ),
           ],
         ),
       ),
+    );
+
+    final ext = await widget.service.extract(md);
+    if (!mounted) return;
+    if (ext is Failure<ExtractionSaveResult>) {
+      Navigator.of(context, rootNavigator: true).pop();
+      await loading.catchError((_) {});
+      _toast('T1 锚定失败：${ext.error}');
+      return;
+    }
+    final res = (ext as Success<ExtractionSaveResult>).value;
+    final ids = res.saved.map((k) => k.id).toList();
+
+    if (ids.isEmpty) {
+      // 建议全被锚点校验剔除：不落库任何无出处的点。
+      Navigator.of(context, rootNavigator: true).pop();
+      await loading.catchError((_) {});
+      _toast('没有可锚定的知识点被收录（${res.rejectedCount} 条因缺少原文出处被剔除）。'
+          '可改用「新建笔记」手动收录。');
+      return;
+    }
+
+    // 3) 把锚定后的知识点并入目标树，并立刻用布局引擎给新点铺开坐标。
+    // 先取已有成员，避免「已在该树的点」被重新摆位（addPoints 幂等跳过，
+    // 但布局引擎若覆盖其坐标会把它从用户摆好的位置拽走）。
+    final existing = await _treesRepo.memberPointIds(tree.id);
+    final newIds = ids.where((id) => !existing.contains(id)).toList();
+    final addRes = await widget.service.trees.addPoints(tree.id, ids);
+    if (mounted) {
+      Navigator.of(context, rootNavigator: true).pop();
+    } else {
+      return;
+    }
+    await loading.catchError((_) {});
+    if (!mounted) return;
+    await addRes.fold(
+      (added) async {
+        // 新并入的点默认 x/y=0，会被布局引擎当成「放在原点」→ 全挤在 (0,0) 且拖不动。
+        // 这里用布局引擎给它们算不重叠坐标并写回（已手动摆过的旧节点不动）。
+        await _autoPlaceNewPoints(tree.id, newIds);
+        _toast('已补充进「${tree.name}」：$added 个知识点'
+            '${res.rejectedCount > 0 ? '（${res.rejectedCount} 条无出处未入库）' : ''}');
+        // 刷新树列表（点数可能变了）；当前显示的树若不是目标树也一并更新。
+        await _load();
+      },
+      (e, _) async => _toast('并入失败：$e'),
     );
   }
 
@@ -741,7 +1286,11 @@ class CanvasPageState extends State<CanvasPage> {
                     ],
                     onChanged: (v) async {
                       if (v == null) return;
-                      setState(() => _selectedTree = v);
+                      setState(() {
+                        _selectedTree = v;
+                        _homeworkMode = false;
+                        _selectedForHomework = <String>{};
+                      });
                       await _loadForTree(v.id);
                     },
                   ),
@@ -778,6 +1327,16 @@ class CanvasPageState extends State<CanvasPage> {
                 onPressed: tree == null ? null : _autoLink,
               ),
               IconButton(
+                icon: Icon(_homeworkMode
+                    ? Icons.deselect
+                    : Icons.assignment_outlined),
+                iconSize: 20,
+                tooltip: _homeworkMode
+                    ? '退出作业模式'
+                    : '作业模式：框选薄弱点布置作业',
+                onPressed: tree == null ? null : _toggleHomeworkMode,
+              ),
+              IconButton(
                 icon: const Icon(Icons.lightbulb_outline),
                 iconSize: 20,
                 tooltip: '补充选中知识点的前置（先点选一个节点）',
@@ -807,6 +1366,7 @@ class CanvasPageState extends State<CanvasPage> {
           ),
         ),
         const Divider(height: 1),
+        if (_homeworkMode) _buildHomeworkBar(),
         // ── 画布 ──
         Expanded(
           child: _trees.isEmpty
@@ -839,6 +1399,11 @@ class CanvasPageState extends State<CanvasPage> {
                           onCreateEdge: _onCreateEdge,
                           onDeleteEdge: _onDeleteEdge,
                           onRelayout: _onRelayout,
+                          selectionMode: _homeworkMode,
+                          selectedKpIds: _selectedForHomework,
+                          onSelectionChanged: (s) => setState(() {
+                            _selectedForHomework = s;
+                          }),
                         ),
         ),
       ],

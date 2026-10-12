@@ -1,9 +1,11 @@
 /// 老师模式页面（T06）：按 KP 发起对话，问"这个知识点的疑惑"。
 ///
-/// - 顶部：KP 名 / 类型 / 定义 / 锚点引用 / 掌握状态
-/// - 中间：历史消息流
-/// - 底部：输入框 → 调 AiService.chat(t5Ask) → 流式阻塞单块
-///   → 持久化 user/assistant 两条消息到 ai_sessions/ai_messages
+/// 两个能力合在一个页面（底部浮层入口叫「AI 讲解 / 追问」）：
+/// - **讲解（T6）**：打开页面时自动用流式调用生成一段通俗讲解，可「重新生成」。
+/// - **追问（T5）**：多轮问答，把 KP 信息作为上下文塞给 LLM，消息持久化到
+///   ai_sessions / ai_messages。
+///
+/// 无可用 Provider 时给出明确提示（而非静默失败 / 空白）。
 library;
 
 import 'package:flutter/material.dart';
@@ -32,48 +34,102 @@ class TeacherPage extends StatefulWidget {
   State<TeacherPage> createState() => _TeacherPageState();
 }
 
-class _TeacherPageState extends State<TeacherPage> {
+class _TeacherPageState extends State<TeacherPage>
+    with SingleTickerProviderStateMixin {
+  late final TabController _tab;
   final _input = TextEditingController();
   final _scroll = ScrollController();
-  bool _busy = false;
-  String? _error;
-  late String _sessionId;
-  List<ChatMessage> _messages = <ChatMessage>[];
-  String? _conversationId;
+  bool _askBusy = false;
+  String? _askError;
+  late String _askSessionId;
+  List<ChatMessage> _askMessages = <ChatMessage>[];
+  String? _askConversationId;
   MasteryStatus _mastery = MasteryStatus.unknown;
+
+  // —— 讲解（T6）态 ——
+  late String _explainSessionId;
+  bool _explainBusy = false;
+  String _explainText = '';
+  String? _explainError;
 
   @override
   void initState() {
     super.initState();
+    _tab = TabController(length: 2, vsync: this);
     _bootstrap();
   }
 
   Future<void> _bootstrap() async {
-    final session =
-        await widget.sessions.getOrCreateForKp(kpId: widget.kp.id, task: AiTask.t5Ask);
-    final msgs = await widget.sessions.listMessages(session.id);
+    final askSession = await widget.sessions.getOrCreateForKp(
+        kpId: widget.kp.id, task: AiTask.t5Ask);
+    final askMsgs = await widget.sessions.listMessages(askSession.id);
+    final explainSession = await widget.sessions.getOrCreateForKp(
+        kpId: widget.kp.id, task: AiTask.t6Explain);
+    final explainMsgs = await widget.sessions.listMessages(explainSession.id);
     final m = await widget.repo.currentMastery(widget.kp.id);
     if (!mounted) return;
     setState(() {
-      _sessionId = session.id;
-      _messages = msgs;
+      _askSessionId = askSession.id;
+      _explainSessionId = explainSession.id;
+      _askMessages = askMsgs;
       _mastery = m;
     });
+    // 还没有讲解就自动生成一段（让用户一进来就看到「讲解」）。
+    if (explainMsgs.where((x) => x.role == 'assistant').isEmpty) {
+      _generateExplain();
+    }
+  }
+
+  /// 生成讲解（T6）：流式调用，结果作为一条 assistant 消息持久化。
+  Future<void> _generateExplain() async {
+    if (_explainBusy) return;
+    setState(() {
+      _explainBusy = true;
+      _explainError = null;
+      _explainText = '';
+    });
+    final ctx = '知识点：${widget.kp.name}（${widget.kp.type.label}）。\n'
+        '定义：${widget.kp.definition}\n'
+        '来源：${widget.kp.sourceQuote}';
+    final query = '$ctx\n\n'
+        '请用通俗、循序渐进的方式讲解这个概念，帮助初学者建立直观理解，'
+        '并点出它容易和哪些概念混淆。';
+    final buf = StringBuffer();
+    try {
+      await for (final chunk in widget.ai.chat(AiTask.t6Explain, query)) {
+        if (chunk.delta != null) {
+          buf.write(chunk.delta);
+          if (mounted) setState(() => _explainText = buf.toString());
+        }
+        if (chunk.done) break;
+      }
+      final text = buf.toString();
+      if (text.trim().isNotEmpty) {
+        await widget.sessions.addMessage(
+          sessionId: _explainSessionId,
+          role: 'assistant',
+          content: text,
+          modelId: 'dify-t6',
+        );
+      }
+    } on Object catch (e) {
+      if (mounted) setState(() => _explainError = _friendlyError(e));
+    } finally {
+      if (mounted) setState(() => _explainBusy = false);
+    }
   }
 
   Future<void> _send() async {
     final text = _input.text.trim();
-    if (text.isEmpty || _busy) return;
+    if (text.isEmpty || _askBusy) return;
     setState(() {
-      _busy = true;
-      _error = null;
+      _askBusy = true;
+      _askError = null;
     });
 
-    // 1) 追加用户消息
     await widget.sessions.addMessage(
-        sessionId: _sessionId, role: 'user', content: text);
+        sessionId: _askSessionId, role: 'user', content: text);
 
-    // 2) 调 AiService（T5 追问：把 KP 信息作为 system 上下文塞给 LLM）
     final ctx = '知识点：${widget.kp.name}（${widget.kp.type.label}）。\n'
         '定义：${widget.kp.definition}\n'
         '来源：${widget.kp.sourceQuote}';
@@ -84,37 +140,37 @@ class _TeacherPageState extends State<TeacherPage> {
       await for (final chunk in widget.ai.chat(
         AiTask.t5Ask,
         fullQuery,
-        conversationId: _conversationId,
+        conversationId: _askConversationId,
       )) {
         if (chunk.conversationId != null) {
-          _conversationId = chunk.conversationId;
+          _askConversationId = chunk.conversationId;
         }
         if (chunk.delta != null) answer = chunk.delta;
         if (chunk.done) break;
       }
     } on Object catch (e) {
+      if (!mounted) return;
       setState(() {
-        _error = e.toString();
-        _busy = false;
+        _askError = _friendlyError(e);
+        _askBusy = false;
       });
       return;
     }
 
-    // 3) 追加 AI 回复
     final finalAnswer = answer ?? '(无响应)';
     await widget.sessions.addMessage(
-        sessionId: _sessionId,
-        role: 'assistant',
-        content: finalAnswer,
-        modelId: 'dify-t1-local');
+      sessionId: _askSessionId,
+      role: 'assistant',
+      content: finalAnswer,
+      modelId: 'dify-t5',
+    );
 
-    // 4) 回读
-    final msgs = await widget.sessions.listMessages(_sessionId);
+    final msgs = await widget.sessions.listMessages(_askSessionId);
     if (!mounted) return;
     setState(() {
-      _messages = msgs;
+      _askMessages = msgs;
       _input.clear();
-      _busy = false;
+      _askBusy = false;
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) {
@@ -127,34 +183,177 @@ class _TeacherPageState extends State<TeacherPage> {
     });
   }
 
+  /// 把「无 Provider」之类的底层错误翻译成用户能看懂的提示。
+  String _friendlyError(Object e) {
+    final s = e.toString();
+    if (s.contains('没有任何可用的 AI Provider')) {
+      return '当前没有可用的 AI Provider。请到「设置」页确认已配置 Dify Key，'
+          '并重启 App 使其生效。';
+    }
+    return s;
+  }
+
+  @override
+  void dispose() {
+    _tab.dispose();
+    _input.dispose();
+    _scroll.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('老师模式'),
+        bottom: TabBar(
+          controller: _tab,
+          tabs: const [
+            Tab(text: '讲解 (T6)'),
+            Tab(text: '追问 (T5)'),
+          ],
+        ),
       ),
       body: Column(
         children: [
           _KpHeader(kp: widget.kp, mastery: _mastery),
           const Divider(height: 1),
           Expanded(
-            child: _messages.isEmpty
+            child: TabBarView(
+              controller: _tab,
+              children: [
+                _ExplainPane(
+                  busy: _explainBusy,
+                  text: _explainText,
+                  error: _explainError,
+                  onRegenerate: _generateExplain,
+                ),
+                _AskPane(
+                  messages: _askMessages,
+                  error: _askError,
+                  busy: _askBusy,
+                  scroll: _scroll,
+                  input: _input,
+                  onSend: _send,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 讲解面板（T6）。
+class _ExplainPane extends StatelessWidget {
+  const _ExplainPane({
+    required this.busy,
+    required this.text,
+    required this.error,
+    required this.onRegenerate,
+  });
+  final bool busy;
+  final String text;
+  final String? error;
+  final VoidCallback onRegenerate;
+
+  @override
+  Widget build(BuildContext context) => Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            child: Row(
+              children: [
+                const Text('AI 讲解', style: TextStyle(fontWeight: FontWeight.bold)),
+                const Spacer(),
+                TextButton.icon(
+                  onPressed: busy ? null : onRegenerate,
+                  icon: busy
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.refresh, size: 16),
+                  label: const Text('重新生成'),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.all(12),
+              children: [
+                if (error != null)
+                  Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Text('错误：$error',
+                        style: const TextStyle(color: Colors.red)),
+                  )
+                else if (busy && text.isEmpty)
+                  const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Text('正在生成讲解…',
+                          style: TextStyle(color: Colors.grey)),
+                    ),
+                  )
+                else if (text.isNotEmpty)
+                  SelectableText(text, style: const TextStyle(fontSize: 14, height: 1.5))
+                else
+                  const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Text('暂无讲解，点「重新生成」。',
+                          style: TextStyle(color: Colors.grey)),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      );
+}
+
+/// 追问面板（T5）。
+class _AskPane extends StatelessWidget {
+  const _AskPane({
+    required this.messages,
+    required this.error,
+    required this.busy,
+    required this.scroll,
+    required this.input,
+    required this.onSend,
+  });
+  final List<ChatMessage> messages;
+  final String? error;
+  final bool busy;
+  final ScrollController scroll;
+  final TextEditingController input;
+  final VoidCallback onSend;
+
+  @override
+  Widget build(BuildContext context) => Column(
+        children: [
+          Expanded(
+            child: messages.isEmpty
                 ? const Center(
                     child: Text('在这条知识点下提问吧～',
                         style: TextStyle(color: Colors.grey)))
                 : ListView.builder(
-                    controller: _scroll,
+                    controller: scroll,
                     padding: const EdgeInsets.all(12),
-                    itemCount: _messages.length + (_error != null ? 1 : 0),
+                    itemCount: messages.length + (error != null ? 1 : 0),
                     itemBuilder: (_, i) {
-                      if (_error != null && i == _messages.length) {
+                      if (error != null && i == messages.length) {
                         return Padding(
                           padding: const EdgeInsets.all(8),
-                          child: Text('错误：$_error',
+                          child: Text('错误：$error',
                               style: const TextStyle(color: Colors.red)),
                         );
                       }
-                      final m = _messages[i];
+                      final m = messages[i];
                       return _MessageBubble(role: m.role, content: m.content);
                     },
                   ),
@@ -170,7 +369,7 @@ class _TeacherPageState extends State<TeacherPage> {
                 children: [
                   Expanded(
                     child: TextField(
-                      controller: _input,
+                      controller: input,
                       minLines: 1,
                       maxLines: 4,
                       decoration: const InputDecoration(
@@ -182,8 +381,8 @@ class _TeacherPageState extends State<TeacherPage> {
                   ),
                   const SizedBox(width: 8),
                   IconButton.filled(
-                    onPressed: _busy ? null : _send,
-                    icon: _busy
+                    onPressed: busy ? null : onSend,
+                    icon: busy
                         ? const SizedBox(
                             width: 16,
                             height: 16,
@@ -197,9 +396,7 @@ class _TeacherPageState extends State<TeacherPage> {
             ),
           ),
         ],
-      ),
-    );
-  }
+      );
 }
 
 class _KpHeader extends StatelessWidget {

@@ -177,7 +177,7 @@ void main() {
       expect(r.created, 1);
     });
 
-    test('AI 失败 → 本地启发式兜底，且结果无环', () async {
+    test('AI 失败 → 返回 Failure（不再本地启发式兜底，不落库）', () async {
       final ids = await seed('n1', const [
         ('牛顿第二定律', '经典力学'),
         ('动量定理', '由牛顿第二定律导出'),
@@ -191,10 +191,10 @@ void main() {
         trees: trees,
         aiRun: failRun,
       );
-      final r = (await ai.autoLink(treeId) as Success).value;
-      expect(r.usedFallback, isTrue);
-      expect(r.created, greaterThanOrEqualTo(1));
-      expect(hasCycle(r.edges), isFalse);
+      final res = await ai.autoLink(treeId);
+      expect(res.isSuccess, isFalse);
+      // 不兜底 → 一条边都不该落库。
+      expect(await repo.prerequisiteEdgesAmong(ids), isEmpty);
     });
 
     test('与已有边去重：AI 重复给出已存在的边不再新建', () async {
@@ -280,7 +280,7 @@ void main() {
       expect(await repo.pointsByIds(ids), hasLength(2));
     });
 
-    test('AI 失败 → 本地启发式：从定义里挖出未收录的概念，usedFallback=true', () async {
+    test('AI 失败 → 返回 Failure（不再本地启发式兜底，不入库）', () async {
       final ids = await seed('n1', const [
         ('泰勒展开', '由导数和极限推出'),
         ('洛必达法则', '用导数求极限'),
@@ -294,12 +294,8 @@ void main() {
         trees: trees,
         aiRun: failRun,
       );
-      final r = (await ai.autoPrerequisites(target, PrereqDepth.medium) as Success<AutoPrereqResult>)
-          .value;
-      expect(r.usedFallback, isTrue);
-      final names = r.suggestions.map((s) => s.name);
-      expect(names, contains('导数'));
-      expect(names, contains('极限'));
+      final res = await ai.autoPrerequisites(target, PrereqDepth.medium);
+      expect(res.isSuccess, isFalse);
       // 不入库
       expect(await repo.pointsByIds(ids), hasLength(2));
     });
@@ -350,12 +346,9 @@ void main() {
       expect(await repo.pointsByIds(ids), hasLength(1));
     });
 
-    test('深度差异：low 仅 1 层，high 出现 level=2（本地兜底）', () async {
+    test('深度差异：low 仅 1 层，high 出现 level=2（客户端递归受 maxLevels 约束）', () async {
       final ids = await seed('n1', const [
-        (
-          '高阶概念',
-          '基于导数与极限与积分和微分，覆盖向量与矩阵与空间与函数',
-        ),
+        ('高阶概念', 'x'),
       ]);
       final points = await repo.pointsByIds(ids);
       final target = points.first;
@@ -363,7 +356,7 @@ void main() {
         ai: AiService(router: AiTaskRouter(providers: const {})),
         repo: repo,
         trees: trees,
-        aiRun: failRun,
+        aiRun: recursiveRun(target.name, '直接前置A', '更底层B'),
       );
       final low =
           (await ai.autoPrerequisites(target, PrereqDepth.low) as Success).value;
@@ -374,12 +367,9 @@ void main() {
       expect(await repo.pointsByIds(ids), hasLength(1));
     });
 
-    test('自定义指令：一层 → maxLevels=1（本地兜底仅产出 level=1）', () async {
+    test('自定义指令：一层 → maxLevels=1（只产出 level=1）', () async {
       final ids = await seed('n1', const [
-        (
-          '高阶概念',
-          '基于导数与极限与积分和微分，覆盖向量与矩阵与空间与函数',
-        ),
+        ('高阶概念', 'x'),
       ]);
       final points = await repo.pointsByIds(ids);
       final target = points.first;
@@ -387,7 +377,7 @@ void main() {
         ai: AiService(router: AiTaskRouter(providers: const {})),
         repo: repo,
         trees: trees,
-        aiRun: failRun,
+        aiRun: recursiveRun(target.name, '直接前置A', '更底层B'),
       );
       final r = (await ai.autoPrerequisites(
         target,
@@ -395,7 +385,7 @@ void main() {
         customInstruction: '只要一层直接前置即可',
       ) as Success<AutoPrereqResult>)
           .value;
-      expect(r.usedFallback, isTrue);
+      expect(r.usedFallback, isFalse);
       expect(r.suggestions.every((s) => s.level == 1), isTrue);
     });
   });

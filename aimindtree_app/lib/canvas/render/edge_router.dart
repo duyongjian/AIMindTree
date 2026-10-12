@@ -353,6 +353,205 @@ Offset polylineMidpoint(List<Offset> points) {
   return points.last;
 }
 
+// ==================== 点到折线的距离（连线 hover 判定） ====================
+
+/// 点 [p] 到线段 a–b 的最短距离。
+///
+/// 退化线段（a == b）时 lenSq 为 0，直接返回两点距离，**绝不能除以 0** ——
+/// routeEdge 的 _dedupe 有概率产出重复点，虽然罕见但会直接炸成 NaN。
+double distanceToSegment(Offset p, Offset a, Offset b) {
+  final dx = b.dx - a.dx;
+  final dy = b.dy - a.dy;
+  final lenSq = dx * dx + dy * dy;
+  if (lenSq <= 0) return (p - a).distance;
+  // 投影到线段上的参数 t：0 = a 端、1 = b 端，先 clamp 再做距离，得到
+  // 「点落在端点外侧时的垂足之外的距离」而不是无限长直线的距离。
+  var t = ((p.dx - a.dx) * dx + (p.dy - a.dy) * dy) / lenSq;
+  if (t < 0.0) {
+    t = 0.0;
+  } else if (t > 1.0) {
+    t = 1.0;
+  }
+  final proj = Offset(a.dx + dx * t, a.dy + dy * t);
+  return (p - proj).distance;
+}
+
+/// 点 [p] 到折线 [points] 的最短距离（逐段取最小值）。
+///
+/// 用途：鼠标 hover 判定「是不是指到了这条连线」。折线段数很少（正交路由 ≤ 6 段），
+/// 几十条边也就是几百次浮点运算，放在 onHover 里完全够用。
+double distanceToPolyline(List<Offset> points, Offset p) {
+  if (points.isEmpty) return double.infinity;
+  if (points.length == 1) return (p - points.first).distance;
+  var best = double.infinity;
+  for (var i = 0; i < points.length - 1; i++) {
+    final d = distanceToSegment(p, points[i], points[i + 1]);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+// ==================== 交叉判定 + 着色（区分交叉连线） ====================
+
+/// 交叉判定的容差（逻辑像素）。
+///
+/// 取值与 [_eps] 一致是**有意的**：正交路由生成的坐标精度就在 0.5px 量级
+/// （见 _clampBand / _dedupe），小于这个量级的偏差应该当成「同一个点 /
+/// 同一条线」，而不是「两条线擦肩而过」。调大它会丢掉真实的近距离交叉，
+/// 调小（比如 0.01）会把浮点舍入误差当成两个端点 → 交叉数暴涨。
+const double kCrossEpsilon = 0.5;
+
+/// 判定两段是横线 / 竖线 / 退化。返回 1 = 横线，2 = 竖线，0 = 退化。
+///
+/// **退化包含两种情况**：零长度（a == b）与斜线。本文件的路由结果恒为正交
+/// （routeEdge 只生成 x/y 方向的段），所以斜线只可能来自外部调用方；保守起见
+/// 一律当成「不参与交叉判定」返回 0 —— 宁可少给出一种颜色，也不要把
+/// 随手画的斜线跟正交路由混在一起判出大量假交叉。
+int _axisKind(Offset a, Offset b, double eps) {
+  final dx = (b.dx - a.dx).abs();
+  final dy = (b.dy - a.dy).abs();
+  if (dx <= eps && dy <= eps) return 0; // 零长度
+  if (dy <= eps) return 1; // 横线
+  if (dx <= eps) return 2; // 竖线
+  return 0; // 斜线
+}
+
+/// [v] 是否严格落在 (lo, hi) 的内部（两端各缩进 [eps]）。
+///
+/// 这是「排除共享端点 / T 型接触」的关键：端点接触时 v == lo 或 v == hi，
+/// 缩进后立刻被判为「不在内部」。区间本身窄于 2*eps 时也返回 false —— 此时
+/// `lo + eps >= hi - eps`，所谓内部已经不存在了。
+bool _strictlyInside(double v, double lo, double hi, double eps) {
+  final min = math.min(lo, hi);
+  final max = math.max(lo, hi);
+  if (max - min <= 2 * eps) return false;
+  return v > min + eps && v < max - eps;
+}
+
+/// 两条正交折线是否发生**真实穿越**。
+///
+/// ⚠️ 正交路由下「看起来重叠」的场景远比「真交叉」多得多，直接套通用线段相交
+/// 算法会被误报淹没（几乎每条线都判成交叉 ⇒ 着色失去意义）。必须显式排除：
+///
+/// 1. **平行 / 共线重叠**：两条不同祖先的边走同一条横带（同一个行间空隙）、
+///    同一个父节点分叉出来的两段竖线 —— 平行的两段在几何上不可能「交叉」，
+///    一律 false。
+/// 2. **端点接触**：连向同一个节点的两条边，最后一段都终止在卡片边界的同一点；
+///    还有竖段恰好落在横带端点的 T 型接触。交点必须**严格落在两段内部**
+///    （两端各缩进 [epsilon]）才算穿越。
+bool polylinesCross(
+  List<Offset> a,
+  List<Offset> b, {
+  double epsilon = kCrossEpsilon,
+}) {
+  if (a.length < 2 || b.length < 2) return false;
+  for (var i = 0; i < a.length - 1; i++) {
+    for (var j = 0; j < b.length - 1; j++) {
+      if (_segmentsCrossProperly(a[i], a[i + 1], b[j], b[j + 1], epsilon)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/// 两段是否**真正穿越**（一横一竖，且交点严格在两段内部）。
+bool _segmentsCrossProperly(
+  Offset p1,
+  Offset p2,
+  Offset q1,
+  Offset q2,
+  double eps,
+) {
+  final kind1 = _axisKind(p1, p2, eps);
+  final kind2 = _axisKind(q1, q2, eps);
+  // 退化段（零长度 / 斜线）不参与；两个同方向（都横 / 都竖）不可能交叉。
+  if (kind1 == 0 || kind2 == 0 || kind1 == kind2) return false;
+
+  // 一横一竖：交点固定在 (竖线的 x, 横线的 y)，直接验它是否落在两段内部。
+  final firstIsHorizontal = kind1 == 1;
+  final hStart = firstIsHorizontal ? p1 : q1;
+  final hEnd = firstIsHorizontal ? p2 : q2;
+  final vStart = firstIsHorizontal ? q1 : p1;
+  final vEnd = firstIsHorizontal ? q2 : p2;
+
+  if (!_strictlyInside(vStart.dx, hStart.dx, hEnd.dx, eps)) return false;
+  if (!_strictlyInside(hStart.dy, vStart.dy, vEnd.dy, eps)) return false;
+  return true;
+}
+
+/// 交叉图：把 [polylines] 的每条线当顶点，两两做 [polylinesCross]，返回每条线
+/// 与之交叉的其它线下标集合（邻接是对称的，只算了一次 i<j 的组合）。
+///
+/// 复杂度 O(E² × 段数²)，几十条边可以忽略；调用方应对结果做缓存。
+List<Set<int>> buildCrossingGraph(
+  List<List<Offset>> polylines, {
+  double epsilon = kCrossEpsilon,
+}) {
+  final n = polylines.length;
+  final graph = <Set<int>>[for (var i = 0; i < n; i++) <int>{}];
+  for (var i = 0; i < n; i++) {
+    for (var j = i + 1; j < n; j++) {
+      if (polylinesCross(polylines[i], polylines[j], epsilon: epsilon)) {
+        graph[i].add(j);
+        graph[j].add(i);
+      }
+    }
+  }
+  return graph;
+}
+
+/// 给「互相交叉」的连线分配**互不相同的**颜色（贪心图着色）。
+///
+/// 返回值与 [polylines] 等长：
+/// - **0** = 这条线和谁都不交叉 → 调用方应保持画布的默认灰色。交叉才上色是
+///   有意的：彩色是用来在交叉处分辨走向的，全图上色反而变成一团彩虹。
+/// - **1..** = 调色板色号，调用方取 `palette[(v - 1) % palette.length]`。
+///
+/// 贪心保证正确性（不是启发式）：处理 i 时避开**已着色邻居**用过的色号，而晚于
+/// i 处理的邻居 j 也会避开 i 的色号 ⇒ 任意一对有交叉的边色号必不相同。
+///
+/// 色号**没有上限**（可能 > 调色板长度）：严重交叉的图里所能耗掉的色数是
+/// 「互相交叉的最多条数」，事先截断它反而会破坏上面的不相交保证。由调用方
+/// 取模复用调色板即可 `palette[(v - 1) % palette.length]`。
+List<int> assignCrossingColors(
+  List<List<Offset>> polylines, {
+  double epsilon = kCrossEpsilon,
+}) {
+  final n = polylines.length;
+  if (n == 0) return const <int>[];
+  final graph = buildCrossingGraph(polylines, epsilon: epsilon);
+  final result = <int>[for (var i = 0; i < n; i++) 0];
+  for (var i = 0; i < n; i++) {
+    if (graph[i].isEmpty) continue; // 不交叉 → 保持默认灰
+    var color = 1;
+    while (graph[i].any((j) => result[j] == color)) {
+      color++;
+    }
+    result[i] = color;
+  }
+  return result;
+}
+
+/// 折线集合的**几何签名**（只取顶点坐标，保留到 0.1px）。
+///
+/// 给上层做缓存 key：hover / 拖动会频繁触发 build，但**只要几何不变，交叉着色
+/// 的结果就不变**，没必要每帧重跑 O(E² × 段数²)。两个不同布局撞签名的概率
+/// 接近 0；即便真的撞了，也只是复用了一份颜色，不会有正确性问题。
+String polylinesSignature(List<List<Offset>> polylines) {
+  final sb = StringBuffer();
+  for (final pts in polylines) {
+    sb.write('|');
+    for (final p in pts) {
+      sb.write(p.dx.toStringAsFixed(1));
+      sb.write(',');
+      sb.write(p.dy.toStringAsFixed(1));
+      sb.write(';');
+    }
+  }
+  return sb.toString();
+}
+
 // ================= 内部工具 =================
 
 double _clamp(double v, double lo, double hi) => v < lo ? lo : (v > hi ? hi : v);

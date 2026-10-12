@@ -140,6 +140,12 @@ class CanvasNodes extends Table with SyncMeta {
   IntColumn get z => integer().named('z').withDefault(const Constant(0))();
   BoolColumn get collapsed =>
       boolean().named('collapsed').withDefault(const Constant(false))();
+
+  /// 是否锁定：true = 用户拖过 / 已固化，结构变化（增删边）的自动重排**不**移动它；
+  /// false = 浮动节点，结构变化时由布局引擎自动重新铺位。
+  /// 默认 true（历史数据 + 手动固化都按「已锁定」处理，除非显式置 false）。
+  BoolColumn get pinned =>
+      boolean().named('pinned').withDefault(const Constant(true))();
 }
 
 /// 画布连线。
@@ -152,6 +158,53 @@ class CanvasEdges extends Table with SyncMeta {
   /// semantic_prereq/attachment/manual。
   TextColumn get edgeType => text().named('edge_type').withDefault(const Constant('manual'))();
   TextColumn get prereqEdgeId => text().named('prereq_edge_id').nullable()();
+}
+
+/// 知识点分组（「分组」UI：框选知识点成一组成员，可命名 + 标基础度）。
+///
+/// 组序 [orderIndex] 越小越基础；[foundationalLevel] 是**组级**基础度，
+/// 成员可在 [membersJson] 里各自覆盖。
+@DataClassName('KpGroupRow')
+class KpGroups extends Table with SyncMeta {
+  /// 所属知识树（canvases.id）。
+  TextColumn get canvasId => text().named('canvas_id')();
+
+  TextColumn get name => text().named('name').withDefault(const Constant(''))();
+
+  /// 组序（第几组），从 0 开始；越小越基础（越先掌握）。
+  IntColumn get orderIndex =>
+      integer().named('order_index').withDefault(const Constant(0))();
+
+  /// 组级基础度（0 = 最基础）。成员未单独标注时用它。
+  IntColumn get foundationalLevel =>
+      integer().named('foundational_level').withDefault(const Constant(0))();
+
+  /// 成员 JSON：`[{"kpId":"...","level":1}]`；`level` 是点级基础度覆盖（缺省用组级）。
+  TextColumn get membersJson =>
+      text().named('members_json').withDefault(const Constant('[]'))();
+}
+
+/// 作业（「作业模式」的产物：一批薄弱点 + 给它们出的题）。
+///
+/// 题目以 JSON 整体存在 [Homeworks.itemsJson]，而不是拆成子表：
+/// 作业是一次性草稿、编辑时整体覆写，没有「按题查询 / 单题统计」的需求，
+/// 拆表只会多一次 join 和多一张要手写的 drift 生成类（本仓库 build_runner
+/// 不可用时，每张表的 .g.dart 都要手工复刻）。
+@DataClassName('HomeworkRow')
+class Homeworks extends Table with SyncMeta {
+  /// 所属知识树（canvases.id）。
+  TextColumn get canvasId => text().named('canvas_id')();
+
+  /// 作业标题。
+  TextColumn get title => text().named('title').withDefault(const Constant(''))();
+
+  /// 布置时选中的薄弱点 id（快照：日后知识点改名不影响历史作业的可读性）。
+  TextColumn get kpIdsJson =>
+      text().named('kp_ids_json').withDefault(const Constant('[]'))();
+
+  /// 题目 JSON：`[{"kpId","kpName","type","question","answer","difficulty"}]`。
+  TextColumn get itemsJson =>
+      text().named('items_json').withDefault(const Constant('[]'))();
 }
 
 /// AI 会话（聊天 / 老师模式）。

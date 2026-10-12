@@ -9,6 +9,7 @@ import 'data/models/knowledge_point.dart';
 import 'data/repositories/ai_session_repository.dart';
 import 'data/repositories/settings_repository.dart';
 import 'data/sync/sync_context.dart';
+import 'features/agent/agent_page.dart';
 import 'features/canvas/canvas_page.dart';
 import 'features/notes/delete_note_dialog.dart';
 import 'features/notes/note_editor_page.dart';
@@ -144,6 +145,7 @@ class _AppShellState extends State<AppShell> {
           ));
         },
       ),
+      AgentPage(service: widget.service, db: widget.db),
     ];
     return Scaffold(
       body: IndexedStack(index: _index, children: pages),
@@ -175,6 +177,11 @@ class _AppShellState extends State<AppShell> {
             icon: Icon(Icons.settings_outlined),
             selectedIcon: Icon(Icons.settings),
             label: '设置',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.assistant_outlined),
+            selectedIcon: Icon(Icons.assistant),
+            label: 'AI 助手',
           ),
         ],
       ),

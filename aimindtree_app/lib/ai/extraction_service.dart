@@ -13,6 +13,7 @@ import '../core/result.dart';
 import '../core/secret_store.dart';
 import '../data/db/drift_database.dart';
 import '../data/models/knowledge_point.dart';
+import '../data/repositories/group_repository.dart';
 import '../data/repositories/knowledge_repository.dart';
 import '../data/repositories/tree_repository.dart';
 import '../data/repositories/settings_repository.dart';
@@ -48,10 +49,12 @@ class ExtractionService {
     required this.repo,
     required this.ai,
     required this.trees,
+    required this.groups,
   });
 
   final KnowledgeRepository repo;
   final TreeRepository trees;
+  final GroupRepository groups;
   final AiService ai;
 
   static final AppLog _log = AppLog('extraction');
@@ -252,6 +255,7 @@ class ExtractionService {
     final ai = AiService(router: router);
     final repo = KnowledgeRepository(database, deviceId: did);
     final trees = TreeRepository(database, deviceId: did);
+    final groups = GroupRepository(database, deviceId: did);
 
     // === Sync（T03）===
     final outbox = SyncOutboxRepo(database, deviceId: did);
@@ -298,7 +302,7 @@ class ExtractionService {
     }
 
     return (
-      ExtractionService(repo: repo, ai: ai, trees: trees),
+      ExtractionService(repo: repo, ai: ai, trees: trees, groups: groups),
       database,
       router,
       settings,

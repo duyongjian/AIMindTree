@@ -111,7 +111,11 @@ class AiSessionRepository {
   }
 
   static String _sessionTypeFor(AiTask t) {
-    // 老师模式用 tutor；其他对话用 chat。
-    return t == AiTask.t7Socratic ? 'tutor' : 'chat';
+    // 每个会话类任务各自独立 session（同一 KP 下 T5 追问 / T6 讲解 不能混）。
+    // T7 苏格拉底走 tutor，T5/T6 用各自 code 区分，其余对话归到 chat。
+    if (t == AiTask.t7Socratic) return 'tutor';
+    if (t == AiTask.t5Ask) return 'chat';
+    if (t == AiTask.t6Explain) return 'explain';
+    return t.code;
   }
 }

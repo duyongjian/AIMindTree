@@ -224,6 +224,20 @@ class KnowledgeRepository {
     double confidence = 1.0,
   }) async {
     try {
+      if (fromKpId == toKpId) {
+        return Failure(StateError('不能把知识点连接到它自己'));
+      }
+      // 约束（用户诉求 2026-10-10）：每个知识点最多只能有一个后继（出边）。
+      // 已有后继则拒绝，由用户先删旧边再连新边——避免误丢数据。
+      final existingSucc = await successorsOf(fromKpId);
+      if (existingSucc.isNotEmpty) {
+        return Failure(StateError(
+            '每个知识点最多只能有一个后继，请先删除该知识点现有的后继关系'));
+      }
+      // 防环：不能让 to 沿后继链回到 from（否则形成学习环路）。
+      if (await _canReach(toKpId, fromKpId)) {
+        return Failure(StateError('会形成学习环路，已阻止该连接'));
+      }
       final dup = await (_db.select(_db.prerequisiteEdges)
             ..where((t) =>
                 t.fromKpId.equals(fromKpId) & t.toKpId.equals(toKpId)))
@@ -305,12 +319,17 @@ class KnowledgeRepository {
   ///
   /// 节点 id 用 `canvasId:kpId` 保证唯一，便于 `insertOnConflictUpdate`；
   /// version 递增（而非固定 1），否则 LWW 同步会误判新旧。
+  ///
+  /// [pinned] 标记该节点是否被「锁定」：拖拽落库、手动重排都走 true（锁定，结构变化
+  /// 的自动重排不再移动它）；AI 自动铺位 / 自动补前置落库走 false（浮动，结构变化
+  /// 时仍可被布局引擎重新铺位）。
   Future<Result<void>> saveNodePosition(
     String canvasId,
     String kpId,
     double x,
-    double y,
-  ) async {
+    double y, {
+    bool pinned = true,
+  }) async {
     final nodeId = '$canvasId:$kpId';
     try {
       final existing =
@@ -325,6 +344,7 @@ class KnowledgeRepository {
             targetId: Value(kpId),
             x: Value(x),
             y: Value(y),
+            pinned: Value(pinned),
             updatedAt: Value(DateTime.now().toUtc()),
             version: Value((existing?.version ?? 0) + 1),
             deviceId: Value(deviceId),
@@ -336,20 +356,20 @@ class KnowledgeRepository {
     }
   }
 
-  /// 清空某块画布上已保存的节点位置（「重新布局」用）。
+  /// 读取画布节点当前的（x, y, pinned）状态，供「仅重排未锁定节点」使用。
   ///
-  /// 位置固化后一直有效，用户把图拖乱需要一个一键恢复自动布局的入口。
-  Future<Result<void>> clearNodePositions(String canvasId) async {
-    try {
-      await (_db.delete(_db.canvasNodes)
-            ..where((t) =>
-                t.canvasId.equals(canvasId) & t.targetType.equals('kp')))
-          .go();
-      return const Success<void>(null);
-    } on Object catch (e, s) {
-      _log.e('清空节点位置失败', error: e, stackTrace: s);
-      return Failure<void>(e, s);
-    }
+  /// 未拖动过的节点不在表里，调用方回退到布局引擎算出的默认位置（按 pinned=true
+  /// 处理，结构变化时也不动它）。
+  Future<Map<String, ({double x, double y, bool pinned})>> loadNodeLayout(
+      String canvasId) async {
+    final rows = await (_db.select(_db.canvasNodes)
+          ..where((t) =>
+              t.canvasId.equals(canvasId) & t.targetType.equals('kp')))
+        .get();
+    return <String, ({double x, double y, bool pinned})>{
+      for (final r in rows)
+        r.targetId: (x: r.x, y: r.y, pinned: r.pinned),
+    };
   }
 
   /// 设置掌握状态；若为「未掌握」则触发**后继级联降级**。
@@ -504,8 +524,64 @@ class KnowledgeRepository {
   Future<List<String>> prerequisitesOf(String kpId) async {
     final rows = await (_db.select(_db.prerequisiteEdges)
           ..where((t) => t.toKpId.equals(kpId)))
-        .get();
+          .get();
     return rows.map((r) => r.fromKpId).toList();
+  }
+
+  /// 在全局前置图里判断 [start] 是否能沿「后继」走到 [target]。
+  ///
+  /// 用于连线防环：若 [to] 能抵达 [from]，则加 `from→to` 会成环（学习环路）。
+  /// 每个知识点最多一个后继（见 [addManualPrerequisiteEdge]），所以后继链是简单
+  /// 路径；这里仍用 BFS + visited 防御可能存在多后继的脏数据。
+  Future<bool> _canReach(String start, String target) async {
+    if (start == target) return true;
+    final visited = <String>{};
+    final queue = <String>[start];
+    while (queue.isNotEmpty) {
+      final cur = queue.removeAt(0);
+      if (cur == target) return true;
+      if (!visited.add(cur)) continue;
+      queue.addAll(await successorsOf(cur));
+    }
+    return false;
+  }
+
+  /// 把一组知识点整体平移 (dx, dy)（拖动分组框时调用）。
+  ///
+  /// 只平移**已固化过位置**的成员（canvas_nodes 里有行）；没固化过的交给布局引擎，
+  /// 暂不平移（避免以 (0,0) 为基准凭空生成坐标）。version 递增以配合 LWW 同步。
+  Future<Result<void>> moveGroupMembers(
+    String canvasId,
+    List<String> memberIds,
+    double dx,
+    double dy,
+  ) async {
+    try {
+      for (final kpId in memberIds) {
+        final id = '$canvasId:$kpId';
+        final existing = await (_db.select(_db.canvasNodes)
+              ..where((t) => t.id.equals(id)))
+            .getSingleOrNull();
+        if (existing == null) continue; // 没固化过位置：交给布局引擎
+        await _db
+            .into(_db.canvasNodes)
+            .insertOnConflictUpdate(CanvasNodesCompanion(
+              id: Value(id),
+              canvasId: Value(canvasId),
+              targetType: const Value('kp'),
+              targetId: Value(kpId),
+              x: Value(existing.x + dx),
+              y: Value(existing.y + dy),
+              updatedAt: Value(DateTime.now().toUtc()),
+              version: Value(existing.version + 1),
+              deviceId: Value(deviceId),
+            ));
+      }
+      return const Success<void>(null);
+    } on Object catch (e, s) {
+      _log.e('平移分组成员失败', error: e, stackTrace: s);
+      return Failure<void>(e, s);
+    }
   }
 
   /// 当前掌握状态（取最新一条记录）。

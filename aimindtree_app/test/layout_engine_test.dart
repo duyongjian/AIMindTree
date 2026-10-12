@@ -14,6 +14,16 @@ KnowledgePoint _kp(String id, String name) => KnowledgePoint(
 PrerequisiteEdge _edge(String from, String to) =>
     PrerequisiteEdge(fromKpId: from, toKpId: to);
 
+/// 指定来源笔记的知识点（用于验证「按领域分组」）。
+KnowledgePoint _kpNote(String id, String name, String note) => KnowledgePoint(
+      id: id,
+      name: name,
+      sourceNoteId: note,
+      sourceStart: 0,
+      sourceEnd: 0,
+      sourceQuote: '',
+    );
+
 void main() {
   group('layoutForest：拓扑分层', () {
     test('无前置的 KP 全在 level 0', () {
@@ -86,6 +96,20 @@ void main() {
         const [],
       );
       expect(r1.nodes.map((n) => n.kpId).toList(), ['a', 'm', 'z']);
+    });
+
+    test('同层按「领域(来源笔记)」分组，组内再按名称', () {
+      final r = layoutForest(
+        [
+          _kpNote('x1', 'Apple', 'nA'),
+          _kpNote('y1', 'Banana', 'nB'),
+          _kpNote('z1', 'Cherry', 'nA'),
+        ],
+        const [],
+      );
+      // nA 组 = {Apple, Cherry}（标签 'Apple'）先于 nB 组 = {Banana}（标签 'Banana'）；
+      // 组内按名称：Apple → Cherry。纯名称排序会是 Apple/Banana/Cherry，此处不同。
+      expect(r.nodes.map((n) => n.kpId).toList(), ['x1', 'z1', 'y1']);
     });
   });
 }

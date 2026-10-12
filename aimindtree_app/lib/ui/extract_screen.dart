@@ -43,6 +43,8 @@ class _ExtractScreenState extends State<ExtractScreen> {
 
   Future<void> _reloadStored() async {
     final all = await _repo.allKnowledgePoints();
+    // 按更新时间倒序：让「本地库累计」展示最近入库的知识点，而不是库里原始顺序。
+    all.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     if (!mounted) return;
     setState(() => _stored = all);
   }
@@ -163,13 +165,25 @@ class _ExtractScreenState extends State<ExtractScreen> {
                     ),
                   ),
                   const Divider(),
-                  Text('本地库累计 (${_stored.length})',
+                  Text('本地库累计（共 ${_stored.length} 个知识点，最近在前）',
                       style: const TextStyle(fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8),
                   Expanded(
-                    child: ListView.builder(
-                      itemCount: _stored.length,
-                      itemBuilder: (_, i) => _KpCard(kp: _stored[i]),
+                    child: ListView(
+                      children: [
+                        for (final kp in _stored.take(50))
+                          _KpCard(kp: kp),
+                        if (_stored.length > 50)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            child: Text(
+                              '…还有 ${_stored.length - 50} 个，去「知识树」查看全部',
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.grey),
+                            ),
+                          ),
+                      ],
                     ),
                   ),
                 ],

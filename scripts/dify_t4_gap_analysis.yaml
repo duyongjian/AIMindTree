@@ -87,7 +87,7 @@ workflow:
         - variable: depth_instruction
           label: depth_instruction
           type: paragraph
-          required: false
+          required: true
           max_length: 2000
           options: []
           allowed_file_types: []

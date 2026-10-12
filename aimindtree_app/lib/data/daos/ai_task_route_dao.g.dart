@@ -4,10 +4,13 @@ part of 'ai_task_route_dao.dart';
 
 // ignore_for_file: type=lint
 mixin _$AiTaskRouteDaoMixin on DatabaseAccessor<AppDatabase> {
+  $AiTaskRoutesTable get aiTaskRoutes => attachedDatabase.aiTaskRoutes;
   AiTaskRouteDaoManager get managers => AiTaskRouteDaoManager(this);
 }
 
 class AiTaskRouteDaoManager {
   final _$AiTaskRouteDaoMixin _db;
   AiTaskRouteDaoManager(this._db);
+  $$AiTaskRoutesTableTableManager get aiTaskRoutes =>
+      $$AiTaskRoutesTableTableManager(_db.attachedDatabase, _db.aiTaskRoutes);
 }

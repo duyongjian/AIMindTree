@@ -823,4 +823,235 @@ void main() {
       expect(detailed.midpoint, polylineMidpoint(pts));
     });
   });
+
+  // =====================================================================
+  // 需求②：点到折线的距离（hover 判定）
+  // =====================================================================
+
+  group('distanceToPolyline / distanceToSegment', () {
+    test('水平段正上方 / 正下方 N px → 距离为 N', () {
+      final poly = <Offset>[const Offset(0, 50), const Offset(100, 50)];
+      expect(distanceToPolyline(poly, const Offset(50, 45)), closeTo(5, 1e-9));
+      expect(distanceToPolyline(poly, const Offset(50, 55)), closeTo(5, 1e-9));
+      expect(distanceToPolyline(poly, const Offset(50, 50)), closeTo(0, 1e-9));
+    });
+
+    test('越过端点：必须对投影参数 clamp（否则「无限长直线」的距离是错的）', () {
+      final poly = <Offset>[const Offset(0, 0), const Offset(100, 0)];
+      // 不 clamp 的话 (150,0) 到「无限长直线 y=0」的距离是 0；正确答案是到端点的 50。
+      expect(distanceToPolyline(poly, const Offset(150, 0)), closeTo(50, 1e-9));
+      expect(distanceToPolyline(poly, const Offset(-30, 0)), closeTo(30, 1e-9));
+      expect(distanceToPolyline(poly, const Offset(150, 20)),
+          closeTo(math.sqrt(50 * 50 + 20 * 20), 1e-9));
+    });
+
+    test('多段折线取逐段最小值', () {
+      final poly = <Offset>[
+        const Offset(0, 0),
+        const Offset(100, 0),
+        const Offset(100, 100),
+      ];
+      expect(distanceToPolyline(poly, const Offset(50, 5)), closeTo(5, 1e-9));
+      expect(distanceToPolyline(poly, const Offset(105, 50)), closeTo(5, 1e-9));
+    });
+
+    test('退化输入：重复点不炸 NaN，空折线 = 无穷远', () {
+      final dup = <Offset>[const Offset(10, 10), const Offset(10, 10)];
+      final d = distanceToPolyline(dup, const Offset(13, 14));
+      expect(d.isFinite, isTrue);
+      expect(d, closeTo(5, 1e-9));
+      expect(distanceToPolyline(const <Offset>[], const Offset(3, 4)),
+          double.infinity);
+      expect(distanceToPolyline(<Offset>[const Offset(3, 4)], Offset.zero),
+          closeTo(5, 1e-9));
+    });
+
+    test('点在两条平行线之间：取更近的那条（hover 判定要「最近优先」）', () {
+      final near = <Offset>[const Offset(0, 40), const Offset(100, 40)];
+      final far = <Offset>[const Offset(0, 50), const Offset(100, 50)];
+      // 到 near 是 10px、到 far 是 20px：只有当阈值落在两者之间时才会选中 near。
+      expect(distanceToPolyline(near, const Offset(50, 30)), closeTo(10, 1e-9));
+      expect(distanceToPolyline(far, const Offset(50, 30)), closeTo(20, 1e-9));
+    });
+  });
+
+  // =====================================================================
+  // 需求③：交叉判定必须过滤掉「共线重叠」与「共享端点」，否则整张图都被判成交叉
+  // =====================================================================
+
+  group('polylinesCross：真实穿越判定', () {
+    test('标准十字 → 交叉，且判定对称', () {
+      final h = <Offset>[const Offset(0, 50), const Offset(100, 50)];
+      final v = <Offset>[const Offset(50, 0), const Offset(50, 100)];
+      expect(polylinesCross(h, v), isTrue);
+      expect(polylinesCross(v, h), isTrue, reason: '交叉关系必须对称');
+    });
+
+    test('共线重叠（两条线走同一条横带）→ 不是交叉', () {
+      // 正交路由最常见的假阳性：不同祖先的边往往挑到同一个行间空隙。
+      final a = <Offset>[const Offset(0, 50), const Offset(100, 50)];
+      final b = <Offset>[const Offset(50, 50), const Offset(150, 50)];
+      expect(polylinesCross(a, b), isFalse);
+    });
+
+    test('两条竖线平行 → 不是交叉', () {
+      final a = <Offset>[const Offset(50, 0), const Offset(50, 100)];
+      final b = <Offset>[const Offset(60, 0), const Offset(60, 100)];
+      expect(polylinesCross(a, b), isFalse);
+    });
+
+    test('共享端点（同一父节点分叉出的两条竖直段）→ 不是交叉', () {
+      // 两条边都从 (110,136) 出发、第一段完全重合：端点接触不算穿越。
+      final a = <Offset>[const Offset(110, 136), const Offset(110, 160)];
+      final b = <Offset>[const Offset(110, 136), const Offset(110, 200)];
+      expect(polylinesCross(a, b), isFalse);
+    });
+
+    test('T 型接触（竖段的端点正好落在横段中间）→ 不是交叉', () {
+      final h = <Offset>[const Offset(0, 50), const Offset(100, 50)];
+      final v = <Offset>[const Offset(50, 0), const Offset(50, 50)];
+      expect(polylinesCross(h, v), isFalse);
+    });
+
+    test('擦过端点（交点离端点 < epsilon）→ 不是交叉', () {
+      final h = <Offset>[const Offset(0, 50), const Offset(100, 50)];
+      final v = <Offset>[const Offset(0.2, 0), const Offset(0.2, 100)];
+      expect(polylinesCross(h, v), isFalse);
+    });
+
+    test('只是「擦过一点点」但交点确实在两段内部 → 算交叉', () {
+      final h = <Offset>[const Offset(0, 50), const Offset(100, 50)];
+      final v = <Offset>[const Offset(3.0, 0), const Offset(3.0, 100)];
+      expect(polylinesCross(h, v), isTrue);
+    });
+
+    test('退化折线（不足两点 / 单点）→ 不是交叉', () {
+      final h = <Offset>[const Offset(0, 50), const Offset(100, 50)];
+      expect(polylinesCross(<Offset>[const Offset(50, 0)], h), isFalse);
+      expect(polylinesCross(const <Offset>[], h), isFalse);
+    });
+
+    test('真实布局 A→B / B→C / A→C：**一个假交叉都没有**', () {
+      // 这是本轮改造最容易踩空的地方：A→C 绕行时会跟 A→B / B→C 共线、
+      // 共享起点 / 终点，若不过滤，三条边会被全部判成互相交叉 ⇒ 着色失去意义。
+      final a = node(0, 0);
+      final b = node(0, kRowH);
+      final c = node(0, 2 * kRowH);
+      final routes = <List<Offset>>[
+        routeEdge(from: a.topLeft, to: b.topLeft, nodeSize: kNodeSize,
+            obstacles: <Rect>[c], gap: kGap),
+        routeEdge(from: b.topLeft, to: c.topLeft, nodeSize: kNodeSize,
+            obstacles: <Rect>[a], gap: kGap),
+        routeEdge(from: a.topLeft, to: c.topLeft, nodeSize: kNodeSize,
+            obstacles: <Rect>[b], gap: kGap),
+      ];
+      final graph = buildCrossingGraph(routes);
+      for (var i = 0; i < graph.length; i++) {
+        expect(graph[i], isEmpty, reason: '第 $i 条边 ${routes[i]} 不应与任何边交叉');
+      }
+      final colors = assignCrossingColors(routes);
+      expect(colors, everyElement(0), reason: '不交叉的边必须保持默认灰');
+    });
+  });
+
+  group('assignCrossingColors：交叉的两条边颜色必不相同', () {
+    test('交叉对换色；不交叉的保持 0（默认灰）', () {
+      final lines = <List<Offset>>[
+        <Offset>[const Offset(0, 50), const Offset(100, 50)], // 横
+        <Offset>[const Offset(50, 0), const Offset(50, 100)], // 竖：与上面交叉
+        <Offset>[const Offset(0, 200), const Offset(100, 200)], // 与谁都不交叉
+      ];
+      final colors = assignCrossingColors(lines);
+      expect(colors.length, 3);
+      expect(colors[2], 0, reason: '没交叉的线保持默认灰（不要整张图变彩虹）');
+      expect(colors[0], isNot(0));
+      expect(colors[1], isNot(0));
+      expect(colors[0], isNot(colors[1]), reason: '交叉的两条边必须不同色');
+    });
+
+    test('K5,5 完全二部图：贪心给出的解满足「任意交叉对色号不同」', () {
+      // 5 条横线 × 5 条竖线全部两两相交：竖线之间互为平行（不交叉），
+      // 所以理论最少色数是 2，贪心应当恰好用 2 个色号。
+      final lines = <List<Offset>>[
+        for (var i = 1; i <= 5; i++)
+          <Offset>[Offset(0, 20.0 * i), Offset(400, 20.0 * i)],
+        for (var j = 1; j <= 5; j++)
+          <Offset>[Offset(40.0 * j, 0), Offset(40.0 * j, 120)],
+      ];
+      final graph = buildCrossingGraph(lines);
+      expect(graph[0].length, 5, reason: '第一条横线应与 5 条竖线全部交叉');
+
+      final colors = assignCrossingColors(lines);
+      for (var i = 0; i < lines.length; i++) {
+        for (final j in graph[i]) {
+          expect(colors[i], isNot(colors[j]),
+              reason: '$i 与 $j 交叉，色号必须不同（这是正确性而非启发式）');
+        }
+      }
+      // 互不交叉的线可以复用同一个色号（否则图上会多余地铺满颜色）。
+      expect(colors.take(5).toSet().length, 1, reason: '横线之间不交叉 → 同色');
+      expect(colors.skip(5).toSet().length, 1, reason: '竖线之间不交叉 → 同色');
+      expect(colors.first, isNot(colors.last));
+    });
+
+    test('混合场景：一部分交叉、一部分不交叉', () {
+      final lines = <List<Offset>>[
+        <Offset>[const Offset(0, 50), const Offset(200, 50)], // 0：横，与 2 交叉
+        <Offset>[const Offset(0, 150), const Offset(200, 150)], // 1：横，与谁都不交叉
+        // 2：竖。⚠️ 只到 y=100 —— 若写成 200 就会一路穿过 y=150 的那条横线，
+        // 于是 1 也变成「交叉边」、被上色，下面 expect(colors[1], 0) 就站不住了。
+        // 竖线长度必须够不着 1，这条用例的「混合场景」才真的成立。
+        <Offset>[const Offset(100, 0), const Offset(100, 100)],
+      ];
+      final colors = assignCrossingColors(lines);
+      expect(colors[1], 0);
+      expect(colors[0], isNot(colors[2]));
+      expect(colors[0], isNot(0));
+      expect(colors[2], isNot(0));
+    });
+
+    test('空输入 → 空结果，不抛异常', () {
+      expect(assignCrossingColors(const <List<Offset>>[]), isEmpty);
+      expect(buildCrossingGraph(const <List<Offset>>[]), isEmpty);
+    });
+  });
+
+  group('polylinesSignature：交叉着色的缓存 key', () {
+    final lines = <List<Offset>>[
+      <Offset>[const Offset(0, 0), const Offset(10, 0)],
+      <Offset>[const Offset(10, 0), const Offset(10, 10)],
+    ];
+
+    test('几何不变 → 签名完全一致（可以命中缓存）', () {
+      final again = <List<Offset>>[
+        <Offset>[const Offset(0, 0), const Offset(10, 0)],
+        <Offset>[const Offset(10, 0), const Offset(10, 10)],
+      ];
+      expect(polylinesSignature(again), polylinesSignature(lines));
+    });
+
+    test('任一顶点抖动 → 签名改变（必须重算着色）', () {
+      final moved = <List<Offset>>[
+        <Offset>[const Offset(0, 0), const Offset(10, 0)],
+        <Offset>[const Offset(10, 0), const Offset(10, 12)],
+      ];
+      expect(polylinesSignature(moved), isNot(polylinesSignature(lines)));
+    });
+
+    test('顺序不同 / 条数不同 → 签名不同（颜色列表与顺序一一对应）', () {
+      final swapped = <List<Offset>>[
+        <Offset>[const Offset(10, 0), const Offset(10, 10)],
+        <Offset>[const Offset(0, 0), const Offset(10, 0)],
+      ];
+      expect(polylinesSignature(swapped), isNot(polylinesSignature(lines)));
+      expect(
+        polylinesSignature(<List<Offset>>[lines.first]),
+        isNot(polylinesSignature(lines)),
+      );
+    });
+
+    test('空列表 → 稳定签名，不抛异常', () {
+      expect(polylinesSignature(const <List<Offset>>[]), '');
+    });
+  });
 }

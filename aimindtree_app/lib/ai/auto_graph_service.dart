@@ -1,15 +1,20 @@
 /// 自动知识图谱服务（用户诉求的「AI 能力」两轮之一）。
 ///
-/// 两个能力（**DSL 优先 + 本地兜底**）：
+/// 三个能力（**只跑工作流，不做本地兜底**）：
 /// 1. **自动连线**（T3 前置知识推断）：在知识树里自动推断「谁是谁的前置」并落库为
 ///    `PrerequisiteEdge`（`origin='ai'`，用户可在画布上删）。
-/// 2. **自动补前置（T4 深度补前置）**：针对**单个选中知识点**，按所选深度递归补出
+/// 2. **按分组连线**（T3 + 分组）：把每个点所属的组名 / 组序 / 基础度作为附加字段
+///    一并喂给 T3，让 AI 在「先掌握什么、后掌握什么」的前提下推断；客户端只保留
+///    「低组 → 高组」的跨组正向边，落实「第一组 → 第二组 → …」的连线逻辑。
+/// 3. **自动补前置（T4 深度补前置）**：针对**单个选中知识点**，按所选深度递归补出
 ///    「要理解它需要先懂什么」的前置链，以**建议**形态返回（不入库——没有可锚定的
 ///    原文就不编造，遵守 PRD 锚点硬规则）。
 ///
-/// 降级策略：先尝试 Dify 工作流（DSL JSON），任一层调用失败 / 超时 / 未配置 → 自动回退
-/// 到本地启发式。本地启发式保证**离线也能用**，是兜底也是缺 Dify 部署时的主力。
+/// 失败策略（用户明确要求）：**只跑工作流**。Dify 不可用 / 超时 / 未配置 / 解析失败
+/// 一律返回 [Failure]，绝不再回退本地启发式、不静默产出边，避免用户误以为「AI 连好了」。
 library;
+
+import 'dart:convert';
 
 import 'ai_provider.dart';
 import 'ai_service.dart';
@@ -18,6 +23,7 @@ import 'prereq_depth.dart';
 import '../core/logger.dart';
 import '../core/result.dart';
 import '../data/models/knowledge_point.dart';
+import '../data/models/kp_group.dart';
 import '../data/models/suggested_prerequisite.dart';
 import '../data/repositories/knowledge_repository.dart';
 import '../data/repositories/tree_repository.dart';
@@ -67,6 +73,31 @@ class AutoPrereqResult {
   final bool usedFallback;
 }
 
+/// T4 递归补前置的实时进度（UI 用来显示「第几层 / 本层完成几个」）。
+class AutoPrereqProgress {
+  const AutoPrereqProgress({
+    required this.level,
+    required this.totalLevels,
+    required this.levelTotal,
+    required this.levelDone,
+  });
+
+  /// 当前递归层（从 1 开始）。
+  final int level;
+
+  /// 总层数上限（由 [PrereqDepth] 决定）。
+  final int totalLevels;
+
+  /// 本层要请求的节点数（frontier 大小）。
+  final int levelTotal;
+
+  /// 本层已完成请求的节点数。
+  final int levelDone;
+
+  String get label =>
+      '正在请求前置（第 $level/$totalLevels 层，本层已完成 $levelDone/$levelTotal）…';
+}
+
 /// 递归 frontier 中的单个待展开项（某层要喂给 T4 的前置候选）。
 class _FrontierItem {
   const _FrontierItem({
@@ -110,13 +141,16 @@ class AutoGraphService {
           created: 0,
           total: 0,
           edges: const <PrerequisiteEdge>[],
-          usedFallback: true,
+          usedFallback: false,
           note: '知识点不足 2 个，无法自动连线',
         ));
       }
 
+      // T3 工作流的 `points` 输入字段是 string 类型（部署态），必须把知识点列表
+      // 序列化成 JSON 字符串再发；直接发 List/Map 会被 Dify 输入表单以
+      // "must be a string" 拒绝（400）。模型在 prompt 里能直接解析这段 JSON 文本。
       final inputs = <String, dynamic>{
-        'points': [
+        'points': jsonEncode([
           for (final p in points)
             {
               'id': p.id,
@@ -124,61 +158,26 @@ class AutoGraphService {
               'type': p.type.name,
               'definition': p.definition,
             }
-        ],
+        ]),
       };
 
-      List<PrerequisiteEdge> edges;
-      var usedFallback = false;
-
       final aiRes = await _run(AiTask.t3Prerequisite, inputs);
-      if (aiRes is Success<AiTaskResult> && aiRes.value.parsed is Map) {
-        edges = _parsePrereqEdges(aiRes.value.parsed, points);
-        // AI 没给出有效边 → 退回本地兜底，保证有结果。
-        if (edges.isEmpty) {
-          edges = _localInferEdges(points);
-          usedFallback = true;
-        }
-      } else {
-        _log.w('T3 AI 调用不可用，启用本地启发式兜底');
-        edges = _localInferEdges(points);
-        usedFallback = true;
+      if (aiRes is! Success<AiTaskResult> || aiRes.value.parsed is! Map) {
+        // 工作流不可用 / 解析失败 → 直接报错，不静默走本地启发式（用户要求只跑工作流）。
+        final why = switch (aiRes) {
+          Success<AiTaskResult>(value: final v) =>
+            'T3 输出解析失败（parsed 非 Map）：'
+            '${v.content.length > 200 ? "${v.content.substring(0, 200)}…" : v.content}',
+          Failure<AiTaskResult>(error: final e) => 'T3 调用失败：$e',
+        };
+        _log.w('T3 工作流失败，未启用本地兜底：$why');
+        return Failure(StateError(why));
       }
+      // 只接受工作流结果；AI 没给出边就返回空（不再本地启发式兜底）。
+      final edges = _parsePrereqEdges(aiRes.value.parsed, points);
+      final usedFallback = false;
 
-      // 与已存在边合并去重 + 防环，再落库。
-      final existing = await repo.prerequisiteEdgesAmong(
-        points.map((p) => p.id).toList(),
-      );
-      final adj = <String, Set<String>>{};
-      final haveKeys = <String>{};
-      for (final e in existing) {
-        adj.putIfAbsent(e.fromKpId, () => <String>{}).add(e.toKpId);
-        haveKeys.add('${e.fromKpId}->${e.toKpId}');
-      }
-
-      var created = 0;
-      final dedup = <String>{};
-      for (final e in edges) {
-        if (e.fromKpId == e.toKpId) continue;
-        final key = '${e.fromKpId}->${e.toKpId}';
-        if (dedup.contains(key)) continue;
-        dedup.add(key);
-        // 已存在 → 跳过（不重复创建，也不计入 created）。
-        if (haveKeys.contains(key)) continue;
-        // 防环：加上 e 后不能让 to 能回到 from（即不能形成环）。
-        if (_hasPath(adj, e.toKpId, e.fromKpId)) continue;
-        final res = await repo.addManualPrerequisiteEdge(
-          e.fromKpId,
-          e.toKpId,
-          reason: e.reason,
-          origin: e.origin,
-          confidence: e.confidence,
-        );
-        if (res is Success<PrerequisiteEdge>) {
-          created++;
-          adj.putIfAbsent(e.fromKpId, () => <String>{}).add(e.toKpId);
-        }
-      }
-
+      final created = await _mergeAndPersist(points, edges);
       return Success(AutoLinkResult(
         created: created,
         total: edges.length,
@@ -191,19 +190,156 @@ class AutoGraphService {
     }
   }
 
+  /// 按分组连线（用户诉求：先按逻辑分层，再按组序连线）。
+  ///
+  /// 把每个知识点所属的组名 / 组序 / 有效基础度作为**附加字段**塞进 T3 的
+  /// `points`（points 已是 JSON 字符串），让 AI 在知道分组的前提下推断点→点前置；
+  /// 再在客户端只保留「低组 → 高组」的跨组正向边（同组内 / 反向边一律丢弃），
+  /// 从而落实「第一组 → 第二组 → 第三组」的连线逻辑。仅对**已分组**的点连线。
+  ///
+  /// 仍遵守「只跑工作流」：AI 不可用 / 解析失败即 [Failure]，不做本地兜底。
+  Future<Result<AutoLinkResult>> autoLinkByGroups(
+    String treeId,
+    List<KpGroup> groups,
+  ) async {
+    try {
+      final kpIds = await trees.memberPointIds(treeId);
+      final allPoints = await repo.pointsByIds(kpIds);
+
+      // kpId → (组序, 有效基础度, 组名)
+      final orderOf = <String, int>{};
+      final levelOf = <String, int>{};
+      final groupNameOf = <String, String>{};
+      for (final g in groups) {
+        for (final m in g.members) {
+          orderOf[m.kpId] = g.orderIndex;
+          levelOf[m.kpId] = g.levelOf(m.kpId);
+          groupNameOf[m.kpId] = g.name;
+        }
+      }
+      // 只对「已分组」的知识点连线。
+      final points =
+          allPoints.where((p) => orderOf.containsKey(p.id)).toList();
+      if (points.length < 2) {
+        return Success(AutoLinkResult(
+          created: 0,
+          total: 0,
+          edges: const <PrerequisiteEdge>[],
+          usedFallback: false,
+          note: '已分组的知识点不足 2 个，无法按组连线',
+        ));
+      }
+
+      final inputs = <String, dynamic>{
+        'points': jsonEncode([
+          for (final p in points)
+            {
+              'id': p.id,
+              'name': p.name,
+              'type': p.type.name,
+              'definition': p.definition,
+              'group': groupNameOf[p.id] ?? '',
+              'group_order': orderOf[p.id] ?? 0,
+              'foundation_level': levelOf[p.id] ?? 0,
+            }
+        ]),
+      };
+
+      final aiRes = await _run(AiTask.t3Prerequisite, inputs);
+      if (aiRes is! Success<AiTaskResult> || aiRes.value.parsed is! Map) {
+        final why = switch (aiRes) {
+          Success<AiTaskResult>(value: final v) =>
+            'T3 输出解析失败（parsed 非 Map）：'
+            '${v.content.length > 200 ? "${v.content.substring(0, 200)}…" : v.content}',
+          Failure<AiTaskResult>(error: final e) => 'T3 调用失败：$e',
+        };
+        _log.w('T3（按组）工作流失败，未启用本地兜底：$why');
+        return Failure(StateError(why));
+      }
+
+      // 只保留「低组 → 高组」的跨组正向边（组序严格递增）。
+      final raw = _parsePrereqEdges(aiRes.value.parsed, points);
+      final edges = <PrerequisiteEdge>[
+        for (final e in raw)
+          if ((orderOf[e.fromKpId] ?? 0) < (orderOf[e.toKpId] ?? 0)) e,
+      ];
+
+      final created = await _mergeAndPersist(points, edges);
+      return Success(AutoLinkResult(
+        created: created,
+        total: edges.length,
+        edges: edges,
+        usedFallback: false,
+      ));
+    } on Object catch (e, s) {
+      _log.e('按组连线失败', error: e, stackTrace: s);
+      return Failure(e, s);
+    }
+  }
+
+  /// 与已存在边合并去重 + 防环后落库，返回真正新建的边数。
+  Future<int> _mergeAndPersist(
+    List<KnowledgePoint> points,
+    List<PrerequisiteEdge> edges,
+  ) async {
+    final existing =
+        await repo.prerequisiteEdgesAmong(points.map((p) => p.id).toList());
+    final adj = <String, Set<String>>{};
+    final haveKeys = <String>{};
+    for (final e in existing) {
+      adj.putIfAbsent(e.fromKpId, () => <String>{}).add(e.toKpId);
+      haveKeys.add('${e.fromKpId}->${e.toKpId}');
+    }
+
+    var created = 0;
+    // 约束（用户诉求 2026-10-10）：每个知识点最多一个后继。同一 from 只保留第一条
+    // 候选边（其余丢弃），让客户端行为确定、不依赖 AI 返回顺序的偶然。
+    final capped = <String, PrerequisiteEdge>{};
+    for (final e in edges) {
+      if (e.fromKpId == e.toKpId) continue;
+      if (capped.containsKey(e.fromKpId)) continue;
+      capped[e.fromKpId] = e;
+    }
+    final cappedEdges = capped.values.toList();
+
+    final dedup = <String>{};
+    for (final e in cappedEdges) {
+      final key = '${e.fromKpId}->${e.toKpId}';
+      if (dedup.contains(key)) continue;
+      dedup.add(key);
+      // 已存在 → 跳过（不重复创建，也不计入 created）。
+      if (haveKeys.contains(key)) continue;
+      // 防环：加上 e 后不能让 to 能回到 from（即不能形成环）。
+      if (_hasPath(adj, e.toKpId, e.fromKpId)) continue;
+      final res = await repo.addManualPrerequisiteEdge(
+        e.fromKpId,
+        e.toKpId,
+        reason: e.reason,
+        origin: e.origin,
+        confidence: e.confidence,
+      );
+      if (res is Success<PrerequisiteEdge>) {
+        created++;
+        adj.putIfAbsent(e.fromKpId, () => <String>{}).add(e.toKpId);
+      }
+    }
+    return created;
+  }
+
   // ============ 自动补前置（T4，递归深度补前置） ============
 
   /// 针对**单个选中知识点** [target]，按深度 [depth] 递归补出前置链（仅建议，不入库）。
   ///
   /// 递归由客户端驱动（Dify 单次只产一层）：对 frontier 中每个点调用一次 T4 工作流，
   /// 解析出的 gap 用 `maxBreadth` 截断、去重后作为下一层 frontier，直至 `maxLevels`
-  /// 层或全部耗尽。任一层调用失败 → 立即转本地兜底 [ _localSuggestDepth ] 并停止递归。
+  /// 层或全部耗尽。任一层调用失败 → 直接返回 [Failure]（不再本地兜底，用户要求只跑工作流）。
   ///
   /// **锚点硬规则**：全程绝不 `new KnowledgePoint` / 写库。
   Future<Result<AutoPrereqResult>> autoPrerequisites(
     KnowledgePoint target,
     PrereqDepth depth, {
     String? customInstruction,
+    void Function(AutoPrereqProgress)? onProgress,
   }) async {
     try {
       var maxLevels = depth.maxLevels;
@@ -229,22 +365,42 @@ class AutoGraphService {
       for (var level = 1; level <= maxLevels; level++) {
         if (frontier.isEmpty) break;
         final nextFrontier = <_FrontierItem>[];
+        // 进入新的一层：先回调一次「本层还没开始请求」。
+        onProgress?.call(AutoPrereqProgress(
+          level: level,
+          totalLevels: maxLevels,
+          levelTotal: frontier.length,
+          levelDone: 0,
+        ));
+        var done = 0;
         for (final item in frontier) {
           final inputs = <String, dynamic>{
             'target': '${item.name} | ${item.type} | ${item.definition}',
             'depth': depth.code,
-            if (depth == PrereqDepth.custom && customInstruction != null)
-              'depth_instruction': customInstruction,
+            // 线上部署的 T4 工作流把 depth_instruction 设为必填（与本地 DSL 的
+            // required:false 失同步），任何档位都必须带这个字段，否则 Dify 返回 400。
+            // 非自定义档位用学段文案补足，custom 档位透传用户输入。
+            'depth_instruction': _depthInstructionFor(depth, customInstruction),
           };
           final aiRes = await _run(AiTask.t4GapAnalysis, inputs);
+          done++;
+          // 本层每完成一个节点请求就回调一次，UI 据此刷新「第 X/Y 层，本层已完成 a/b」。
+          onProgress?.call(AutoPrereqProgress(
+            level: level,
+            totalLevels: maxLevels,
+            levelTotal: frontier.length,
+            levelDone: done,
+          ));
           if (aiRes is! Success<AiTaskResult> || aiRes.value.parsed is! Map) {
-            // 任一层失败 → 立即转本地兜底，停止递归（绝不调用 T1 工作流）。
-            usedFallback = true;
-            suggestions.addAll(_localSuggestDepth(target, depth, customInstruction));
-            return Success(AutoPrereqResult(
-              suggestions: suggestions,
-              usedFallback: usedFallback,
-            ));
+            // 任一层失败 → 直接报错，不静默走本地启发式（用户要求只跑工作流）。
+            final why = switch (aiRes) {
+              Success<AiTaskResult>(value: final v) =>
+                'T4 输出解析失败（parsed 非 Map）：'
+                'content=${v.content.length > 200 ? "${v.content.substring(0, 200)}…" : v.content}',
+              Failure<AiTaskResult>(error: final e) => 'T4 调用失败：$e',
+            };
+            _log.w('T4 工作流失败，未启用本地兜底：$why');
+            return Failure(StateError(why));
           }
           final gaps = _parseGaps(aiRes.value.parsed).take(maxBreadth);
           for (final g in gaps) {
@@ -340,111 +496,24 @@ class AutoGraphService {
     ].where((s) => s.name.isNotEmpty).toList();
   }
 
-  // ============ 本地兜底启发式 ============
+  // ============ T4 输入构造 ============
 
-  /// 由名称/定义包含关系推断前置边：更「宽泛」的点指向更「具体」的点。
+  /// 构造 T4 工作流的 `depth_instruction`。
   ///
-  /// 仅当单向包含成立时连线，避免双向歧义噪声；最后用 DAG 环检测剔除会成环的边。
-  List<PrerequisiteEdge> _localInferEdges(List<KnowledgePoint> points) {
-    final candidates = <(String, String)>[];
-    for (final a in points) {
-      for (final b in points) {
-        if (a.id == b.id) continue;
-        final aSub = _isSubsumed(a, b); // a 是 b 的「父类」
-        final bSub = _isSubsumed(b, a);
-        if (aSub && !bSub) {
-          candidates.add((a.id, b.id));
-        } else if (bSub && !aSub) {
-          candidates.add((b.id, a.id));
-        }
-        // 双向都成立或都不成立：信息不足，跳过
-      }
-    }
-
-    final seen = <String>{};
-    final uniq = <(String, String)>[];
-    for (final c in candidates) {
-      final k = '${c.$1}->${c.$2}';
-      if (seen.add(k)) uniq.add(c);
-    }
-
-    final adj = <String, Set<String>>{};
-    final result = <PrerequisiteEdge>[];
-    for (final (from, to) in uniq) {
-      if (from == to) continue;
-      if (_hasPath(adj, to, from)) continue; // 加这条会形成环
-      adj.putIfAbsent(from, () => <String>{}).add(to);
-      result.add(PrerequisiteEdge(
-        fromKpId: from,
-        toKpId: to,
-        reason: '本地启发式：基于名称/定义包含关系推断',
-        origin: 'ai_fallback',
-        confidence: 0.5,
-      ));
-    }
-    return result;
-  }
-
-  /// 单目标的深度本地兜底（离线 / Dify 不可用）：基于名称+定义分词，按深度产出层级。
-  ///
-  /// 复用 `_tokens` / `_segmentCjk` 对 `target.name + target.definition` 分词，剔除
-  /// `_stopwords` 与目标自身名称；按 [depth] 控制层级：low/medium 仅 level=1，
-  /// high/custom 多产一层 level=2 的弱伪递归。结果均标注 `usedFallback`。
-  ///
-  /// 明确这是**弱启发式**：本地无模型，无法真正理解语义，仅基于字面共现 / 词频近似。
-  List<SuggestedPrerequisite> _localSuggestDepth(
-    KnowledgePoint target,
-    PrereqDepth depth,
-    String? custom,
-  ) {
-    final targetName = target.name.toLowerCase();
-    final text = '${target.name} ${target.definition}';
-    final counts = <String, int>{};
-    for (final tok in _tokens(text)) {
-      final tl = tok.toLowerCase();
-      if (tl.length < 2) continue;
-      if (_stopwords.contains(tl)) continue;
-      if (tl == targetName) continue;
-      counts[tl] = (counts[tl] ?? 0) + 1;
-    }
-    final ranked = counts.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-    final names = ranked.map((e) => e.key).toList();
-
-    final out = <SuggestedPrerequisite>[];
-    final taken = <String>{};
-
-    void addTier(int level, Iterable<String> tierNames) {
-      for (final n in tierNames) {
-        final nl = n.toLowerCase();
-        if (taken.contains(nl)) continue;
-        taken.add(nl);
-        out.add(SuggestedPrerequisite(
-          name: n,
-          reason: '本地启发式（离线兜底，弱近似）：从「${target.name}」的名称/定义中'
-              '切出的候选前置概念，建议以 AI 结果为准自行确认。',
-          level: level,
-        ));
-      }
-    }
-
-    final l1Count = switch (depth) {
-      PrereqDepth.low => 3,
-      PrereqDepth.medium => 4,
-      PrereqDepth.high => 5,
-      PrereqDepth.custom => _parseCustomInstruction(custom).breadth,
+  /// 线上部署的 T4 工作流把该字段设为**必填**（与本地 DSL 的 `required:false`
+  /// 失同步），所以低/中/高档位也要带一段与 [depth] 一致的学段文案，
+  /// 避免 Dify 返回 400；自定义档位直接透传用户自由文本。
+  static String _depthInstructionFor(PrereqDepth depth, String? custom) {
+    return switch (depth) {
+      PrereqDepth.low =>
+        '${depth.schoolStage}：只列最近一层直接相关前置。',
+      PrereqDepth.medium => '${depth.schoolStage}：列出中等基础的前置。',
+      PrereqDepth.high => '${depth.schoolStage}：尽量补到最基础的概念。',
+      PrereqDepth.custom =>
+        (custom?.trim().isNotEmpty ?? false)
+            ? custom!
+            : '根据目标知识点的性质，自行判断合适的讲解深度与学段。',
     };
-    final l1 = names.take(l1Count).toList();
-    addTier(1, l1);
-    // high / custom（映射后层数≥2）做一层伪递归：把剩余候选作为更底层（level=2）。
-    final produceLevel2 = depth == PrereqDepth.high ||
-        (depth == PrereqDepth.custom &&
-            _parseCustomInstruction(custom).maxLevels >= 2);
-    if (produceLevel2) {
-      final l2 = names.skip(l1Count).take(l1Count).toList();
-      addTier(2, l2);
-    }
-    return out;
   }
 
   // ============ 自定义指令解析 ============
@@ -477,14 +546,6 @@ class AutoGraphService {
 
   // ============ 工具 ============
 
-  bool _isSubsumed(KnowledgePoint general, KnowledgePoint specific) {
-    final g = general.name.trim().toLowerCase();
-    if (g.isEmpty) return false;
-    if (specific.name.toLowerCase().contains(g)) return true;
-    if (specific.definition.toLowerCase().contains(g)) return true;
-    return false;
-  }
-
   /// 在邻接表 [adj] 中判断是否存在 u → … → v 的路径。
   bool _hasPath(Map<String, Set<String>> adj, String u, String v) {
     if (u == v) return true;
@@ -501,106 +562,4 @@ class AutoGraphService {
     return false;
   }
 
-  static final _latin = RegExp(r'[A-Za-z][A-Za-z0-9]{1,}'); // 拉丁词（≥2 字符）
-
-  /// 中文里用于切词边界的功能词（启发式分词的低成本替代，非严谨分词）。
-  /// 命中这些字就当作词与词之间的空格。
-  static const _boundary = <String>{
-    '的', '了', '和', '与', '及', '或', '并', '且', '也', '才', '又', '再', '就',
-    '都', '却', '但', '是', '在', '着', '把', '被', '让', '使', '给', '对', '从',
-    '到', '由', '用', '推', '出', '求', '得', '为', '作', '成', '种', '个', '些',
-    '上', '下', '中', '内', '后', '前', '时', '当', '若', '则', '而', '等', '于',
-    '其', '它', '他', '她', '这', '那', '该', '各', '能', '可', '会', '要', '需',
-    '通过', '进行', '表示', '用来', '例如', '比如',
-  };
-
-  static bool _isCjk(String ch) {
-    final code = ch.codeUnitAt(0);
-    return code >= 0x4e00 && code <= 0x9fff;
-  }
-
-  /// 把一段中文按边界功能词切成候选概念（≥2 字），英文按单词。
-  List<String> _segmentCjk(String s) {
-    final out = <String>[];
-    final buf = StringBuffer();
-    void flush() {
-      if (buf.length >= 2) out.add(buf.toString());
-      buf.clear();
-    }
-
-    for (final ch in s.runes.map((r) => String.fromCharCode(r))) {
-      if (!_isCjk(ch)) {
-        flush();
-      } else if (_boundary.contains(ch)) {
-        flush();
-      } else {
-        buf.write(ch);
-      }
-    }
-    flush();
-    return out;
-  }
-
-  /// 把一段文本切成候选概念 token：中文按功能词切分、英文按单词。
-  List<String> _tokens(String s) {
-    final out = <String>[];
-    out.addAll(_segmentCjk(s));
-    out.addAll(_latin.allMatches(s).map((m) => m.group(0)!));
-    return out;
-  }
-
-  static final _stopwords = {
-    '的',
-    '了',
-    '和',
-    '与',
-    '及',
-    '是',
-    '在',
-    '一种',
-    '我们',
-    '这个',
-    '那个',
-    '例如',
-    '比如',
-    '可以',
-    '用来',
-    '表示',
-    '公式',
-    '定理',
-    '概念',
-    '方法',
-    '事实',
-    '定义',
-    '一个',
-    '这些',
-    '那些',
-    '因为',
-    '所以',
-    '如果',
-    '那么',
-    '需要',
-    '通过',
-    '进行',
-    '不同',
-    '相同',
-    '之间',
-    '关于',
-    '根据',
-    '由于',
-    '成为',
-    '使得',
-    '从而',
-    '以及',
-    '如何',
-    '其中',
-    '这种',
-    '主要',
-    '通常',
-    '一般',
-    '用于',
-    '能够',
-    '两个',
-    '多个',
-  };
 }

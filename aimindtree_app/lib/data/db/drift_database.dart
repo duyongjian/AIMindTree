@@ -23,6 +23,8 @@ part 'drift_database.g.dart';
     Canvases,
     CanvasNodes,
     CanvasEdges,
+    KpGroups,
+    Homeworks,
     AiSessions,
     AiMessages,
     AiProviders,
@@ -35,7 +37,28 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase([QueryExecutor? executor]) : super(executor ?? _openConnection());
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 4;
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+        onCreate: (m) => m.createAll(),
+        onUpgrade: (m, from, to) async {
+          // v1 → v2：新增「知识点分组」表（KpGroups）。
+          if (from < 2) {
+            await m.createTable(kpGroups);
+          }
+          // v2 → v3：新增「作业」表（Homeworks）。
+          // ⚠️ 已升到 3 之后别再改这条分支，后续迁移用 `from < 4` 新开一段。
+          if (from < 3) {
+            await m.createTable(homeworks);
+          }
+          // v3 → v4：给画布节点表（CanvasNodes）加 `pinned` 列（自动布局锁定开关）。
+          // 非空布尔带默认值，drift 的 addColumn 会自动回填历史行。
+          if (from < 4) {
+            await m.addColumn(canvasNodes, canvasNodes.pinned);
+          }
+        },
+      );
 
   /// 生产连接：应用文档目录下的 `aimindtree.sqlite`。
   static QueryExecutor _openConnection() => driftDatabase(name: 'aimindtree');

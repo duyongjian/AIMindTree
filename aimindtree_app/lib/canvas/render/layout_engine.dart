@@ -5,8 +5,9 @@
 ///
 /// 策略：拓扑分层 DAG 布局——
 /// - level(kp) = max(level(prereq) + 1)，无前置的 KP 为 0；
-/// - 同层按名称稳定排序后均分 x；y 按层号 × 行高；
-///   同层超过 [LayoutConfig.maxPerRow] 个就换行，避免无关联的 KP 横排成超宽一行。
+/// - **每一层各占一行**（y = 层号 × 行高），层内节点横向铺开、**不设每行上限**；
+/// - 层内顺序按「知识领域相近度」聚类：先按来源笔记分域，同域内按知识点类型归拢，
+///   最后按名称稳定排序（见 [_sortWithinLevel]）。
 /// - 边由 [Edge.id] 给出，调用方在 CustomPaint 里画。
 library;
 
@@ -61,19 +62,29 @@ class LayoutConfig {
     this.nodeHeight = 136,
     this.hGap = 40,
     this.vGap = 40,
-    // 同一层（同一个 level）一行最多放几个节点，超过就换行。
-    // 无前置关系的 KP 全在 level 0，不换行的话 5 个就是 1300+ px 宽的一横条。
-    this.maxPerRow = 3,
+    // 画布网格（场景单位）。拖动吸附 + 布局对齐共用此值；网格关闭（≤0）时拖动与布局均为自由（不吸附）。
+    // 传 0 / 负数 = 关闭网格吸附。当前默认 20（开启吸附，松手仍对齐），可见线条由 [showGrid] 单独控制。
+    this.gridSize = 20,
+    // 是否绘制可见网格底纹。吸附（[gridSize]）与此**独立**：可隐藏线条但仍保留松手对齐。
+    // 默认 false（不画线，空白画布外观）；true = 显示格子线。
+    this.showGrid = false,
   });
 
   final double nodeWidth;
   final double nodeHeight;
   final double hGap;
   final double vGap;
-  final int maxPerRow;
+  final double gridSize;
+  /// 是否绘制可见网格底纹（与吸附无关，仅控制线条是否画出）。
+  final bool showGrid;
+}
 
-  /// 每行实际能放多少个（防御外部传 0 / 负数）。
-  int get effectiveMaxPerRow => maxPerRow < 1 ? 1 : maxPerRow;
+/// 把 [value] 吸附到最近的网格交点；[grid] ≤ 0 时原样返回（关闭网格）。
+///
+/// 纯标量函数，只依赖 dart:core，便于单测；Offset 侧的吸附在调用处组合。
+double snapToGrid(double value, double grid) {
+  if (grid <= 0) return value;
+  return (value / grid).roundToDouble() * grid;
 }
 
 /// 拓扑分层布局。
@@ -135,36 +146,40 @@ LayoutResult layoutForest(
     level.putIfAbsent(p.id, () => 0);
   }
 
-  // 同层按 KP 名称稳定排序后均分 x
+  // 同层分组排序：先按「知识领域相近度」聚类，组内再按名称（见 _sortWithinLevel）。
   final byLevel = <int, List<String>>{};
   for (final id in ids) {
     byLevel.putIfAbsent(level[id]!, () => []).add(id);
   }
+  final domainOf = {for (final p in points) p.id: p.sourceNoteId};
+  final typeOf = {for (final p in points) p.id: p.type};
   for (final l in byLevel.values) {
-    l.sort((a, b) => nameOf[a]!.compareTo(nameOf[b]!));
+    _sortWithinLevel(l, nameOf, domainOf, typeOf);
   }
 
-  // 逐层（层号升序，保证 y 单调）放置；同层内按行优先排，每行最多
-  // effectiveMaxPerRow 个。rowCursor 记录当前层起始的行号 —— 必须把上一层
-  // 占掉的行数累加进来，否则下一层会压在换行的那一行上。
+  // 逐层（层号升序，保证 y 单调）放置：**每层各占一行**，同层节点按分组顺序横向
+  // 铺开，不再按每行上限换行（用户要求：很多「行」其实是同一层，无需限 3 个/行）。
   final levels = byLevel.keys.toList()..sort();
-  final perRow = config.effectiveMaxPerRow;
-  final rowHeight = config.nodeHeight + config.vGap;
-  final colWidth = config.nodeWidth + config.hGap;
+  // 行/列间距先对齐到网格再使用：否则 176 的原始行高在 20 的网格上会「有的行偏 4px、
+  // 有的行偏 16px」，越往下越不齐（用户看到的「格子对不上」）。对齐后每行都精确
+  // 落在格线上，且仍是常数间距。
+  final rowHeight = snapToGrid(config.nodeHeight + config.vGap, config.gridSize);
+  final colWidth = snapToGrid(config.nodeWidth + config.hGap, config.gridSize);
+  final grid = config.gridSize;
 
   final laid = <LaidOutNode>[];
-  var rowCursor = 0;
+  var rowIndex = 0;
   for (final lv in levels) {
     final idsAtLevel = byLevel[lv]!;
     for (var i = 0; i < idsAtLevel.length; i++) {
       laid.add(LaidOutNode(
         kpId: idsAtLevel[i],
-        x: (i % perRow) * colWidth,
-        y: (rowCursor + i ~/ perRow) * rowHeight,
+        x: snapToGrid(i * colWidth, grid),
+        y: snapToGrid(rowIndex * rowHeight, grid),
         level: lv,
       ));
     }
-    rowCursor += (idsAtLevel.length + perRow - 1) ~/ perRow;
+    rowIndex += 1;
   }
 
   // 边（只保留展示子图内的）
@@ -176,4 +191,44 @@ LayoutResult layoutForest(
   }
 
   return LayoutResult(nodes: laid, edges: drawn);
+}
+
+/// 同一层（同一个 level）内节点的**分组排序**（纯函数，便于单测）。
+///
+/// 「知识领域相近度」的近似：**来源笔记**（[KnowledgePoint.sourceNoteId]）相同的点
+/// 视为同一领域 —— 同一篇笔记里抽出的知识点，主题天然相近。排序三级：
+///   1. **领域分组**：同一 `sourceNoteId` 的排在一起；组与组之间按「组内名字最小者」
+///      排序，使最左的一组以字典序最小的名字起头，顺序稳定、可预期；
+///   2. **类型归拢**：组内按知识点类型（[KnowledgePointType]）聚拢，同类型相邻；
+///   3. **名称排序**：同类型内按名称稳定排序。
+///
+/// 说明：模型目前无「领域/主题」字段，故以来源笔记近似；日后若新增领域字段，
+/// 只需把调用处传入的 `domainOf` 换成该字段的映射即可，其余逻辑不变。
+void _sortWithinLevel(
+  List<String> levelIds,
+  Map<String, String> nameOf,
+  Map<String, String> domainOf,
+  Map<String, KnowledgePointType> typeOf,
+) {
+  // 每个领域用其成员中「名字最小」者作为该领域的排序标签。
+  final labelOf = <String, String>{};
+  for (final id in levelIds) {
+    final d = domainOf[id]!;
+    final nm = nameOf[id]!;
+    final prev = labelOf[d];
+    if (prev == null || nm.compareTo(prev) < 0) labelOf[d] = nm;
+  }
+  final domains = labelOf.keys.toList()
+    ..sort((a, b) => labelOf[a]!.compareTo(labelOf[b]!));
+  final rank = {for (var i = 0; i < domains.length; i++) domains[i]: i};
+
+  levelIds.sort((a, b) {
+    final ra = rank[domainOf[a]!]!;
+    final rb = rank[domainOf[b]!]!;
+    if (ra != rb) return ra.compareTo(rb);
+    final ta = typeOf[a]!.index;
+    final tb = typeOf[b]!.index;
+    if (ta != tb) return ta.compareTo(tb);
+    return nameOf[a]!.compareTo(nameOf[b]!);
+  });
 }
