@@ -43,7 +43,12 @@ Future<void> autoPlaceNewPointsInTree({
   for (final id in memberIds) {
     if (newIdSet.contains(id)) continue; // 新点自身不算占位
     final pos = existingLayout[id];
+    // 没有行、或坐标恰为 (0,0)：都视为「尚未布局」，不占位。
+    // 口径与 TreeCanvas._syncSavedPositions 一致 —— TreeRepository.addPoints 写出的
+    // 新成员 x/y 默认 0，若把 (0,0) 当成「放在原点」，就会凭空在原点造出一个幽灵
+    // 节点，把整块新点无谓地往下推。只有真正固化过坐标（非 (0,0)）的旧成员才算占位。
     if (pos == null) continue;
+    if (pos.x == 0 && pos.y == 0) continue;
     occupied.add(
         LayoutBox(pos.x, pos.y, config.nodeWidth, config.nodeHeight));
   }

@@ -568,6 +568,11 @@ class TreeCanvasState extends State<TreeCanvas> {
           return;
         }
       }
+      // 防御：走「开新框选」这条路时，先清干净上一次可能残留的整组拖动状态
+      //（例如手势进行中 allowGroupDrag 被切走），避免框选继承脏状态。
+      _groupDragIds = <String>{};
+      _groupDragStartPos = <String, Offset>{};
+      _groupDragStarted = false;
       final p = _toScene(details.localFocalPoint);
       _baseSelection = Set<String>.of(widget.selectedKpIds);
       setState(() {

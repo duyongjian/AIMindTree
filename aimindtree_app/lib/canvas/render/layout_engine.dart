@@ -126,6 +126,8 @@ class LayoutBox {
   required double preferredTop,
   double step = 20,
 }) {
+  // step 是「下移时的额外间隙」；为负会让结果落进占用块内部，故禁止。
+  assert(step >= 0, 'findFreeBlockTopLeft: step 必须 ≥ 0');
   if (occupied.isEmpty) {
     return (left: preferredLeft, top: preferredTop);
   }

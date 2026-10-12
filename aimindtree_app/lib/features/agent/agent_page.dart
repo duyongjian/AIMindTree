@@ -16,6 +16,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import '../../ai/ai_task.dart';
+import '../../ai/auto_graph_service.dart';
 import '../../ai/extraction_service.dart';
 import '../../canvas/layout_autoplace.dart';
 import '../../core/logger.dart';
@@ -331,6 +332,28 @@ class _AgentPageState extends State<AgentPage> {
           treeId: tree.id,
           newIds: newIds,
         );
+
+        // 新点落位后，立刻为它们补上前置关系：复用 T3「自动连线」这条**仅 AI** 的路径
+        // （无本地启发式兜底）。连线失败不阻断「加入知识树」——用户可稍后手动点「自动连线」。
+        // ExtractionService 暴露了 ai / repo / trees，直接就地组装 AutoGraphService。
+        var linkNote = '';
+        final autoGraph = AutoGraphService(
+          ai: widget.service.ai,
+          repo: widget.service.repo,
+          trees: widget.service.trees,
+        );
+        final linkRes = await autoGraph.autoLink(tree.id);
+        linkRes.fold(
+          (r) {
+            if (r.created > 0) {
+              linkNote = '；已自动建立 ${r.created} 条前置关系';
+            }
+          },
+          (e, _) {
+            linkNote = '（自动连线未完成：$e，可稍后手动点「自动连线」）';
+          },
+        );
+
         if (!mounted) return;
         Navigator.of(context, rootNavigator: true).pop();
         setState(() {
@@ -339,7 +362,8 @@ class _AgentPageState extends State<AgentPage> {
           _picked.clear();
         });
         _toast('已加入「${tree.name}」：$added 个知识点'
-            '${res.rejectedCount > 0 ? '（${res.rejectedCount} 条无出处未入库）' : ''}');
+            '${res.rejectedCount > 0 ? '（${res.rejectedCount} 条无出处未入库）' : ''}'
+            '$linkNote');
       },
       (e, _) {
         if (!mounted) return;

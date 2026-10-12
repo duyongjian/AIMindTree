@@ -1319,8 +1319,30 @@ class CanvasPageState extends State<CanvasPage> {
         // 新点落位后，立刻为它们补上前置关系：复用 T3「自动连线」这条**仅 AI** 的路径
         // （无本地启发式兜底，符合决策 15）。连线失败不阻断「补充进树」——用户仍可稍后
         // 手动点「自动连线」重试。
-        var linkNote = '';
+        //
+        // T3 同样是 Dify 网络调用，可能耗时数秒；此时 T1 的加载框已关，故单独再开一个
+        // 加载框给用户明确反馈（与 T1 同一套写法：showDialog → await → pop）。
+        if (!mounted) return;
+        final linkLoading = showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => const AlertDialog(
+            content: Row(
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(width: 16),
+                Expanded(child: Text('正在自动连线（T3）…')),
+              ],
+            ),
+          ),
+        );
         final linkRes = await _auto.autoLink(tree.id);
+        if (mounted) {
+          Navigator.of(context, rootNavigator: true).pop();
+        }
+        await linkLoading.catchError((_) {});
+        if (!mounted) return;
+        var linkNote = '';
         linkRes.fold(
           (r) {
             if (r.created > 0) {
