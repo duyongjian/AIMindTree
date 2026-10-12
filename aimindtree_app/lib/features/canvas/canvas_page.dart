@@ -64,6 +64,9 @@ class CanvasPageState extends State<CanvasPage> {
   /// 框选重排模式：开启后可在画布上框选若干知识点，再「局部重排」。
   bool _frameSelectMode = false;
 
+  /// 框选移动模式：开启后框选若干知识点，拖动其中任意一个即整组一起移动。
+  bool _frameMoveMode = false;
+
   /// 当前画布上框选 / 多选选中的知识点 id（作业模式与框选重排模式共用同一份状态）。
   final Set<String> _selectedKpIds = <String>{};
 
@@ -213,6 +216,24 @@ class CanvasPageState extends State<CanvasPage> {
     final treeId = _selectedTree?.id;
     if (treeId == null) return;
     await _repo.saveNodePosition(treeId, kpId, x, y);
+  }
+
+  /// 框选整组移动结束：批量写回各成员新坐标（松手一次性、pinned=true 锁定）。
+  ///
+  /// 画布内部的 `_pos` 已实时反映位移，所以这里**不**再 `_loadForTree`（避免整组
+  /// 刚移动完就被「服务端真值」覆盖回原位而闪一下）。
+  Future<void> _onMoveNodes(Map<String, Offset> positions) async {
+    final treeId = _selectedTree?.id;
+    if (treeId == null) return;
+    for (final e in positions.entries) {
+      await _repo.saveNodePosition(
+        treeId,
+        e.key,
+        e.value.dx,
+        e.value.dy,
+        pinned: true,
+      );
+    }
   }
 
   Future<void> _onRelayout() async {
@@ -746,7 +767,11 @@ class CanvasPageState extends State<CanvasPage> {
   void _toggleHomeworkMode() {
     setState(() {
       _homeworkMode = !_homeworkMode;
-      if (_homeworkMode) _frameSelectMode = false; // 两种框选模式互斥
+      // 三种框选模式互斥：开一个就关掉另外两个。
+      if (_homeworkMode) {
+        _frameSelectMode = false;
+        _frameMoveMode = false;
+      }
       if (!_homeworkMode) {
         _selectedKpIds.clear();
       }
@@ -756,17 +781,39 @@ class CanvasPageState extends State<CanvasPage> {
     }
   }
 
-  /// 切换「框选重排」模式：与作业模式互斥，关闭时清空选中。
+  /// 切换「框选重排」模式：与作业模式 / 框选移动互斥，关闭时清空选中。
   void _toggleFrameSelectMode() {
     setState(() {
       _frameSelectMode = !_frameSelectMode;
-      if (_frameSelectMode) _homeworkMode = false;
+      if (_frameSelectMode) {
+        _homeworkMode = false;
+        _frameMoveMode = false;
+      }
       if (!_frameSelectMode) {
         _selectedKpIds.clear();
       }
     });
     if (_frameSelectMode) {
       _toast('框选重排：在画布上拖拽框选若干知识点，再点「局部重排」');
+    }
+  }
+
+  /// 切换「框选移动」模式：与作业模式 / 框选重排互斥，关闭时清空选中。
+  ///
+  /// 开启后：先在画布上拖拽框选出一组知识点，再直接拖动其中任意一个，整组一起移动。
+  void _toggleFrameMoveMode() {
+    setState(() {
+      _frameMoveMode = !_frameMoveMode;
+      if (_frameMoveMode) {
+        _homeworkMode = false;
+        _frameSelectMode = false;
+      }
+      if (!_frameMoveMode) {
+        _selectedKpIds.clear();
+      }
+    });
+    if (_frameMoveMode) {
+      _toast('框选移动：先拖拽框选若干知识点，再拖动其中任意一个，整组一起移动');
     }
   }
 
@@ -1410,6 +1457,7 @@ class CanvasPageState extends State<CanvasPage> {
                         _selectedTree = v;
                         _homeworkMode = false;
                         _frameSelectMode = false;
+                        _frameMoveMode = false;
                         _selectedKpIds.clear();
                       });
                       await _loadForTree(v.id);
@@ -1477,6 +1525,14 @@ class CanvasPageState extends State<CanvasPage> {
                   onPressed: _selectedKpIds.isEmpty ? null : _relayoutSelected,
                 ),
               IconButton(
+                icon: Icon(_frameMoveMode ? Icons.deselect : Icons.open_with),
+                iconSize: 20,
+                tooltip: _frameMoveMode
+                    ? '退出框选移动'
+                    : '框选移动：框选若干知识点后拖动其中一个，整组一起移动',
+                onPressed: tree == null ? null : _toggleFrameMoveMode,
+              ),
+              IconButton(
                 icon: const Icon(Icons.lightbulb_outline),
                 iconSize: 20,
                 tooltip: '补充选中知识点的前置（先点选一个节点）',
@@ -1539,13 +1595,17 @@ class CanvasPageState extends State<CanvasPage> {
                           onCreateEdge: _onCreateEdge,
                           onDeleteEdge: _onDeleteEdge,
                           onRelayout: _onRelayout,
-                          selectionMode: _homeworkMode || _frameSelectMode,
+                          selectionMode: _homeworkMode ||
+                              _frameSelectMode ||
+                              _frameMoveMode,
                           selectedKpIds: _selectedKpIds,
                           onSelectionChanged: (s) => setState(() {
                             _selectedKpIds
                               ..clear()
                               ..addAll(s);
                           }),
+                          allowGroupDrag: _frameMoveMode,
+                          onMoveNodes: _onMoveNodes,
                         ),
         ),
       ],

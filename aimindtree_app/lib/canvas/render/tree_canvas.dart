@@ -93,6 +93,8 @@ class TreeCanvas extends StatefulWidget {
     this.selectionMode = false,
     this.selectedKpIds = const <String>{},
     this.onSelectionChanged,
+    this.onMoveNodes,
+    this.allowGroupDrag = false,
     this.config = const LayoutConfig(),
   });
 
@@ -129,6 +131,16 @@ class TreeCanvas extends StatefulWidget {
 
   /// 框选模式下选择变化回调。
   final void Function(Set<String> selected)? onSelectionChanged;
+
+  /// 框选后「整组移动」回调：松手时一次性上报「id → 新场景坐标」。
+  ///
+  /// 与单节点 [onMoveNode] 分开：这里是**批量**、**瞬时**（松手才回调一次），父组件
+  /// 无需再重载，因为画布内部 `_pos` 已实时反映位移。
+  final void Function(Map<String, Offset> positions)? onMoveNodes;
+
+  /// 允许「框选后拖动整组移动」：仅当处于 [selectionMode] 且指针压在**已选中**
+  /// 节点上时生效（否则照常开始新框选）。
+  final bool allowGroupDrag;
 
   final LayoutConfig config;
 
@@ -333,6 +345,20 @@ class TreeCanvasState extends State<TreeCanvas> {
   /// 本次 build 缓存的节点场景矩形，供框选命中测试用。
   Map<String, Rect> _nodeRects = const <String, Rect>{};
 
+  // ===== 框选「整组移动」状态（见 widget.allowGroupDrag）=====
+
+  /// 正在整组拖动的节点 id 集合；空 = 未在进行整组拖动。
+  Set<String> _groupDragIds = <String>{};
+
+  /// 整组拖动起始的场景焦点（与 [_groupDragStartPos] 一起算整组位移）。
+  Offset _groupDragSceneStart = Offset.zero;
+
+  /// 整组拖动开始时各成员的位置快照（id → 场景坐标）。
+  Map<String, Offset> _groupDragStartPos = <String, Offset>{};
+
+  /// 是否已越过启动阈值、真正开始整组位移（防误拖，用屏幕像素判定）。
+  bool _groupDragStarted = false;
+
   /// 首次拿到视口尺寸后是否自动 fit 过（只在库里没有已保存位置时做一次）。
   bool _autoFitDone = false;
 
@@ -523,6 +549,25 @@ class TreeCanvasState extends State<TreeCanvas> {
 
   void _onScaleStart(ScaleStartDetails details) {
     if (widget.selectionMode) {
+      // ── 框选整组移动：指针压在**已选中**节点上 → 开始整组拖动，而非开新框选 ──
+      if (widget.allowGroupDrag) {
+        final sceneStart = _toScene(details.localFocalPoint);
+        final hit = _nodeAt(sceneStart);
+        if (hit != null && widget.selectedKpIds.contains(hit)) {
+          setState(() {
+            _marqueeStart = null;
+            _marqueeEnd = null;
+          });
+          _groupDragIds = Set<String>.of(widget.selectedKpIds);
+          _groupDragSceneStart = sceneStart;
+          _groupDragStartPos = <String, Offset>{
+            for (final id in _groupDragIds)
+              id: _nodeRects[id]?.topLeft ?? _pos[id] ?? Offset.zero,
+          };
+          _groupDragStarted = false;
+          return;
+        }
+      }
       final p = _toScene(details.localFocalPoint);
       _baseSelection = Set<String>.of(widget.selectedKpIds);
       setState(() {
@@ -559,6 +604,22 @@ class TreeCanvasState extends State<TreeCanvas> {
 
   void _onScaleUpdate(ScaleUpdateDetails details) {
     if (widget.selectionMode) {
+      // ── 框选整组移动：按整组位移实时更新各成员位置（不吸附，松手再吸附）──
+      if (_groupDragIds.isNotEmpty) {
+        final sceneFocal = _toScene(details.localFocalPoint);
+        final delta = sceneFocal - _groupDragSceneStart;
+        if (!_groupDragStarted) {
+          if (delta.distance * _scale < _dragStartThreshold) return;
+          _groupDragStarted = true;
+        }
+        setState(() {
+          for (final id in _groupDragIds) {
+            final s = _groupDragStartPos[id];
+            if (s != null) _pos[id] = s + delta;
+          }
+        });
+        return;
+      }
       final p = _toScene(details.localFocalPoint);
       final rect = Rect.fromPoints(_marqueeStart ?? p, p);
       final hit = <String>{
@@ -599,6 +660,33 @@ class TreeCanvasState extends State<TreeCanvas> {
 
   void _onScaleEnd(ScaleEndDetails details) {
     if (widget.selectionMode) {
+      // ── 框选整组移动收尾 ──
+      if (_groupDragIds.isNotEmpty) {
+        if (_groupDragStarted) {
+          // 真正移动过：松手吸附到网格 + 批量上报（不改变选中集）。
+          final moved = <String, Offset>{};
+          setState(() {
+            for (final id in _groupDragIds) {
+              final snapped = _snap(_pos[id] ?? Offset.zero);
+              _pos[id] = snapped;
+              moved[id] = snapped;
+            }
+          });
+          widget.onMoveNodes?.call(moved);
+        } else {
+          // 未越过阈值 = 点按：在已选中集合上切换命中节点的选中态。
+          final hit = _nodeAt(_groupDragSceneStart);
+          if (hit != null) {
+            final next = Set<String>.of(widget.selectedKpIds);
+            if (!next.add(hit)) next.remove(hit);
+            widget.onSelectionChanged?.call(next);
+          }
+        }
+        _groupDragIds = <String>{};
+        _groupDragStartPos = <String, Offset>{};
+        _groupDragStarted = false;
+        return;
+      }
       final start = _marqueeStart;
       final end = _marqueeEnd;
       var result = _liveSelection ?? widget.selectedKpIds;
@@ -705,9 +793,9 @@ class TreeCanvasState extends State<TreeCanvas> {
 
     // 悬停置顶 + 光标反馈：指针下的卡立刻成为最上层，让「看到的」=「能抓的」。
     // 框选模式下不置顶：那一层要的是稳定选中，别让层级随鼠标乱跳。
-    final hoveredKp = (!widget.selectionMode && _dragId == null)
-        ? _nodeAt(scene)
-        : null;
+    // 例外：框选整组移动模式下仍要算出 hoveredKp，好把光标切到 move（但不置顶）。
+    final wantHover = !widget.selectionMode || widget.allowGroupDrag;
+    final hoveredKp = (wantHover && _dragId == null) ? _nodeAt(scene) : null;
     if (!widget.selectionMode && _dragId == null) _raiseHovered(scene);
 
     // 鼠标压在某张卡片上时不考虑连线 hover：此时用户是要抓卡片 / 拖画布，
@@ -1108,14 +1196,21 @@ class TreeCanvasState extends State<TreeCanvas> {
             // ① 鼠标在画布任意位置都能进来 —— 包括空白区域和节点卡片之上；
             // ② MouseRegion 只做回调、不参与手势竞技，不会吞掉下面的 pan/缩放；
             // ③ 它的祖先角色还让 hover 事件在 hover → 删除按钮的迁移过程中不断线。
+            // 光标反馈当前模式：Space=grab（要平移）；悬停节点=move（可拖卡片）；
+            // 否则=basic（空白处平移 / 点击）。让用户一眼看出「现在拖会发生什么」。
+            // 框选整组移动模式下，只有悬停在**已选中**节点上才给 move（此时拖=移动整组），
+            // 悬停未选中节点 / 空白则是 basic（拖=开新框选）。
+            final groupHover = widget.selectionMode &&
+                widget.allowGroupDrag &&
+                _hoveredKpId != null &&
+                widget.selectedKpIds.contains(_hoveredKpId);
+            final cursor = _spaceHeld
+                ? SystemMouseCursors.grab
+                : (groupHover || (!widget.selectionMode && _hoveredKpId != null))
+                    ? SystemMouseCursors.move
+                    : SystemMouseCursors.basic;
             return MouseRegion(
-              // 光标反馈当前模式：Space=grab（要平移）；悬停节点=move（可拖卡片）；
-              // 否则=basic（空白处平移 / 点击）。让用户一眼看出「现在拖会发生什么」。
-              cursor: _spaceHeld
-                  ? SystemMouseCursors.grab
-                  : (_hoveredKpId != null
-                      ? SystemMouseCursors.move
-                      : SystemMouseCursors.basic),
+              cursor: cursor,
               onHover: _onCanvasHover,
               onExit: _onCanvasHoverExit,
               child: Stack(
