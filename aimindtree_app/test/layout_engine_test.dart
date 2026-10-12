@@ -112,4 +112,70 @@ void main() {
       expect(r.nodes.map((n) => n.kpId).toList(), ['x1', 'z1', 'y1']);
     });
   });
+
+  group('LayoutBox / findFreeBlockTopLeft：新点落位避让', () {
+    test('LayoutBox.overlaps：仅边缘相接不算重叠', () {
+      const a = LayoutBox(0, 0, 100, 50);
+      const touchRight = LayoutBox(100, 0, 100, 50); // 左缘正好贴 a 的右缘
+      const inside = LayoutBox(10, 10, 20, 20);
+      expect(a.overlaps(touchRight), isFalse);
+      expect(touchRight.overlaps(a), isFalse);
+      expect(a.overlaps(inside), isTrue);
+      expect(inside.overlaps(a), isTrue);
+    });
+
+    test('occupied 为空：直接返回首选坐标', () {
+      final r = findFreeBlockTopLeft(
+        blockWidth: 100,
+        blockHeight: 50,
+        occupied: const <LayoutBox>[],
+        preferredLeft: 33,
+        preferredTop: 44,
+      );
+      expect(r.left, 33);
+      expect(r.top, 44);
+    });
+
+    test('首选与占用不相交：原样返回', () {
+      final r = findFreeBlockTopLeft(
+        blockWidth: 100,
+        blockHeight: 50,
+        occupied: const [LayoutBox(0, 0, 100, 50)],
+        preferredLeft: 200, // 在占用块右侧，无交集
+        preferredTop: 0,
+      );
+      expect(r.left, 200);
+      expect(r.top, 0);
+    });
+
+    test('首选与占用相交：整块下移到占用下方且左对齐', () {
+      final r = findFreeBlockTopLeft(
+        blockWidth: 100,
+        blockHeight: 50,
+        occupied: const [LayoutBox(0, 0, 100, 50)],
+        preferredLeft: 0,
+        preferredTop: 0,
+        step: 20,
+      );
+      expect(r.left, 0);
+      expect(r.top, 70); // maxBottom(50) + step(20)
+    });
+
+    test('占用集合参差：左缘取最小、下缘取最大', () {
+      final r = findFreeBlockTopLeft(
+        blockWidth: 100,
+        blockHeight: 50,
+        occupied: const [
+          LayoutBox(40, 0, 100, 50), // bottom 50
+          LayoutBox(0, 0, 60, 30), // left 0, bottom 30
+          LayoutBox(80, 0, 100, 90), // bottom 90（最大）
+        ],
+        preferredLeft: 0,
+        preferredTop: 0,
+        step: 20,
+      );
+      expect(r.left, 0); // 最小 left
+      expect(r.top, 110); // max bottom(90) + 20
+    });
+  });
 }

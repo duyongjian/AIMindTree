@@ -14,10 +14,15 @@ import '../data/repositories/knowledge_repository.dart';
 import '../data/repositories/tree_repository.dart';
 import 'render/layout_engine.dart';
 
-/// 给 [treeId] 里 [newIds] 这批新并入的知识点算布局坐标并写回。
+/// 给 [treeId] 里 [newIds] 这批新并入的知识点算布局坐标并写回，**并避让已有节点**。
 ///
-/// 只对 [newIds] 落坐标（已手动摆过的旧节点不动），用全树成员 + 全树内部边
-/// 跑一次 [layoutForest] 得到稳定坐标。
+/// 与旧版的关键差异：不再「用全树重排一次再取新点坐标」——那样新点会落到布局
+/// 引擎为「全量重排」预留的格子上，而旧节点若被手动拖走过，新点就会叠在它们身上。
+/// 现在改为：
+/// 1. 取已有（非新）成员的**真实当前坐标**当作占位矩形 [LayoutBox]；
+/// 2. 只对**新点集合内部**跑 [layoutForest]，得到一个以 (0,0) 为基准的子布局；
+/// 3. 用 [findFreeBlockTopLeft] 给这个子布局整块选一个不与占位矩形相交的左上角；
+/// 4. 逐点写回 `snapToGrid(块左上角 + 子布局坐标)`（pinned=false，浮动可再铺）。
 Future<void> autoPlaceNewPointsInTree({
   required AppDatabase db,
   required TreeRepository trees,
@@ -26,12 +31,29 @@ Future<void> autoPlaceNewPointsInTree({
   required List<String> newIds,
 }) async {
   if (newIds.isEmpty) return;
+  final newIdSet = newIds.toSet();
+
+  const config = LayoutConfig();
+
+  // 1) 已有成员的真实坐标 → 占位矩形。只统计「已固化位置」的旧成员：
+  //    没固化过的点交给布局引擎，不占位（否则会以为它在 (0,0) 挡住新点）。
   final memberIds = await trees.memberPointIds(treeId);
-  final pts = await repo.pointsByIds(memberIds);
+  final existingLayout = await repo.loadNodeLayout(treeId);
+  final occupied = <LayoutBox>[];
+  for (final id in memberIds) {
+    if (newIdSet.contains(id)) continue; // 新点自身不算占位
+    final pos = existingLayout[id];
+    if (pos == null) continue;
+    occupied.add(
+        LayoutBox(pos.x, pos.y, config.nodeWidth, config.nodeHeight));
+  }
+
+  // 2) 只对「新点集合内部」跑布局：新点之间的前置边决定它们的相对层级/顺序。
+  final newPts = await repo.pointsByIds(newIds);
   final allEdges = await (db.select(db.prerequisiteEdges)).get();
-  final treeEdges = allEdges
+  final newInternalEdges = allEdges
       .where((e) =>
-          memberIds.contains(e.fromKpId) && memberIds.contains(e.toKpId))
+          newIdSet.contains(e.fromKpId) && newIdSet.contains(e.toKpId))
       .map((e) => PrerequisiteEdge(
             id: e.id,
             fromKpId: e.fromKpId,
@@ -41,14 +63,50 @@ Future<void> autoPlaceNewPointsInTree({
             confidence: e.confidence,
           ))
       .toList();
-  final layout = layoutForest(pts, treeEdges, config: const LayoutConfig());
+
+  final layout = layoutForest(newPts, newInternalEdges, config: config);
   final posById = <String, LaidOutNode>{for (final n in layout.nodes) n.kpId: n};
+
+  // 3) 子布局整体块的尺寸（以 (0,0) 为基准，每层一行）。
+  var blockWidth = config.nodeWidth;
+  var blockHeight = config.nodeHeight;
+  for (final n in layout.nodes) {
+    final w = n.x + config.nodeWidth;
+    final h = n.y + config.nodeHeight;
+    if (w > blockWidth) blockWidth = w;
+    if (h > blockHeight) blockHeight = h;
+  }
+
+  // 首选左上角：贴近已有内容下方且与最左缘对齐；无旧节点则从原点开始。
+  // 若该位置与旧节点相交，[findFreeBlockTopLeft] 会把整块推到占用集合下方。
+  final preferredLeft = occupied.isEmpty
+      ? 0.0
+      : occupied.map((b) => b.left).reduce((a, b) => a < b ? a : b);
+  final preferredTop = occupied.isEmpty
+      ? 0.0
+      : occupied.map((b) => b.bottom).reduce((a, b) => a > b ? a : b) +
+          config.vGap;
+
+  final free = findFreeBlockTopLeft(
+    blockWidth: blockWidth,
+    blockHeight: blockHeight,
+    occupied: occupied,
+    preferredLeft: preferredLeft,
+    preferredTop: preferredTop,
+    step: config.gridSize > 0 ? config.gridSize : 20,
+  );
+
+  // 4) 逐点写回。新并入的点默认「浮动」（pinned=false）：结构变化时仍可被布局引擎
+  //    重新铺位，只有用户手动拖拽后才会被锁定（见 CanvasPage._onMoveNode）。
   for (final id in newIds) {
     final n = posById[id];
-    // 新并入的点默认「浮动」（pinned=false）：结构变化时仍可被布局引擎重新铺位，
-    // 只有用户手动拖拽后才会被锁定（见 CanvasPage._onMoveNode）。
-    if (n != null) {
-      await repo.saveNodePosition(treeId, id, n.x, n.y, pinned: false);
-    }
+    if (n == null) continue;
+    await repo.saveNodePosition(
+      treeId,
+      id,
+      snapToGrid(free.left + n.x, config.gridSize),
+      snapToGrid(free.top + n.y, config.gridSize),
+      pinned: false,
+    );
   }
 }

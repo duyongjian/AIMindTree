@@ -61,8 +61,11 @@ class CanvasPageState extends State<CanvasPage> {
   /// 作业模式：开启后可在画布上框选薄弱点，再「布置作业」。
   bool _homeworkMode = false;
 
-  /// 作业模式下已框选的薄弱点 id。
-  Set<String> _selectedForHomework = <String>{};
+  /// 框选重排模式：开启后可在画布上框选若干知识点，再「局部重排」。
+  bool _frameSelectMode = false;
+
+  /// 当前画布上框选 / 多选选中的知识点 id（作业模式与框选重排模式共用同一份状态）。
+  final Set<String> _selectedKpIds = <String>{};
 
   /// 作业仓储（落库 + 历史）。
   late final HomeworkRepository _homeworks =
@@ -162,7 +165,7 @@ class CanvasPageState extends State<CanvasPage> {
       _points = points;
       _edges = edges;
       _positions = positions;
-      _selectedForHomework = <String>{};
+      _selectedKpIds.clear();
       _mastery.clear();
       for (final p in points) {
         _mastery[p.id] = MasteryStatus.unknown;
@@ -226,6 +229,88 @@ class CanvasPageState extends State<CanvasPage> {
     setState(() => _relayoutVersion++);
     await _loadForTree(treeId);
     _toast('已重新布局（全部锁定）');
+  }
+
+  /// 局部重排：只对当前框选（[_selectedKpIds]）的知识点重跑布局，其余节点不动。
+  ///
+  /// 与全量 [_onRelayout] 的区别：先把**未选中**成员的真实矩形当作占位，再只对子集
+  /// 内部跑 [layoutForest]，最后用 [findFreeBlockTopLeft] 把子集整体放到一个不与
+  /// 未选中节点相交的位置——避免「子集重排后叠到别人身上」。
+  Future<void> _relayoutSelected() async {
+    final treeId = _selectedTree?.id;
+    if (treeId == null) return;
+    final idSet = <String>{..._selectedKpIds};
+    final subsetPts = _points.where((p) => idSet.contains(p.id)).toList();
+    if (idSet.isEmpty || subsetPts.isEmpty) {
+      _toast('请先框选要重排的知识点');
+      return;
+    }
+    final subsetEdges = _edges
+        .where((e) => idSet.contains(e.fromKpId) && idSet.contains(e.toKpId))
+        .toList();
+
+    const config = LayoutConfig();
+    // 只算子集：子集内部边决定它们的相对层级 / 顺序。
+    final layout = layoutForest(subsetPts, subsetEdges, config: config);
+
+    // 未选中成员的真实坐标 → 占位矩形（子集必须避开）。
+    final layoutById = await _repo.loadNodeLayout(treeId);
+    final occupied = <LayoutBox>[];
+    for (final p in _points) {
+      if (idSet.contains(p.id)) continue;
+      final pos = layoutById[p.id];
+      if (pos == null) continue; // 未固化位置的点不占位
+      occupied.add(LayoutBox(pos.x, pos.y, config.nodeWidth, config.nodeHeight));
+    }
+
+    // 首选：尽量把子集整体留在它当前所在处（取选中点当前左上角的最小 x / y）。
+    var preferredLeft = 0.0;
+    var preferredTop = 0.0;
+    var hasSel = false;
+    for (final p in subsetPts) {
+      final pos = layoutById[p.id];
+      if (pos == null) continue;
+      if (!hasSel) {
+        preferredLeft = pos.x;
+        preferredTop = pos.y;
+        hasSel = true;
+      } else {
+        if (pos.x < preferredLeft) preferredLeft = pos.x;
+        if (pos.y < preferredTop) preferredTop = pos.y;
+      }
+    }
+
+    // 子集整体块尺寸（以子布局 (0,0) 为基准）。
+    var blockWidth = config.nodeWidth;
+    var blockHeight = config.nodeHeight;
+    for (final n in layout.nodes) {
+      final w = n.x + config.nodeWidth;
+      final h = n.y + config.nodeHeight;
+      if (w > blockWidth) blockWidth = w;
+      if (h > blockHeight) blockHeight = h;
+    }
+
+    final free = findFreeBlockTopLeft(
+      blockWidth: blockWidth,
+      blockHeight: blockHeight,
+      occupied: occupied,
+      preferredLeft: preferredLeft,
+      preferredTop: preferredTop,
+      step: config.gridSize > 0 ? config.gridSize : 20,
+    );
+
+    for (final n in layout.nodes) {
+      await _repo.saveNodePosition(
+        treeId,
+        n.kpId,
+        snapToGrid(free.left + n.x, config.gridSize),
+        snapToGrid(free.top + n.y, config.gridSize),
+        pinned: true,
+      );
+    }
+    setState(() => _relayoutVersion++);
+    await _loadForTree(treeId);
+    _toast('已局部重排 ${layout.nodes.length} 个知识点');
   }
 
   /// 给一批「刚并入树、还没摆位置」的知识点算不重叠的布局坐标并写回 DB。
@@ -661,8 +746,9 @@ class CanvasPageState extends State<CanvasPage> {
   void _toggleHomeworkMode() {
     setState(() {
       _homeworkMode = !_homeworkMode;
+      if (_homeworkMode) _frameSelectMode = false; // 两种框选模式互斥
       if (!_homeworkMode) {
-        _selectedForHomework = <String>{};
+        _selectedKpIds.clear();
       }
     });
     if (_homeworkMode) {
@@ -670,8 +756,22 @@ class CanvasPageState extends State<CanvasPage> {
     }
   }
 
+  /// 切换「框选重排」模式：与作业模式互斥，关闭时清空选中。
+  void _toggleFrameSelectMode() {
+    setState(() {
+      _frameSelectMode = !_frameSelectMode;
+      if (_frameSelectMode) _homeworkMode = false;
+      if (!_frameSelectMode) {
+        _selectedKpIds.clear();
+      }
+    });
+    if (_frameSelectMode) {
+      _toast('框选重排：在画布上拖拽框选若干知识点，再点「局部重排」');
+    }
+  }
+
   Widget _buildHomeworkBar() {
-    final n = _selectedForHomework.length;
+    final n = _selectedKpIds.length;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       color: Colors.green.shade50,
@@ -718,7 +818,9 @@ class CanvasPageState extends State<CanvasPage> {
       for (final p in _points)
         if (_isWeak(p.id)) p.id,
     };
-    setState(() => _selectedForHomework = weak);
+    setState(() => _selectedKpIds
+      ..clear()
+      ..addAll(weak));
     if (weak.isEmpty) {
       _toast('当前没有标记为「未掌握 / 学习中」的薄弱点。'
           '可手动框选任意知识点作为作业对象。');
@@ -730,7 +832,7 @@ class CanvasPageState extends State<CanvasPage> {
     final tree = _selectedTree;
     if (tree == null) return;
     final sel =
-        _points.where((p) => _selectedForHomework.contains(p.id)).toList();
+        _points.where((p) => _selectedKpIds.contains(p.id)).toList();
     if (sel.isEmpty) {
       _toast('请先框选薄弱点，或点「全选薄弱点」');
       return;
@@ -1166,8 +1268,26 @@ class CanvasPageState extends State<CanvasPage> {
         // 新并入的点默认 x/y=0，会被布局引擎当成「放在原点」→ 全挤在 (0,0) 且拖不动。
         // 这里用布局引擎给它们算不重叠坐标并写回（已手动摆过的旧节点不动）。
         await _autoPlaceNewPoints(tree.id, newIds);
+
+        // 新点落位后，立刻为它们补上前置关系：复用 T3「自动连线」这条**仅 AI** 的路径
+        // （无本地启发式兜底，符合决策 15）。连线失败不阻断「补充进树」——用户仍可稍后
+        // 手动点「自动连线」重试。
+        var linkNote = '';
+        final linkRes = await _auto.autoLink(tree.id);
+        linkRes.fold(
+          (r) {
+            if (r.created > 0) {
+              linkNote = '；已自动建立 ${r.created} 条前置关系';
+            }
+          },
+          (e, _) {
+            linkNote = '（自动连线未完成：$e，可稍后手动点「自动连线」）';
+          },
+        );
+        if (!mounted) return;
         _toast('已补充进「${tree.name}」：$added 个知识点'
-            '${res.rejectedCount > 0 ? '（${res.rejectedCount} 条无出处未入库）' : ''}');
+            '${res.rejectedCount > 0 ? '（${res.rejectedCount} 条无出处未入库）' : ''}'
+            '$linkNote');
         // 刷新树列表（点数可能变了）；当前显示的树若不是目标树也一并更新。
         await _load();
       },
@@ -1289,7 +1409,8 @@ class CanvasPageState extends State<CanvasPage> {
                       setState(() {
                         _selectedTree = v;
                         _homeworkMode = false;
-                        _selectedForHomework = <String>{};
+                        _frameSelectMode = false;
+                        _selectedKpIds.clear();
                       });
                       await _loadForTree(v.id);
                     },
@@ -1336,6 +1457,25 @@ class CanvasPageState extends State<CanvasPage> {
                     : '作业模式：框选薄弱点布置作业',
                 onPressed: tree == null ? null : _toggleHomeworkMode,
               ),
+              IconButton(
+                icon: Icon(_frameSelectMode
+                    ? Icons.deselect
+                    : Icons.highlight_alt),
+                iconSize: 20,
+                tooltip: _frameSelectMode
+                    ? '退出框选重排'
+                    : '框选重排：框选若干知识点后局部重排',
+                onPressed: tree == null ? null : _toggleFrameSelectMode,
+              ),
+              if (_frameSelectMode)
+                IconButton(
+                  icon: const Icon(Icons.schema),
+                  iconSize: 20,
+                  tooltip: _selectedKpIds.isEmpty
+                      ? '先框选要重排的知识点'
+                      : '局部重排：只重排选中的 ${_selectedKpIds.length} 个知识点',
+                  onPressed: _selectedKpIds.isEmpty ? null : _relayoutSelected,
+                ),
               IconButton(
                 icon: const Icon(Icons.lightbulb_outline),
                 iconSize: 20,
@@ -1399,10 +1539,12 @@ class CanvasPageState extends State<CanvasPage> {
                           onCreateEdge: _onCreateEdge,
                           onDeleteEdge: _onDeleteEdge,
                           onRelayout: _onRelayout,
-                          selectionMode: _homeworkMode,
-                          selectedKpIds: _selectedForHomework,
+                          selectionMode: _homeworkMode || _frameSelectMode,
+                          selectedKpIds: _selectedKpIds,
                           onSelectionChanged: (s) => setState(() {
-                            _selectedForHomework = s;
+                            _selectedKpIds
+                              ..clear()
+                              ..addAll(s);
                           }),
                         ),
         ),

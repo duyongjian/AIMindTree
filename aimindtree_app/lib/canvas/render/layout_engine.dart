@@ -87,6 +87,63 @@ double snapToGrid(double value, double grid) {
   return (value / grid).roundToDouble() * grid;
 }
 
+/// 场景坐标系里的一个轴对齐矩形块（左上角 + 宽高）。
+///
+/// 供「新并入的点落位时避让已有节点」使用：坐标系与 [layoutForest] 一致
+/// （内容左上角为原点，单位 = 场景像素）。纯几何值对象，零 Flutter 依赖。
+class LayoutBox {
+  const LayoutBox(this.left, this.top, this.width, this.height);
+
+  final double left;
+  final double top;
+  final double width;
+  final double height;
+
+  double get right => left + width;
+  double get bottom => top + height;
+
+  /// 与 [o] 是否有**面积**重叠（仅边缘相接不算重叠）。
+  bool overlaps(LayoutBox o) =>
+      left < o.right && o.left < right && top < o.bottom && o.top < bottom;
+}
+
+/// 为一个 `[blockWidth] × [blockHeight]` 的块找一个**不与 [occupied] 任一矩形相交**
+/// 的左上角坐标。
+///
+/// 策略（确定性、纯函数、零 Flutter 依赖）：
+/// 1. 优先返回 `([preferredLeft], [preferredTop])`——若不与任何占用矩形相交；
+/// 2. 否则把整块挪到「占用集合的下方且与占用集左缘对齐」：
+///    `left = min(occupied.left)`，`top = max(occupied.bottom) + step`。
+///    该位置的 y 严格大于所有占用矩形的下边，故保证不相交（与占用集合的绝对位置无关）；
+/// 3. [occupied] 为空时直接返回 preferred。
+///
+/// 返回 `(left: ..., top: ...)` 记录（只依赖 [LayoutBox]，便于单测）。
+({double left, double top}) findFreeBlockTopLeft({
+  required double blockWidth,
+  required double blockHeight,
+  required List<LayoutBox> occupied,
+  required double preferredLeft,
+  required double preferredTop,
+  double step = 20,
+}) {
+  if (occupied.isEmpty) {
+    return (left: preferredLeft, top: preferredTop);
+  }
+  final candidate =
+      LayoutBox(preferredLeft, preferredTop, blockWidth, blockHeight);
+  if (!occupied.any(candidate.overlaps)) {
+    return (left: preferredLeft, top: preferredTop);
+  }
+  // 整块下移：放到所有占用矩形下方，且左缘与占用集合的最左缘对齐。
+  var minLeft = occupied.first.left;
+  var maxBottom = occupied.first.bottom;
+  for (final o in occupied) {
+    if (o.left < minLeft) minLeft = o.left;
+    if (o.bottom > maxBottom) maxBottom = o.bottom;
+  }
+  return (left: minLeft, top: maxBottom + step);
+}
+
 /// 拓扑分层布局。
 ///
 /// [points] 要展示的 KP 集合；[edges] 前置关系边（from→to 表示 to 依赖 from）。
