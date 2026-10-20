@@ -10,122 +10,127 @@
 /// - baseUrl 形如 `http(s)://...`。
 library;
 
-import 'package:flutter/material.dart';
 
-class DifyProviderFormResult {
-  const DifyProviderFormResult({
-    required this.displayName,
-    required this.baseUrl,
-    required this.apiKey,
-  });
-  final String displayName;
-  final String baseUrl;
-  final String apiKey;
-}
+// ⚠️ 已停用（Dify 方案下线）—— 整段注释保留，勿删。
+// 取代者：lib/features/settings/llm_server_add_dialog.dart（无 API Key 输入框，
+// 密钥由服务端 .env 持有）。回退时取消注释并把 settings_page.dart 的 import 改回。
 
-class DifyAddDialog extends StatefulWidget {
-  const DifyAddDialog({super.key});
-
-  @override
-  State<DifyAddDialog> createState() => _DifyAddDialogState();
-}
-
-class _DifyAddDialogState extends State<DifyAddDialog> {
-  final _formKey = GlobalKey<FormState>();
-  final _name = TextEditingController(text: '我的 Dify');
-  final _baseUrl = TextEditingController(text: 'http://localhost:8080');
-  final _apiKey = TextEditingController();
-  bool _obscure = true;
-
-  @override
-  void dispose() {
-    _name.dispose();
-    _baseUrl.dispose();
-    _apiKey.dispose();
-    super.dispose();
-  }
-
-  String? _validateBaseUrl(String? v) {
-    if (v == null || v.trim().isEmpty) return '请填写 Base URL';
-    final s = v.trim();
-    final ok = s.startsWith('http://') || s.startsWith('https://');
-    if (!ok) return '需以 http:// 或 https:// 开头';
-    return null;
-  }
-
-  String? _validateRequired(String? v, String label) {
-    if (v == null || v.trim().isEmpty) return '请填写 $label';
-    return null;
-  }
-
-  void _submit() {
-    if (!_formKey.currentState!.validate()) return;
-    Navigator.of(context).pop(DifyProviderFormResult(
-      displayName: _name.text.trim(),
-      baseUrl: _baseUrl.text.trim(),
-      apiKey: _apiKey.text.trim(),
-    ));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('添加 Dify Provider'),
-      content: SizedBox(
-        width: 480,
-        child: Form(
-          key: _formKey,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextFormField(
-                controller: _name,
-                decoration: const InputDecoration(
-                  labelText: '显示名',
-                  helperText: '只在 UI 里区分多个 provider 用',
-                ),
-                validator: (v) => _validateRequired(v, '显示名'),
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _baseUrl,
-                decoration: const InputDecoration(
-                  labelText: 'Base URL',
-                  helperText: '形如 http://localhost:8080',
-                ),
-                keyboardType: TextInputType.url,
-                validator: _validateBaseUrl,
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _apiKey,
-                obscureText: _obscure,
-                decoration: InputDecoration(
-                  labelText: 'API Key',
-                  helperText: 'Dify 应用 → 访问 API 处获取（仅本机存储）',
-                  suffixIcon: IconButton(
-                    icon: Icon(
-                      _obscure ? Icons.visibility : Icons.visibility_off,
-                    ),
-                    onPressed: () => setState(() => _obscure = !_obscure),
-                  ),
-                ),
-                validator: (v) => _validateRequired(v, 'API Key'),
-              ),
-            ],
-          ),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('取消'),
-        ),
-        FilledButton(
-          onPressed: _submit,
-          child: const Text('添加'),
-        ),
-      ],
-    );
-  }
-}
+// import 'package:flutter/material.dart';
+//
+// class DifyProviderFormResult {
+//   const DifyProviderFormResult({
+//     required this.displayName,
+//     required this.baseUrl,
+//     required this.apiKey,
+//   });
+//   final String displayName;
+//   final String baseUrl;
+//   final String apiKey;
+// }
+//
+// class DifyAddDialog extends StatefulWidget {
+//   const DifyAddDialog({super.key});
+//
+//   @override
+//   State<DifyAddDialog> createState() => _DifyAddDialogState();
+// }
+//
+// class _DifyAddDialogState extends State<DifyAddDialog> {
+//   final _formKey = GlobalKey<FormState>();
+//   final _name = TextEditingController(text: '我的 Dify');
+//   final _baseUrl = TextEditingController(text: 'http://localhost:8080');
+//   final _apiKey = TextEditingController();
+//   bool _obscure = true;
+//
+//   @override
+//   void dispose() {
+//     _name.dispose();
+//     _baseUrl.dispose();
+//     _apiKey.dispose();
+//     super.dispose();
+//   }
+//
+//   String? _validateBaseUrl(String? v) {
+//     if (v == null || v.trim().isEmpty) return '请填写 Base URL';
+//     final s = v.trim();
+//     final ok = s.startsWith('http://') || s.startsWith('https://');
+//     if (!ok) return '需以 http:// 或 https:// 开头';
+//     return null;
+//   }
+//
+//   String? _validateRequired(String? v, String label) {
+//     if (v == null || v.trim().isEmpty) return '请填写 $label';
+//     return null;
+//   }
+//
+//   void _submit() {
+//     if (!_formKey.currentState!.validate()) return;
+//     Navigator.of(context).pop(DifyProviderFormResult(
+//       displayName: _name.text.trim(),
+//       baseUrl: _baseUrl.text.trim(),
+//       apiKey: _apiKey.text.trim(),
+//     ));
+//   }
+//
+//   @override
+//   Widget build(BuildContext context) {
+//     return AlertDialog(
+//       title: const Text('添加 Dify Provider'),
+//       content: SizedBox(
+//         width: 480,
+//         child: Form(
+//           key: _formKey,
+//           child: Column(
+//             mainAxisSize: MainAxisSize.min,
+//             children: [
+//               TextFormField(
+//                 controller: _name,
+//                 decoration: const InputDecoration(
+//                   labelText: '显示名',
+//                   helperText: '只在 UI 里区分多个 provider 用',
+//                 ),
+//                 validator: (v) => _validateRequired(v, '显示名'),
+//               ),
+//               const SizedBox(height: 12),
+//               TextFormField(
+//                 controller: _baseUrl,
+//                 decoration: const InputDecoration(
+//                   labelText: 'Base URL',
+//                   helperText: '形如 http://localhost:8080',
+//                 ),
+//                 keyboardType: TextInputType.url,
+//                 validator: _validateBaseUrl,
+//               ),
+//               const SizedBox(height: 12),
+//               TextFormField(
+//                 controller: _apiKey,
+//                 obscureText: _obscure,
+//                 decoration: InputDecoration(
+//                   labelText: 'API Key',
+//                   helperText: 'Dify 应用 → 访问 API 处获取（仅本机存储）',
+//                   suffixIcon: IconButton(
+//                     icon: Icon(
+//                       _obscure ? Icons.visibility : Icons.visibility_off,
+//                     ),
+//                     onPressed: () => setState(() => _obscure = !_obscure),
+//                   ),
+//                 ),
+//                 validator: (v) => _validateRequired(v, 'API Key'),
+//               ),
+//             ],
+//           ),
+//         ),
+//       ),
+//       actions: [
+//         TextButton(
+//           onPressed: () => Navigator.of(context).pop(),
+//           child: const Text('取消'),
+//         ),
+//         FilledButton(
+//           onPressed: _submit,
+//           child: const Text('添加'),
+//         ),
+//       ],
+//     );
+//   }
+// }

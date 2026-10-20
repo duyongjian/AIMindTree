@@ -204,7 +204,9 @@ class _AgentPageState extends State<AgentPage> {
 
     final buf = StringBuffer();
     try {
-      await for (final c in widget.service.ai.chat(AiTask.t5Ask, prompt)) {
+      // variant='detect'：让服务端装载 t5_ask__detect.md（只输出 JSON 契约）。
+      await for (final c in widget.service.ai
+          .chat(AiTask.t5Ask, prompt, variant: 'detect')) {
         if (c.delta != null) buf.write(c.delta);
       }
     } on Object catch (e) {

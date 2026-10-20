@@ -241,15 +241,18 @@ class AiMessages extends Table with SyncMeta {
 /// AI 供应商配置（**S4 本地表，默认不同步**）。
 ///
 /// Dify 场景：**一个 Dify 应用 = 一行**（不同应用各自 app-api-key）。
+/// llm_server 场景：一条记录 = 一个 LLM Server 实例（服务端持密钥，本表不存密钥）。
 @DataClassName('AiProviderRow')
 class AiProviders extends Table {
   TextColumn get id => text().named('id')();
   TextColumn get name => text().named('name')();
 
   /// 厂商类型：openai/anthropic/ollama/dify/minimax/local。
+  /// llm_server 场景复用为 backend 名（auto/ollama/minimax/openai_compat）。
+  /// ⚠️ 表结构不可改（Drift 依赖 build_runner 生成 .g.dart）；此处只加注释。
   TextColumn get type => text().named('type')();
 
-  /// 端点协议：openai / anthropic / dify（三协议）。
+  /// 端点协议：openai / anthropic / dify（已停用）/ llm_server。
   TextColumn get protocol => text().named('protocol')();
 
   TextColumn get baseUrl => text().named('base_url').withDefault(const Constant(''))();
@@ -258,6 +261,7 @@ class AiProviders extends Table {
   TextColumn get apiKeyRef => text().named('api_key_ref').withDefault(const Constant(''))();
 
   /// 可选模型列表 JSON。
+  /// llm_server 场景：JSON 数组，最多 1 个元素 = model 覆盖，`[]` = 用后端默认。
   TextColumn get models => text().named('models').withDefault(const Constant('[]'))();
 
   BoolColumn get isDefault => boolean().named('is_default').withDefault(const Constant(false))();

@@ -1,10 +1,13 @@
 /// T1 知识点提取服务（T04 合并双轨后的正式版）。
 ///
-/// 链路：用户笔记 → [AiService] (T1) → 路由到 Dify 工作流 → 结构化解析
+/// 链路：用户笔记 → [AiService] (T1) → 路由到 LLM Server → 结构化解析
 /// → [KnowledgeRepository.saveExtracted]（锚点校验，幻觉剔除）→ 落库。
 ///
-/// 旧原型（FileKnowledgeStore + 直连 DifyClient）已被本版取代并删除。
+/// 旧原型（FileKnowledgeStore + 直连 DifyClient）已被本版取代并删除；
+/// DifyClient 本身随自研 LLM Server 上线而停用（文件整段注释保留，可回退）。
 library;
+
+import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -28,20 +31,29 @@ import 'ai_provider.dart';
 import 'ai_service.dart';
 import 'ai_task.dart';
 import 'ai_task_router.dart';
-import 'clients/dify_client.dart';
+import 'clients/llm_server_client.dart';
 
-/// 本地 Dify 开发配置（P0 引导用）。
+/// 本地 LLM 服务配置（P0 引导用，开箱即跑）。
 ///
 /// ⚠️ 仅本地开发期：正式应从 `ai_providers` 表读取（设置页配置，S4 不同步）。
-/// 已验证可用的 T1 应用 Key 直接内置，开箱即跑。
+///
+/// **无密钥字段**：密钥由服务端 `llm_server/.env` 持有（密钥边界 C4）。
+/// （旧版本这里硬编码过 Dify 应用 Key，已随 Dify 方案停用一并清除。）
 class LocalAiConfig {
   const LocalAiConfig({
-    this.baseUrl = 'http://localhost:8080',
-    this.appApiKey = 'app-fhXwVvHFfVbVWRq3tRMOX8fd',
+    this.baseUrl = kLlmServerDefaultBaseUrl,
+    this.backend = 'auto',
+    this.model = '',
   });
 
+  /// LLM Server 地址，默认 `http://127.0.0.1:8787`。
   final String baseUrl;
-  final String appApiKey;
+
+  /// `auto` = 跟随服务端 `config.yaml` 的 `default_backend`。
+  final String backend;
+
+  /// 空 = 用后端默认模型。
+  final String model;
 }
 
 class ExtractionService {
@@ -81,7 +93,7 @@ class ExtractionService {
     }
     final noteId = (savedNote as Success<Note>).value.id;
 
-    // 2) 调 T1（AiService → 路由 → Dify 工作流）
+    // 2) 调 T1（AiService → 路由 → LLM Server /v1/task/T1）
     final aiRes = await ai.run(AiTask.t1Extract, {'note_text': content});
     if (aiRes is Failure<AiTaskResult>) {
       return Failure(aiRes.error, aiRes.stackTrace);
@@ -153,7 +165,7 @@ class ExtractionService {
   ///
   /// 流程：
   /// 1) 初始化 DB / SecretStore / SettingsRepository / SyncContext；
-  /// 2) 首次启动则从 [LocalAiConfig] seed 一个 Dify provider（开箱即用）；
+  /// 2) 首次启动则从 [LocalAiConfig] seed 一个 LLM 服务 provider（开箱即用）；
   /// 3) 读 `ai_providers` 表里所有启用的 provider → 实例化并注入 Router；
   /// 4) 装配 SyncContext（SyncApi / Outbox / Engine / Scheduler）；
   /// 5) 返回五元组 (service, db, router, settings, sync)。
@@ -206,22 +218,16 @@ class ExtractionService {
     final Map<String, AiProvider> providers = <String, AiProvider>{};
     final List<AiProviderRow> instantiated = <AiProviderRow>[];
     for (final row in enabledRows) {
-      if (row.protocol == 'dify') {
-        final apiKey = await settings.resolveApiKey(row.apiKeyRef);
-        if (apiKey == null || apiKey.isEmpty) {
-          _log.w('Provider ${row.id} (${row.name}) 密钥缺失，已跳过');
-          continue;
-        }
-        final isLocal =
-            row.baseUrl.contains('localhost') ||
-            row.baseUrl.contains('127.0.0.1');
-        final dify = DifyClient(
+      if (row.protocol == kLlmServerProtocol) {
+        // llm_server 无客户端密钥：**不调用** resolveApiKey（与旧 dify 分支的
+        // 关键差别，C4）。后端与模型由服务端 config.yaml / 本行覆盖共同决定。
+        final client = LlmServerClient(
           id: row.id,
           baseUrl: row.baseUrl,
-          appApiKey: apiKey,
-          isLocal: isLocal,
+          backend: row.type.isEmpty ? 'auto' : row.type,
+          model: _firstModel(row.models),
         );
-        providers[dify.id] = dify;
+        providers[client.id] = client;
         instantiated.add(row);
       } else {
         _log.w('暂不支持的 provider 协议：${row.protocol}（id=${row.id}）');
@@ -244,7 +250,10 @@ class ExtractionService {
 
     final fallback = pickFallback();
     if (fallback == null) {
-      throw StateError('没有可用的 AI provider。请到「设置」页添加并启用一个 Dify 提供商。');
+      throw StateError(
+        '没有可用的 AI provider。请到「设置」页添加并启用一个 LLM 服务'
+        '（默认 $kLlmServerDefaultBaseUrl），并确认 llm_server 已启动。',
+      );
     }
 
     final router = AiTaskRouter(
@@ -309,4 +318,21 @@ class ExtractionService {
       sync,
     );
   }
+}
+
+/// 从 `ai_providers.models`（JSON 数组字符串）取第一个模型；解析失败返回 `''`。
+///
+/// 表结构不可改的前提下，`models` 列被复用承载「模型覆盖」，最多 1 个元素。
+String _firstModel(String modelsJson) {
+  if (modelsJson.isEmpty) return '';
+  try {
+    final decoded = jsonDecode(modelsJson);
+    if (decoded is List && decoded.isNotEmpty) {
+      final first = decoded.first;
+      return first is String ? first : first.toString();
+    }
+  } on Object {
+    return '';
+  }
+  return '';
 }

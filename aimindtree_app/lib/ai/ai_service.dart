@@ -66,12 +66,19 @@ class AiService {
     String? conversationId,
     String? user,
     Duration timeout = const Duration(seconds: 120),
+    String? variant,
   }) async* {
     final provider = await router.resolve(task) ?? fallback;
     if (provider == null) {
       throw StateError('没有任何可用的 AI Provider（先在设置里配置）');
     }
-    yield* provider.streamChat(query,
-        conversationId: conversationId, user: user, timeout: timeout);
+    yield* provider.streamChat(
+      query,
+      conversationId: conversationId,
+      user: user,
+      timeout: timeout,
+      task: task,
+      variant: variant,
+    );
   }
 }

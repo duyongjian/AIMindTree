@@ -1,24 +1,29 @@
 /// AI Provider + 同步 设置页（T07 收口 + T03 同步）。
 ///
 /// 功能：
-/// - 列出 `ai_providers` 表所有 provider（已启用 / 已停用 / 密钥缺失）；
-/// - 新增 Dify provider（displayName + baseUrl + apiKey）；
+/// - 列出 `ai_providers` 表所有 provider（已启用 / 已停用）；
+/// - 新增 LLM 服务 provider（显示名 + Base URL + 后端 + 模型，**无 Key 框**）；
 /// - 启用 / 停用 switch；
-/// - **编辑 provider（显示名 / Base URL / API Key 选填，密钥留空即不改）**；
-/// - 测试连接（探 `/console/api/setup`）；
+/// - **编辑 provider（显示名 / Base URL / 后端 / 模型）**；
+/// - 测试连接（探 `GET {baseUrl}/health`）；
 /// - 删除 provider（连带清理 SecretStore **和指向它的任务路由**）；
-/// - **「AI 任务路由」区：把 T1/T3/T4 绑到各自的 Dify 应用**（Dify Key 按应用签发）；
+/// - **「AI 任务路由」区：把 T1/T3/T4 绑到指定的 LLM 服务实例**；
 /// - 同步：URL / Token / 启停 / 立即同步（嵌入 [SyncSettingsSection]）。
 ///
-/// 为什么必须能绑：Dify 一个工作流 = 一个 API Key = 一条 `ai_providers` 行。
-/// T3 / T4 若不在 `ai_task_routes` 绑定专属 provider，`AiTaskRouter.resolve`
-/// 会返回 `null`，App 全程走本地兜底、AI 一次都不跑。
-/// 详见 `docs/WORKFLOW_T3_T4_GUIDE.md` §5。
+/// 为什么还要能绑：一个 LLM 服务实例 = 一条 `ai_providers` 行，用户可能同时跑
+/// 本地 Ollama 与云端 MiniMax。T3 / T4 若不在 `ai_task_routes` 绑定专属 provider，
+/// `AiTaskRouter.resolve` 会返回 `null`，App 全程走本地兜底、AI 一次都不跑。
+///
+/// 密钥边界：密钥只在服务端 `llm_server/.env`，本页**不提供**任何 Key 输入框
+/// （`api_key_ref` 恒空串），仅对历史 Dify 行仍显示「密钥缺失」。
 library;
+
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
 import '../../ai/ai_task.dart';
+import '../../ai/clients/llm_server_client.dart';
 import '../../core/secret_store.dart';
 import '../../data/db/drift_database.dart';
 import '../../data/repositories/settings_repository.dart';
@@ -26,14 +31,14 @@ import '../../data/sync/sync_config.dart';
 import '../../data/sync/sync_outbox.dart';
 import '../../data/sync/sync_scheduler.dart';
 import '../../data/sync/sync_status.dart';
-import 'dify_add_dialog.dart';
-import 'dify_edit_dialog.dart';
+import 'llm_server_add_dialog.dart';
+import 'llm_server_edit_dialog.dart';
 import 'sync_settings_section.dart';
 
 /// 可在设置页绑定的任务。
 ///
-/// 只列**已实现且走 Dify workflow（structured）**的任务；
-/// T5 追问走 `/v1/chat-messages`，属于会话类，统一回落默认 Provider。
+/// 只列**已实现且走 LLM Server structured 端点（`/v1/task/{code}`）**的任务；
+/// T5 追问走 `/v1/chat`，属于会话类，统一回落默认 Provider。
 const List<AiTask> kRoutableTasks = <AiTask>[
   AiTask.t1Extract,
   AiTask.t3Prerequisite,
@@ -93,9 +98,16 @@ class SettingsPageState extends State<SettingsPage> {
       final rows = await widget.settings.allProviders();
       final items = <_ProviderVM>[];
       for (final r in rows) {
-        final apiKey = await widget.settings.resolveApiKey(r.apiKeyRef);
+        // llm_server 无客户端密钥（密钥在服务端 .env）→ 不判「密钥缺失」，
+        // 只对遗留的、需要密钥的协议行做提示。
+        final needsKey = r.protocol != kLlmServerProtocol;
+        final apiKey =
+            needsKey ? await widget.settings.resolveApiKey(r.apiKeyRef) : '';
         items.add(
-          _ProviderVM(row: r, apiKeyMissing: apiKey == null || apiKey.isEmpty),
+          _ProviderVM(
+            row: r,
+            apiKeyMissing: needsKey && (apiKey == null || apiKey.isEmpty),
+          ),
         );
       }
       final routes = await widget.settings.allRoutes();
@@ -115,16 +127,18 @@ class SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _addProvider() async {
-    final result = await showDialog<DifyProviderFormResult>(
+    final result = await showDialog<LlmServerFormResult>(
       context: context,
-      builder: (_) => const DifyAddDialog(),
+      builder: (_) => const LlmServerAddDialog(),
     );
     if (result == null) return;
     try {
-      await widget.settings.addDifyProvider(
+      await widget.settings.addLlmServerProvider(
         displayName: result.displayName,
         baseUrl: result.baseUrl,
-        apiKey: result.apiKey,
+        backend: result.backend,
+        model: result.model,
+        setDefault: result.setDefault,
       );
       widget.onChanged?.call();
       await _reload();
@@ -157,7 +171,7 @@ class SettingsPageState extends State<SettingsPage> {
       builder: (_) => AlertDialog(
         title: const Text('删除 Provider'),
         content: Text(
-          '确认删除「${row.name}」？\n相关 API Key 也会被一起清除。'
+          '确认删除「${row.name}」？'
           '${boundTasks.isEmpty ? '' : '\n\n⚠️ 它还绑定了：${boundTasks.join('、')}\n删除后这些任务会解除绑定（T3/T4 将退回本地兜底）。'}',
         ),
         actions: [
@@ -188,30 +202,48 @@ class SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  /// 编辑 provider（显示名 / Base URL / API Key 选填）。
+  /// 编辑 provider（显示名 / Base URL / 后端 / 模型）。
   Future<void> _edit(AiProviderRow row) async {
-    final result = await showDialog<DifyEditResult>(
+    final initialModel = _firstModel(row.models);
+    final initialBackend = row.type.isEmpty ? 'auto' : row.type;
+    final result = await showDialog<LlmServerEditResult>(
       context: context,
-      builder: (_) =>
-          DifyEditDialog(initialName: row.name, initialBaseUrl: row.baseUrl),
+      builder: (_) => LlmServerEditDialog(
+        initialName: row.name,
+        initialBaseUrl: row.baseUrl,
+        initialBackend: initialBackend,
+        initialModel: initialModel,
+      ),
     );
     if (result == null) return;
-    // Base URL / Key 变了 → bootstrap 里已实例化的 DifyClient 还是旧值
-    final needsRestart = result.baseUrl != row.baseUrl || result.changesApiKey;
+    // Base URL / 后端 / 模型 变了 → bootstrap 里已实例化的 client 还是旧值
+    final needsRestart = result.needsRestart;
     try {
-      await widget.settings.updateProvider(
-        row.id,
-        name: result.displayName,
-        baseUrl: result.baseUrl,
-        apiKey: result.apiKey,
-      );
+      if (row.protocol == kLlmServerProtocol) {
+        await widget.settings.updateLlmServerProvider(
+          row.id,
+          name: result.displayName,
+          baseUrl: result.baseUrl,
+          backend: result.backend,
+          model: result.model,
+        );
+      } else {
+        // 遗留协议行：只改名与地址，密钥不动。
+        await widget.settings.updateProvider(
+          row.id,
+          name: result.displayName,
+          baseUrl: result.baseUrl,
+        );
+      }
       widget.onChanged?.call();
       await _reload();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            needsRestart ? '已保存。改了 Base URL / API Key，需重启 App 才生效' : '已保存',
+            needsRestart
+                ? '已保存。改了 Base URL / 后端 / 模型，需重启 App 才生效'
+                : '已保存',
           ),
         ),
       );
@@ -247,21 +279,17 @@ class SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _test(AiProviderRow row) async {
-    final apiKey = await widget.settings.resolveApiKey(row.apiKeyRef);
-    if (apiKey == null || apiKey.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('密钥缺失，无法测试。')));
-      return;
-    }
     if (!mounted) return;
     ScaffoldMessenger.of(context)
         .showSnackBar(const SnackBar(content: Text('正在测试连接…')));
-    final err = await widget.settings.testDify(row.baseUrl, apiKey);
+    // llm_server 无密钥：直接探 /health（密钥由服务端 .env 持有）。
+    final err = await widget.settings.testLlmServer(row.baseUrl);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(err == null ? '连接成功（HTTP 200）' : '连接失败：$err'),
+        content: Text(
+        err == null ? '连接成功（/health 200）' : '连接失败：$err',
+      ),
         backgroundColor: err == null ? Colors.green : Colors.red,
       ),
     );
@@ -287,7 +315,7 @@ class SettingsPageState extends State<SettingsPage> {
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _addProvider,
         icon: const Icon(Icons.add),
-        label: const Text('添加 Dify'),
+        label: const Text('添加 LLM 服务'),
       ),
     );
   }
@@ -312,7 +340,7 @@ class SettingsPageState extends State<SettingsPage> {
         child: Padding(
           padding: EdgeInsets.all(24),
           child: Text(
-            '还没有 AI 提供商。\n点右下角「添加 Dify」创建一个。',
+            '还没有 AI 服务。\n点右下角「添加 LLM 服务」创建一个。',
             textAlign: TextAlign.center,
             style: TextStyle(color: Colors.grey),
           ),
@@ -348,12 +376,11 @@ class SettingsPageState extends State<SettingsPage> {
         const Padding(
           padding: EdgeInsets.symmetric(horizontal: 16),
           child: Text(
-            '• 密钥仅保存在本机 SecretStore，不写入数据库；\n'
+            '• 密钥仅保存在服务端 .env（llm_server/.env），不写入数据库；\n'
             '• 增删 / 启停 Provider 后需重启 App 才生效（P0 简化）；\n'
-            '• 编辑 Provider：只改显示名即时生效，改 Base URL / API Key 需重启；\n'
+            '• 编辑 Provider：只改显示名即时生效，改 Base URL / 后端 / 模型需重启；\n'
             '• 任务路由绑定即时生效，无需重启；\n'
-            '• 本地 Dify（http://localhost）仅桌面端开发期可用；\n'
-            '• 公网 / Web 端请走 supabase ai-proxy（后续 T03+ 接入）。',
+            '• 本地服务（127.0.0.1）仅本机可用；公网场景请使用已配置 CORS 的代理。',
             style: TextStyle(color: Colors.grey, fontSize: 12, height: 1.6),
           ),
         ),
@@ -387,8 +414,8 @@ class SettingsPageState extends State<SettingsPage> {
         const Padding(
           padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
           child: Text(
-            'Dify 的 Key 是按「应用」签发的：一个工作流 = 一个 Key = 一个 Provider。\n'
-            '把任务绑到对应的 Provider；T3 / T4 不绑就永远走本地兜底（AI 不会跑）。\n'
+            '一个 LLM 服务实例 = 一条 Provider 记录（本地 Ollama / 云端 MiniMax 可共存）。\n'
+            '把任务绑到指定的服务实例；T3 / T4 不绑就走本地兜底（AI 不参与）。\n'
             '绑定即时生效；新增 / 启用 Provider 仍需重启 App。',
             style: TextStyle(color: Colors.grey, fontSize: 12, height: 1.6),
           ),
@@ -473,6 +500,29 @@ class _ProviderVM {
   final bool apiKeyMissing;
 }
 
+/// 从 `ai_providers.models`（JSON 数组字符串）取第一个模型覆盖；失败返回 `''`。
+///
+/// 表结构不可改（Drift 依赖 build_runner），`models` 列被复用承载 model 覆盖，
+/// 最多 1 个元素；`[]` 表示「用后端默认模型」。
+String _firstModel(String modelsJson) {
+  if (modelsJson.isEmpty) return '';
+  try {
+    final decoded = jsonDecode(modelsJson);
+    if (decoded is List && decoded.isNotEmpty) {
+      final first = decoded.first;
+      return first is String ? first : first.toString();
+    }
+  } on Object {
+    return '';
+  }
+  return '';
+}
+
+/// 后端名的可读文案（`auto` 说人话）。
+String _backendLabel(String backend) => backend == 'auto'
+    ? '跟随服务端默认'
+    : (kLlmServerBackends.contains(backend) ? backend : 'auto');
+
 class _ProviderTile extends StatelessWidget {
   const _ProviderTile({
     required this.vm,
@@ -491,8 +541,12 @@ class _ProviderTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final row = vm.row;
+    final backend = row.type.isEmpty ? 'auto' : row.type;
+    final model = _firstModel(row.models);
     final subtitleParts = <String>[
       row.baseUrl,
+      _backendLabel(backend),
+      model.isEmpty ? '后端默认模型' : model,
       if (vm.apiKeyMissing) '⚠️ 密钥缺失',
       if (!row.enabled) '已停用',
     ];

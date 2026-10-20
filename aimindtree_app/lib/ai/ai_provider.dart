@@ -60,7 +60,8 @@ abstract class AiProvider {
   /// 供应商标识（对应 `ai_providers.id`）。
   String get id;
 
-  /// 端点协议：`openai` / `anthropic` / `dify`。
+  /// 端点协议：`openai` / `anthropic` / `dify`（已停用，保留仅为回退）/
+  /// `llm_server`（自研本地 LLM 服务，见 `llm_server/`）。
   String get protocol;
 
   /// 一次性结构化执行。
@@ -78,11 +79,17 @@ abstract class AiProvider {
   ///
   /// [conversationId] 为空时新建会话；返回的 [AiChunk.conversationId] 携带
   /// 新会话 id 供续聊。
+  ///
+  /// [task] / [variant] 为**可选**参数，仅供「按任务装载提示词」的实现使用
+  /// （如 `LlmServerClient` 用 `variant='detect'` 选 `t5_ask__detect.md`）；
+  /// 不传不影响既有实现，Dify 类实现可直接忽略。
   Stream<AiChunk> streamChat(
     String query, {
     String? conversationId,
     String? user,
     Duration timeout = const Duration(seconds: 120),
+    AiTask? task,
+    String? variant,
   });
 
   void dispose();

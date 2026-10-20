@@ -22,7 +22,7 @@ class _FakeProvider implements AiProvider {
   final String id;
 
   @override
-  String get protocol => 'dify';
+  String get protocol => 'llm_server';
 
   @override
   Future<AiTaskResult> runTask(
@@ -39,7 +39,10 @@ class _FakeProvider implements AiProvider {
     String? conversationId,
     String? user,
     Duration timeout = const Duration(seconds: 120),
+    AiTask? task,
+    String? variant,
   }) async* {
+    // 假实现忽略 task / variant，仅证明「可选参数不实现也不影响既有调用点」。
     yield AiChunk(delta: id, done: true);
   }
 

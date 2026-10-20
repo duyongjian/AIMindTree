@@ -35,39 +35,66 @@ void main() {
         await db.close();
       });
 
-      test('首次启动 seedFromLocalIfEmpty 写入默认 Dify provider', () async {
+      test('首次启动 seedFromLocalIfEmpty 写入默认 LLM 服务 provider', () async {
         await repo.seedFromLocalIfEmpty(
-          const LocalAiConfig(
-            baseUrl: 'http://localhost:8080',
-            appApiKey: 'app-seed-key',
-          ),
+          const LocalAiConfig(baseUrl: 'http://127.0.0.1:8787'),
         );
         final all = await repo.allProviders();
         expect(all.length, 1);
-        expect(all.first.protocol, 'dify');
-        expect(all.first.baseUrl, 'http://localhost:8080');
+        expect(all.first.protocol, 'llm_server');
+        expect(all.first.baseUrl, 'http://127.0.0.1:8787');
         expect(all.first.enabled, isTrue);
-        // 密钥确实落到了 SecretStore
-        final key = await store.get(all.first.apiKeyRef);
-        expect(key, 'app-seed-key');
+        // 密钥边界（C4）：llm_server 不落任何密钥，api_key_ref 恒空串。
+        expect(all.first.apiKeyRef, '');
+        expect(await store.get(all.first.apiKeyRef), isNull);
       });
 
       test('再次 seedFromLocalIfEmpty 不会重复写入', () async {
         await repo.seedFromLocalIfEmpty(
-          const LocalAiConfig(
-            baseUrl: 'http://localhost:8080',
-            appApiKey: 'app-seed-key',
-          ),
+          const LocalAiConfig(baseUrl: 'http://127.0.0.1:8787'),
         );
         await repo.seedFromLocalIfEmpty(
-          const LocalAiConfig(
-            baseUrl: 'http://other:9000',
-            appApiKey: 'app-other-key',
-          ),
+          const LocalAiConfig(baseUrl: 'http://other:9000'),
         );
         final all = await repo.allProviders();
-        expect(all.length, 1, reason: '已存在 Dify provider 时不再 seed');
-        expect(all.first.baseUrl, 'http://localhost:8080');
+        expect(all.length, 1, reason: '已存在 LLM 服务 provider 时不再 seed');
+        expect(all.first.baseUrl, 'http://127.0.0.1:8787');
+      });
+
+      test('addLlmServerProvider 入表且不写 SecretStore', () async {
+        final row = await repo.addLlmServerProvider(
+          displayName: '本地 Ollama',
+          baseUrl: 'http://127.0.0.1:8787',
+          backend: 'ollama',
+          model: 'qwen2.5:7b',
+          setDefault: true,
+        );
+        expect(row.name, '本地 Ollama');
+        expect(row.protocol, 'llm_server');
+        expect(row.type, 'ollama', reason: 'backend 复用 type 列');
+        expect(row.models, '["qwen2.5:7b"]', reason: 'model 复用 models 列');
+        expect(row.apiKeyRef, '');
+        expect(row.isDefault, isTrue);
+        expect(row.enabled, isTrue);
+        expect(await store.get(row.apiKeyRef), isNull);
+      });
+
+      test('updateLlmServerProvider 改 backend / model', () async {
+        final row = await repo.addLlmServerProvider(
+          displayName: 'P',
+          baseUrl: 'http://127.0.0.1:8787',
+        );
+        expect(row.models, '[]', reason: '未指定 model → 用后端默认');
+        final updated = await repo.updateLlmServerProvider(
+          row.id,
+          backend: 'minimax',
+          model: 'MiniMax-Text-01',
+        );
+        expect(updated, isNotNull);
+        expect(updated!.type, 'minimax');
+        expect(updated.models, '["MiniMax-Text-01"]');
+        expect(updated.baseUrl, 'http://127.0.0.1:8787',
+            reason: '没传 baseUrl 就不该动它');
       });
 
       test('addDifyProvider 写密钥 + 入表', () async {

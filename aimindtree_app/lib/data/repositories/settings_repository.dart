@@ -1,15 +1,21 @@
-/// AI Provider 配置仓储（T07：让 Dify Key 不再硬编码）。
+/// AI Provider 配置仓储（T07：密钥不再硬编码）。
 ///
-/// - Provider 记录在 `ai_providers` 表；密钥在 [SecretStore] 里。
+/// - Provider 记录在 `ai_providers` 表；**llm_server 场景不存密钥**
+///   （`api_key_ref` 恒空串，密钥在服务端 `.env`，见密钥边界 C4）。
 /// - `api_key_ref` 是**引用名**（如 `dify_<ulid>`），不是密钥本身。
-/// - P0 启动会从 [LocalAiConfig] seed 一个 Dify provider，开箱即用。
+/// - P0 启动会从 [LocalAiConfig] seed 一个 LLM 服务 provider，开箱即用。
+///
+/// ⚠️ 表结构不可改（Drift 依赖 build_runner）：backend 复用 `type` 列、
+/// model 覆盖复用 `models` 列，语义见 `data/db/tables.dart` 的注释。
 library;
 
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:drift/drift.dart';
 
 import '../../ai/ai_task.dart';
+import '../../ai/clients/llm_server_client.dart';
 import '../../ai/extraction_service.dart';
 import '../../core/id.dart';
 import '../../core/logger.dart';
@@ -35,7 +41,13 @@ class SettingsRepository {
     return rows.isEmpty ? null : rows.first;
   }
 
-  // ============ Dify Provider CRUD ============
+  // ============ Dify Provider CRUD（已停用，保留仅供回退）============
+  //
+  // ⚠️ 这两个方法**保留**是有意为之：
+  //   ① test/settings_repository_test.dart 里有 14 处调用，删掉 = 大面积编译 error；
+  //   ② 三步回退 Dify 时需要它们；
+  //   ③ 因此**不得**加 @Deprecated —— 测试仍在调用，会触发全量
+  //      deprecated_member_use warning，门禁直接判 fail。
 
   /// 新增一个 Dify provider：密钥写入 SecretStore，引用名入表。
   Future<AiProviderRow> addDifyProvider({
@@ -73,6 +85,83 @@ class SettingsRepository {
       enabled: true,
       // 无相关字段，留 null
     );
+  }
+
+  // ============ LLM Server Provider CRUD ============
+
+  /// 新增一个 LLM 服务 provider。
+  ///
+  /// 列复用约定（表结构不可改，见 `tables.dart` 注释）：
+  /// - `protocol` 恒 `llm_server`；
+  /// - `type` 存 backend（`auto`/`ollama`/`minimax`/`openai_compat`）；
+  /// - `models` 存 JSON 数组（最多 1 个元素 = model 覆盖，`[]` = 后端默认）；
+  /// - `api_key_ref` 恒空串（密钥在服务端 `.env`，C4 密钥边界）。
+  Future<AiProviderRow> addLlmServerProvider({
+    required String displayName,
+    required String baseUrl,
+    String backend = 'auto',
+    String model = '',
+    bool setDefault = false,
+  }) async {
+    final id = newUlid();
+    final modelsJson = encodeLlmServerModels(model);
+    await _db.into(_db.aiProviders).insert(
+          AiProvidersCompanion(
+            id: Value(id),
+            name: Value(displayName),
+            type: Value(backend),
+            protocol: Value(kLlmServerProtocol),
+            baseUrl: Value(baseUrl),
+            apiKeyRef: const Value(''),
+            models: Value(modelsJson),
+            isDefault: Value(setDefault),
+            enabled: const Value(true),
+          ),
+        );
+    _log.i('新增 LLM 服务 provider：$displayName ($baseUrl, backend=$backend)');
+    return AiProviderRow(
+      id: id,
+      name: displayName,
+      type: backend,
+      protocol: kLlmServerProtocol,
+      baseUrl: baseUrl,
+      apiKeyRef: '',
+      models: modelsJson,
+      isDefault: setDefault,
+      enabled: true,
+    );
+  }
+
+  /// 更新 LLM 服务的连接参数（`type` / `models` 两列的语义见上）。
+  ///
+  /// 返回更新后的行；id 不存在返回 null。
+  Future<AiProviderRow?> updateLlmServerProvider(
+    String id, {
+    String? name,
+    String? baseUrl,
+    String? backend,
+    String? model,
+  }) async {
+    final row = await (_db.select(_db.aiProviders)
+          ..where((t) => t.id.equals(id))
+          ..limit(1))
+        .getSingleOrNull();
+    if (row == null) return null;
+
+    await (_db.update(_db.aiProviders)..where((t) => t.id.equals(id))).write(
+      AiProvidersCompanion(
+        name: name == null ? const Value.absent() : Value(name),
+        baseUrl: baseUrl == null ? const Value.absent() : Value(baseUrl),
+        type: backend == null ? const Value.absent() : Value(backend),
+        models: model == null
+            ? const Value.absent()
+            : Value(encodeLlmServerModels(model)),
+      ),
+    );
+    return (_db.select(_db.aiProviders)
+          ..where((t) => t.id.equals(id))
+          ..limit(1))
+        .getSingleOrNull();
   }
 
   /// 启用/停用。
@@ -155,16 +244,20 @@ class SettingsRepository {
 
   // ============ Seed ============
 
-  /// 首次启动：若没有 Dify provider，从 [LocalAiConfig] seed 一个。
+  /// 首次启动：若没有 LLM 服务 provider，从 [LocalAiConfig] seed 一个。
+  ///
+  /// 注意：**不写 SecretStore**（llm_server 无客户端密钥，C4）。
   Future<void> seedFromLocalIfEmpty(LocalAiConfig cfg) async {
     final existing = await allProviders();
-    final hasDify = existing.any((p) => p.protocol == 'dify');
-    if (hasDify) return;
-    _log.i('首次启动：seed Dify provider from LocalAiConfig');
-    await addDifyProvider(
-      displayName: '本地 Dify（默认）',
+    final hasLlmServer = existing.any((p) => p.protocol == kLlmServerProtocol);
+    if (hasLlmServer) return;
+    _log.i('首次启动：seed LLM 服务 provider from LocalAiConfig');
+    await addLlmServerProvider(
+      displayName: '本地 LLM 服务（默认）',
       baseUrl: cfg.baseUrl,
-      apiKey: cfg.appApiKey,
+      backend: cfg.backend,
+      model: cfg.model,
+      setDefault: true,
     );
   }
 
@@ -189,4 +282,53 @@ class SettingsRepository {
       return e.toString();
     }
   }
+
+  /// 用 `GET {baseUrl}/health` 探 LLM 服务，返回 null = OK。
+  ///
+  /// 与 [testDify] 签名保持一致（返回错误文案，`null` 表示成功），
+  /// 便于设置页复用同一套提示逻辑。
+  Future<String?> testLlmServer(
+    String baseUrl, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final base = baseUrl.endsWith('/')
+        ? baseUrl.substring(0, baseUrl.length - 1)
+        : baseUrl;
+    try {
+      final client = HttpClient()..connectionTimeout = timeout;
+      final req = await client.getUrl(Uri.parse('$base/health'));
+      final resp = await req.close().timeout(timeout);
+      final body = await resp.transform(utf8.decoder).join();
+      client.close(force: true);
+      if (resp.statusCode != 200) return 'HTTP ${resp.statusCode}';
+      // 服务活着但后端全挂 → 也要告诉用户，否则「测试成功」后一跑就失败。
+      final decoded = jsonDecode(body);
+      if (decoded is Map && decoded['backends'] is List) {
+        final down = <String>[];
+        for (final b in decoded['backends'] as List) {
+          if (b is Map && b['reachable'] != true) {
+            down.add('${b['name'] ?? '?'}');
+          }
+        }
+        final total = (decoded['backends'] as List).length;
+        if (down.isNotEmpty) {
+          return '服务已启动，但后端不可用：${down.join('、')}'
+              '（$total 个中 ${down.length} 个不可达）。'
+              '默认后端之外的后端不可达不影响使用。';
+        }
+      }
+      return null;
+    } on Object catch (e) {
+      return e.toString();
+    }
+  }
+}
+
+/// 把「模型覆盖」编码成 `models` 列的 JSON 数组字符串。
+///
+/// 空串 → `'[]'`（用后端默认模型）；否则 `'["qwen2.5:7b"]'`。
+/// 该列最多承载 1 个元素（表结构不可改的前提下按约定只放一个）。
+String encodeLlmServerModels(String model) {
+  final m = model.trim();
+  return m.isEmpty ? '[]' : jsonEncode(<String>[m]);
 }
