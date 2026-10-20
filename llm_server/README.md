@@ -84,6 +84,42 @@ llm_server/
     └── t*.md               14 个提示词（含 t5_ask__detect.md 变体）
 ```
 
+## 3.5 使用本地 Ollama（两步，缺一不可）
+
+Ollama 是**默认后端**，但本机默认「程序已装、服务没起、也没拉模型」，
+必须手动做这两步（各开一个终端）：
+
+```bat
+REM ① 起服务（默认监听 http://127.0.0.1:11434，这个窗口别关）
+ollama serve
+
+REM ② 拉模型（首次约几分钟，GB 级下载）
+ollama pull llama3
+REM    或换你自己的模型：ollama pull qwen2.5:7b
+```
+
+然后把 `llm_server/config.yaml` 里的模型位对齐你拉的那个（默认给了占位值 `llama3`）：
+
+```yaml
+backends:
+  ollama:
+    default_model: llama3      # ← 一行改成你 pull 过的模型名
+    models: [llama3]
+```
+
+自检：
+
+```bat
+curl --noproxy '*' http://127.0.0.1:11434/api/tags     REM Ollama 自己活着 + 有模型
+curl --noproxy '*' http://127.0.0.1:8787/health        REM ollama: reachable=true
+```
+
+> ⚠️ **只 `serve` 不 `pull`**：`/health` 仍然 200（`reachable=true`），
+> 但首次真实请求会报「模型不存在」。**先 pull 再调**。
+>
+> 不想用 Ollama 也完全没问题：把 `default_backend` 改成 `minimax` 或 `openai_compat`
+> 即可（见下一节），Ollama 只是三个可切换后端之一。
+
 ## 4. 切换后端
 
 改 `llm_server/config.yaml` 一行即可（**不用重启进程**，改完 `POST /v1/admin/reload`）：
@@ -94,7 +130,7 @@ default_backend: ollama      # ← 改成 minimax / openai_compat
 
 | backend | 默认 protocol | 端点 | 前置条件 |
 | --- | --- | --- | --- |
-| `ollama` | `openai_compat` | `http://127.0.0.1:11434/v1/chat/completions` | `ollama serve` + `ollama pull qwen2.5:7b` |
+| `ollama` | `openai_compat` | `http://127.0.0.1:11434/v1/chat/completions` | `ollama serve` + `ollama pull llama3`（见 §3.5） |
 | `minimax` | `anthropic_compat` | `https://api.minimaxi.com/anthropic/v1/messages` | `.env` 里填 `MINIMAX_API_KEY` |
 | `openai_compat` | `openai_compat` | 你填的 `base_url` + `/v1/chat/completions` | `.env` 里填 `OPENAI_API_KEY` |
 
@@ -107,7 +143,7 @@ task_backends:
   T5: minimax
 ```
 
-**Ollama 是可选的**：没装 Ollama 服务也能正常启动，`/health` 里该项
+**Ollama 是可选的**：没起 Ollama 服务也能正常启动，`/health` 里该项
 `reachable=false`，只要把 `default_backend` 指向一个可用端点即可。
 
 ## 5. 密钥

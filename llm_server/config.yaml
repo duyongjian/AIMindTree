@@ -36,15 +36,18 @@ retry:
 
 backends:
   # ---- 后端一：Ollama（本地，默认）----
-  # 前置：ollama serve 且已拉模型（ollama pull qwen2.5:7b）。
-  # 没装 Ollama 也不影响服务启动，只是 /health 里 reachable=false（Q-I）。
+  # 前置两步（本机默认没起、也没拉模型，见 README「使用本地 Ollama」）：
+  #   ollama serve
+  #   ollama pull llama3
+  # 没起 Ollama 也不影响服务启动，只是 /health 里 reachable=false（Q-I）。
+  # ⚠️ 没拉模型时，/health 仍 200，但首次请求会报「模型不存在」——先 pull 再调。
   ollama:
     type: ollama
     protocol: openai_compat
     base_url: http://127.0.0.1:11434
     api_key_env: ""            # 本地无需密钥
-    default_model: qwen2.5:7b
-    models: [qwen2.5:7b, llama3]
+    default_model: llama3      # ← 占位值，换成你 pull 过的模型（一行改）
+    models: [llama3]
     extra:
       num_ctx: 8192
       json_mode_field: format   # P0 可选：Ollama 的 format=json

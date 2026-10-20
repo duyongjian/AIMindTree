@@ -17,7 +17,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from backends.base import Message
-from core.errors import invalid_request
+from core.errors import LlmError, invalid_request
 from core.json_repair import repair
 from core.logging import dump, get_logger
 
@@ -35,6 +35,26 @@ _FALLBACK_SYSTEM = (
 def _new_conversation_id() -> str:
     """生成一个会话 id（**服务端无状态**，仅回显透传，Q4）。"""
     return f'conv_{uuid.uuid4().hex[:20]}'
+
+
+def _load_prompt_with_variant_fallback(state, task_code: str, variant: str | None):
+    """装载提示词，**variant 未命中时回退到主形态**。
+
+    降级不变量（设计修正 3）：
+    - variant **精确匹配**、不做任何内容嗅探；
+    - 变体未加载 / variant 传错 → 回退主形态，**绝不抛 unknown_task 打断会话**，
+      也**绝不**凑一个「看起来像的」提示词；
+    - 于是最坏情况 = 「没加载服务端变体提示词」= 主形态的输出形状：
+      自由问答仍是自由文本（不会被污染成 JSON）；
+      检测场景退化成自由文本，由客户端解析失败后静默忽略。
+    - 主形态本身也缺失才抛 unknown_task（那是真缺文件，属于部署错误）。
+    """
+    if not variant:
+        return state.registry.get(task_code, None)
+    try:
+        return state.registry.get(task_code, variant)
+    except LlmError:
+        return state.registry.get(task_code, None)
 
 
 async def _read_body(request: Request) -> dict:
@@ -85,12 +105,22 @@ async def chat(request: Request) -> JSONResponse | StreamingResponse:
     user = str(body.get('user') or 'aimindtree-app')
 
     meta = None
+    variant_used = variant
     if task_code:
-        meta = state.registry.get(task_code, variant)
+        meta = _load_prompt_with_variant_fallback(state, task_code, variant)
+        if variant and meta.variant is None:
+            _log.warning(
+                '变体 %s/%s 未加载，已回退到主形态（%s）；输出形状以主形态为准',
+                task_code,
+                variant,
+                meta.file_name,
+            )
+            variant_used = None
     backend_conf = state.registry.resolve_backend(task_code or 'CHAT', body.get('backend'))
     backend = state.get_backend(backend_conf.name, timeout_s=timeout_s)
 
     messages = _build_messages(meta, query, body.get('inputs'))
+    _log.debug('装载提示词：%s（variant=%s）', meta.file_name if meta else '(兜底人格)', variant_used or '-')
     dump(_log, f'{task_code or "CHAT"}{"/" + variant if variant else ""} prompt', messages)
 
     temperature = float(meta.temperature) if meta else 0.6
@@ -123,7 +153,7 @@ async def chat(request: Request) -> JSONResponse | StreamingResponse:
             conversation_id=conversation_id,
             backend_name=backend_conf.name,
             task_code=task_code,
-            variant=variant,
+            variant=variant_used,
         ),
         media_type='text/event-stream',
         headers={
