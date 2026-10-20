@@ -7,8 +7,6 @@
 /// DifyClient 本身随自研 LLM Server 上线而停用（文件整段注释保留，可回退）。
 library;
 
-import 'dart:convert';
-
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/logger.dart';
@@ -221,11 +219,13 @@ class ExtractionService {
       if (row.protocol == kLlmServerProtocol) {
         // llm_server 无客户端密钥：**不调用** resolveApiKey（与旧 dify 分支的
         // 关键差别，C4）。后端与模型由服务端 config.yaml / 本行覆盖共同决定。
+        // ⚠️ 必须走 helper：直接读 row.type 会绕过白名单容错，
+        // 非法值原样传给服务端 → backend_unknown 400。
         final client = LlmServerClient(
           id: row.id,
           baseUrl: row.baseUrl,
-          backend: row.type.isEmpty ? 'auto' : row.type,
-          model: _firstModel(row.models),
+          backend: backendOf(row.type),
+          model: firstModel(row.models),
         );
         providers[client.id] = client;
         instantiated.add(row);
@@ -318,21 +318,4 @@ class ExtractionService {
       sync,
     );
   }
-}
-
-/// 从 `ai_providers.models`（JSON 数组字符串）取第一个模型；解析失败返回 `''`。
-///
-/// 表结构不可改的前提下，`models` 列被复用承载「模型覆盖」，最多 1 个元素。
-String _firstModel(String modelsJson) {
-  if (modelsJson.isEmpty) return '';
-  try {
-    final decoded = jsonDecode(modelsJson);
-    if (decoded is List && decoded.isNotEmpty) {
-      final first = decoded.first;
-      return first is String ? first : first.toString();
-    }
-  } on Object {
-    return '';
-  }
-  return '';
 }

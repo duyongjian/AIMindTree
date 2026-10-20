@@ -332,3 +332,41 @@ String encodeLlmServerModels(String model) {
   final m = model.trim();
   return m.isEmpty ? '[]' : jsonEncode(<String>[m]);
 }
+
+// ================= 列解析 helper（**唯一实现**）=================
+//
+// ⚠️ `bootstrap` 与设置页**都必须**调这两个函数，任何其他文件都不得自己解析
+//    `row.type` / `row.models`。否则迟早出现「设置页显示 ollama、bootstrap 实际
+//    走 auto」的漂移 —— 用户看到的配置和实际生效的配置不一致，且极难排查。
+//
+// 默认值口径（只此一份）：
+//   · `type` 不在白名单或为空   → `auto`（跟随服务端 config.yaml）
+//   · `models` 不是合法 JSON    → `''`（用后端默认模型）
+//   · `models` 长度 > 1         → 只取第 0 个
+//   · 第 0 个非字符串或空       → `''`（用后端默认模型）
+
+/// 从 `ai_providers.type` 列解析 backend 名（带白名单容错）。
+///
+/// 白名单即 [kLlmServerBackends]（唯一来源，勿在本文件另抄一份）。
+/// 非法值**绝不原样透传**给服务端 —— 那会拿到 `backend_unknown` 400。
+String backendOf(String rawType) {
+  final t = rawType.trim();
+  return kLlmServerBackends.contains(t) ? t : 'auto';
+}
+
+/// 从 `ai_providers.models` 列解析模型覆盖（带 JSON 容错）。
+///
+/// 空串 = 用后端默认模型（不要与「未配置」混淆，二者本就同义）。
+String firstModel(String modelsJson) {
+  if (modelsJson.trim().isEmpty) return '';
+  try {
+    final decoded = jsonDecode(modelsJson);
+    if (decoded is List && decoded.isNotEmpty) {
+      final first = decoded.first;
+      if (first is String) return first.trim();
+    }
+  } on Object {
+    return '';
+  }
+  return '';
+}

@@ -18,8 +18,6 @@
 /// （`api_key_ref` 恒空串），仅对历史 Dify 行仍显示「密钥缺失」。
 library;
 
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 
 import '../../ai/ai_task.dart';
@@ -204,8 +202,8 @@ class SettingsPageState extends State<SettingsPage> {
 
   /// 编辑 provider（显示名 / Base URL / 后端 / 模型）。
   Future<void> _edit(AiProviderRow row) async {
-    final initialModel = _firstModel(row.models);
-    final initialBackend = row.type.isEmpty ? 'auto' : row.type;
+    final initialModel = firstModel(row.models);
+    final initialBackend = backendOf(row.type);
     final result = await showDialog<LlmServerEditResult>(
       context: context,
       builder: (_) => LlmServerEditDialog(
@@ -500,25 +498,10 @@ class _ProviderVM {
   final bool apiKeyMissing;
 }
 
-/// 从 `ai_providers.models`（JSON 数组字符串）取第一个模型覆盖；失败返回 `''`。
-///
-/// 表结构不可改（Drift 依赖 build_runner），`models` 列被复用承载 model 覆盖，
-/// 最多 1 个元素；`[]` 表示「用后端默认模型」。
-String _firstModel(String modelsJson) {
-  if (modelsJson.isEmpty) return '';
-  try {
-    final decoded = jsonDecode(modelsJson);
-    if (decoded is List && decoded.isNotEmpty) {
-      final first = decoded.first;
-      return first is String ? first : first.toString();
-    }
-  } on Object {
-    return '';
-  }
-  return '';
-}
-
 /// 后端名的可读文案（`auto` 说人话）。
+///
+/// 列解析（白名单容错 / JSON 容错）统一走 `SettingsRepository` 的
+/// [backendOf] / [firstModel]，本页不自己解析，避免与 bootstrap 漂移。
 String _backendLabel(String backend) => backend == 'auto'
     ? '跟随服务端默认'
     : (kLlmServerBackends.contains(backend) ? backend : 'auto');
@@ -541,8 +524,8 @@ class _ProviderTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final row = vm.row;
-    final backend = row.type.isEmpty ? 'auto' : row.type;
-    final model = _firstModel(row.models);
+    final backend = backendOf(row.type);
+    final model = firstModel(row.models);
     final subtitleParts = <String>[
       row.baseUrl,
       _backendLabel(backend),
