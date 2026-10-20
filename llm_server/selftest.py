@@ -154,7 +154,7 @@ EXPECTED_CONTRACT: dict[str, tuple[bool, bool, str | None, tuple[str, ...]]] = {
     'T1': (True, True, 'knowledge_points', ('note_text',)),
     'T2': (True, True, 'normalized', ('kps',)),
     'T3': (True, True, 'prerequisites', ('points',)),
-    'T4': (True, True, 'gaps', ('target', 'depth')),
+    'T4': (True, True, 'gaps', ('target', 'depth', 'depth_instruction')),
     'T5': (False, False, None, ('query',)),
     'T5.detect': (False, True, None, ('query',)),
     'T6': (False, False, None, ('query',)),
@@ -166,6 +166,94 @@ EXPECTED_CONTRACT: dict[str, tuple[bool, bool, str | None, tuple[str, ...]]] = {
     'T12': (True, True, 'title_tags', ('content',)),
     'T13': (True, True, 'similarities', ('pairs',)),
 }
+
+
+# ------------------------------------------------- C. App 端 inputs 对账
+
+#: App 端**实际传入**的 inputs 字段名，逐字取自 Flutter 调用点。
+#: ``None`` = 该任务 App 端尚未接线（P2 预留），跳过对账但仍列出。
+#:
+#: ⚠️ 这张表是**回归护栏**。服务端只校验「声明的字段是否缺失」，**不拒绝多余字段**，
+#: 所以「App 端多传、服务端没声明」不会报 400，而是被**静默丢弃** —— 用户看到的是
+#: 功能悄悄失效且无任何提示（T4 的 depth_instruction 就是这么丢的）。
+#: 只有这里做双向对账才能兜住。改任何一侧都要同步改这里。
+APP_INPUTS: dict[str, tuple[str, ...] | None] = {
+    'T1': ('note_text',),
+    'T2': None,          # P2 未接线
+    'T3': ('points',),
+    'T4': ('target', 'depth', 'depth_instruction'),
+    'T5': ('query',),
+    'T5.detect': ('query',),
+    'T6': ('query',),
+    'T7': None,          # P2 未接线
+    'T8': ('query',),
+    'T9': None,          # P2 未接线
+    'T10': None,         # P2 未接线
+    'T11': None,         # P2 未接线
+    'T12': None,         # P2 未接线
+    'T13': None,         # P2 未接线
+}
+
+#: App 端调用点（报错时给出确切位置，省得再翻代码）。
+APP_CALL_SITES: dict[str, str] = {
+    'T1': 'lib/ai/extraction_service.dart:95  ai.run(T1, {"note_text": ...})',
+    # T3 的 points 是 JSON 字符串：按组连线（:233）会在每个元素里多带
+    # group / group_order / foundation_level 三个附加字段，字段名对外仍是 points，
+    # 但提示词正文必须说明其含义（见 t3_prerequisite.md 第 7 条）。
+    'T3': 'lib/ai/auto_graph_service.dart:152 / :233  {"points": jsonEncode([...])}',
+    'T4': 'lib/ai/auto_graph_service.dart:377  {"target","depth","depth_instruction"}',
+    'T5': 'lib/features/agent/agent_page.dart:131 / teacher_page.dart:140  chat(query)',
+    'T5.detect': 'lib/features/agent/agent_page.dart:209  chat(prompt, variant:"detect")',
+    'T6': 'lib/features/teacher/teacher_page.dart:99  chat(query)',
+    'T8': 'lib/features/homework/homework_page.dart:187  chat(_buildPrompt())',
+}
+
+
+def run_app_inputs_check(store: PromptStore) -> tuple[int, int]:
+    """App 端 inputs ↔ front-matter ``inputs`` **双向对账**。
+
+    两种不一致都是 bug，但表现相反：
+
+    - **App 多传、服务端没声明** → 字段被静默丢弃，**静默失效**（最危险，无报错）。
+    - **服务端声明、App 没传** → ``missing_input`` 400，直接炸（吵但好查）。
+
+    Returns:
+        ``(failures, unwired)``
+    """
+    failures = 0
+    unwired = 0
+    for key, app_fields in APP_INPUTS.items():
+        task, _, variant = key.partition('.')
+        if app_fields is None:
+            print(f'  ⚪ {key} App 端未接线（P2 预留），跳过对账')
+            unwired += 1
+            continue
+        try:
+            meta = store.get(task, variant or None)
+        except Exception:
+            print(f'  ⚪ {key} 提示词未加载，跳过对账')
+            continue
+
+        dropped = [f for f in app_fields if f not in meta.inputs]
+        missing = [f for f in meta.inputs if f not in app_fields]
+        site = APP_CALL_SITES.get(key, '(调用点未登记)')
+        if not dropped and not missing:
+            print(f'  ✅ {key} → {meta.file_name}  inputs={list(meta.inputs)}')
+            continue
+        failures += 1
+        print(f'  ❌ {key} → {meta.file_name}')
+        print(f'      App 端：{site}')
+        if dropped:
+            print(
+                f'      App 多传但服务端没声明：{dropped} → **被静默丢弃**，'
+                f'功能悄悄失效且无报错（必须修提示词的 inputs + 正文渲染）'
+            )
+        if missing:
+            print(
+                f'      服务端声明但 App 没传：{missing} → 会 400 missing_input'
+                f'（必须修 App 端，或确认该字段确属多余）'
+            )
+    return failures, unwired
 
 
 def run_contract_check(store: PromptStore) -> tuple[int, int]:
@@ -226,6 +314,12 @@ def main(argv: list[str] | None = None) -> int:
     contract_failures, missing = run_contract_check(store)
 
     print()
+    print('=' * 72)
+    print('C. App 端 inputs ↔ front-matter inputs 双向对账（防静默丢弃）')
+    print('=' * 72)
+    app_failures, unwired = run_app_inputs_check(store)
+
+    print()
     print('-' * 72)
     print(f'提示词目录：{store.dir}')
     print(f'已加载 {store.count()} 个，跳过 {len(store.skipped)}，错误 {len(store.errors)}')
@@ -235,11 +329,13 @@ def main(argv: list[str] | None = None) -> int:
         f'结果：容错 {len(SAMPLES) + len(EXTRA_SAMPLES) - repair_failures}'
         f'/{len(SAMPLES) + len(EXTRA_SAMPLES)} 通过，'
         f'契约 {len(EXPECTED_CONTRACT) - missing - contract_failures}'
-        f'/{len(EXPECTED_CONTRACT)} 通过（未加载 {missing}）'
+        f'/{len(EXPECTED_CONTRACT)} 通过（未加载 {missing}），'
+        f'App 对账 {len(APP_INPUTS) - unwired - app_failures}'
+        f'/{len(APP_INPUTS) - unwired} 通过（未接线 {unwired}）'
     )
     print(f'耗时 {time.time() - started:.2f}s')
 
-    if repair_failures or contract_failures or store.errors:
+    if repair_failures or contract_failures or app_failures or store.errors:
         print('❌ selftest FAILED')
         print(f'   反例提醒：截断样本绝不能产出 {_ANTI_INNER_FRAGMENT} 这种内层片段。')
         return 1

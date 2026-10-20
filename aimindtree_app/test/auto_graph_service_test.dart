@@ -314,8 +314,12 @@ void main() {
 
     test('AiService.run(T4) 无 provider → 返回 Failure（provider 为 null）', () async {
       final svc = AiService(router: AiTaskRouter(providers: const {}));
-      final res =
-          await svc.run(AiTask.t4GapAnalysis, {'target': 'x', 'depth': 'high'});
+      // 字段与生产一致（T4 的 depth_instruction 是必填，见 llm_server/prompts/t4_gap_analysis.md）
+      final res = await svc.run(AiTask.t4GapAnalysis, {
+        'target': 'x',
+        'depth': 'high',
+        'depth_instruction': '高中：列出中等基础的前置。',
+      });
       expect(res.isSuccess, isFalse);
     });
 

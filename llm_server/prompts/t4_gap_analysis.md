@@ -4,7 +4,7 @@ structured: true
 json_output: true
 temperature: 0.2
 max_tokens: 4096
-inputs: [target, depth]
+inputs: [target, depth, depth_instruction]
 output_key: gaps
 preferred_backend: ollama
 ---
@@ -22,7 +22,11 @@ preferred_backend: ollama
 
 # 深度档位
 {{depth}}
-（low=大学/高中入门级，只列最近一层；medium=初中/高中基础；high=小学/常识级，可更基础）
+（low=大学/高中入门级，只列最近一层；medium=初中/高中基础；high=小学/常识级，可更基础；
+custom=由下方自定义指令决定）
+
+# 自定义深度指令
+{{depth_instruction}}
 
 # 输出要求（严格遵守）
 1. 只输出一个 JSON 对象，不要任何解释、前后缀或 Markdown 代码块标记。
@@ -43,3 +47,10 @@ preferred_backend: ollama
 5. 每条 reason 要说明为何先于目标掌握。
 6. level 恒为 1（数字，不要写成字符串）。
 7. 只输出 JSON，不要输出思考过程，不要用 ```json 围栏包裹。
+
+> ⚠️ `depth_instruction` 是**必填**字段，不要从 inputs 里删掉（勿删本说明）。
+> 来源：App 端 `auto_graph_service.dart` 对 low/mid/high/custom **四档都会传**
+> 这个字段；custom 档位透传用户自由文本（例如「按高三学生的水平补前置」）。
+> 若这里不声明、不渲染，用户选 custom 时指令**不会到达模型**且**无任何报错**
+> —— 属于静默失效（服务端只校验「声明的字段是否缺失」，不拒绝多余字段，
+> 所以多传的字段会被无声丢弃）。原 Dify 线上版本该字段同样是必填。
