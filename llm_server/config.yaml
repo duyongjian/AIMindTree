@@ -17,7 +17,8 @@ server:
     - http://localhost
 
 # 默认后端（D11：不做按任务强制，统一走这里；task_backends 留空）
-default_backend: ollama
+# 2026-10-21 起默认改为 minimax（云端 Coding Plan Key）；本地 Ollama 作为可选后端保留。
+default_backend: minimax
 
 # 按任务覆盖（可选；未列出的任务走 default_backend）
 # 例：把 T1 单独切到云端：
@@ -35,7 +36,7 @@ retry:
   structured_on_bad_json: 1   # 六层容错失败后原地重跑次数（S-13）
 
 backends:
-  # ---- 后端一：Ollama（本地，默认）----
+  # ---- 后端一：Ollama（本地，可选）----
   # 前置两步（本机默认没起、也没拉模型，见 README「使用本地 Ollama」）：
   #   ollama serve
   #   ollama pull llama3
@@ -52,7 +53,7 @@ backends:
       num_ctx: 8192
       json_mode_field: format   # P0 可选：Ollama 的 format=json
 
-  # ---- 后端二：MiniMax（云端）----
+  # ---- 后端二：MiniMax（云端，当前默认后端）----
   # Q-D：默认走 anthropic_compat（/anthropic/v1/messages）；
   #      若你的 Key 是 OpenAI 形态，把 protocol 改成 openai_compat 即可（一行切换）。
   minimax:

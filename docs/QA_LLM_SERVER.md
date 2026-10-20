@@ -125,7 +125,7 @@ cd llm_server && python selftest.py
    ```
    （或 `pip install -r requirements.txt` 后 `python run.py`）
 3. **依赖安装**：`pip install -r llm_server/requirements.txt`（fastapi/uvicorn/httpx/pyyaml）。
-4. **硬编码 Dify Key 已进 Git 历史**：`tue-qkGx...` 虽已从代码清除，但曾提交进历史。建议**作废该 Key**，不要在 Dify 侧继续复用。
+4. **硬编码 Dify Key（历史值 `app-fhXwVvHFfVbVWRq3tRMOX8fd`）**：已从运行代码清除，但作为「过时方案」保留在 `extraction_service.dart` 与 `dify_client.dart` 的注释中供回溯（用户 2026-10-21 决定：不作废、不主动复用，仅作文档化留存）。
 5. **端到端真机补跑**：本机无 LLM 配额/模型，无法验证真实模型产出。真机需 `flutter test` 跑通 `test/structured_parse_test.dart` 及 T1/T3/T4 真实链路。
 6. **未跟踪文档**：`docs/DESIGN_LLM_SERVER.md`、`docs/PRD_LLM_SERVER.md`、`docs/class-diagram.mermaid`、`docs/sequence-diagram.mermaid` 仍为 untracked（产品/架构同学产物），是否提交待用户确认。
 

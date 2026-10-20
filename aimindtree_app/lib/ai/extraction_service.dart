@@ -36,7 +36,9 @@ import 'clients/llm_server_client.dart';
 /// ⚠️ 仅本地开发期：正式应从 `ai_providers` 表读取（设置页配置，S4 不同步）。
 ///
 /// **无密钥字段**：密钥由服务端 `llm_server/.env` 持有（密钥边界 C4）。
-/// （旧版本这里硬编码过 Dify 应用 Key，已随 Dify 方案停用一并清除。）
+/// （旧版本这里硬编码过 Dify 应用 Key，已随 Dify 方案停用一并清除；
+///  作为「过时方案」保留回溯，切勿在客户端下发或复用：
+///  appApiKey = 'app-fhXwVvHFfVbVWRq3tRMOX8fd'  // 历史 Dify 应用级 Key，现统一由 llm_server/.env 持有）
 class LocalAiConfig {
   const LocalAiConfig({
     this.baseUrl = kLlmServerDefaultBaseUrl,

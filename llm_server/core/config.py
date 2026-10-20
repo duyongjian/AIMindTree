@@ -36,7 +36,7 @@ DEFAULTS: dict[str, Any] = {
         'verbose': False,
         'cors_origins': ['http://127.0.0.1', 'http://localhost'],
     },
-    'default_backend': 'ollama',
+    'default_backend': 'minimax',
     'task_backends': {},
     'timeouts': {
         'structured_s': 120,
@@ -151,7 +151,7 @@ class Config:
 
         merged = _deep_merge(DEFAULTS, raw)
         self.server = dict(merged.get('server') or DEFAULTS['server'])
-        self.default_backend = str(merged.get('default_backend') or 'ollama')
+        self.default_backend = str(merged.get('default_backend') or 'minimax')
         self.task_backends = {
             str(k).upper(): str(v) for k, v in (merged.get('task_backends') or {}).items()
         }
