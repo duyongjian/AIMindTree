@@ -1,0 +1,75 @@
+# llm_server/config.yaml —— 全部字段均有默认值，最小化可只写 default_backend
+#
+# 改完不用重启进程：POST /v1/admin/reload（提示词改完是 POST /v1/prompts/reload）。
+
+server:
+  host: 127.0.0.1
+  port: 8787
+  log_level: info          # debug|info|warning|error
+  verbose: false           # true = 打印完整 prompt/response（S-15）
+  # httpx 是否跟随环境变量里的 HTTP_PROXY / HTTPS_PROXY。
+  # 默认 false：本机若有开发代理（如 127.0.0.1:xxxxx），true 会把 127.0.0.1:11434
+  # 的本地 Ollama 请求也发给代理，表现为「本机后端连不上」的假故障。
+  # 只有在**必须**走公司代理才能访问云端后端时才改成 true。
+  trust_env_proxy: false
+  cors_origins:
+    - http://127.0.0.1
+    - http://localhost
+
+# 默认后端（D11：不做按任务强制，统一走这里；task_backends 留空）
+default_backend: ollama
+
+# 按任务覆盖（可选；未列出的任务走 default_backend）
+# 例：把 T1 单独切到云端：
+#   task_backends:
+#     T1: minimax
+task_backends: {}
+
+timeouts:
+  structured_s: 120        # 与 App 侧 AiProvider.runTask.timeout 对齐（N-8）
+  chat_s: 120
+  connect_s: 10
+  health_s: 5              # /health 里各后端探测（并发，不阻塞响应）
+
+retry:
+  structured_on_bad_json: 1   # 六层容错失败后原地重跑次数（S-13）
+
+backends:
+  # ---- 后端一：Ollama（本地，默认）----
+  # 前置：ollama serve 且已拉模型（ollama pull qwen2.5:7b）。
+  # 没装 Ollama 也不影响服务启动，只是 /health 里 reachable=false（Q-I）。
+  ollama:
+    type: ollama
+    protocol: openai_compat
+    base_url: http://127.0.0.1:11434
+    api_key_env: ""            # 本地无需密钥
+    default_model: qwen2.5:7b
+    models: [qwen2.5:7b, llama3]
+    extra:
+      num_ctx: 8192
+      json_mode_field: format   # P0 可选：Ollama 的 format=json
+
+  # ---- 后端二：MiniMax（云端）----
+  # Q-D：默认走 anthropic_compat（/anthropic/v1/messages）；
+  #      若你的 Key 是 OpenAI 形态，把 protocol 改成 openai_compat 即可（一行切换）。
+  minimax:
+    type: minimax
+    protocol: anthropic_compat   # 可改 openai_compat
+    base_url: https://api.minimaxi.com
+    anthropic_path: /anthropic/v1/messages
+    openai_path: /v1/chat/completions
+    api_key_env: MINIMAX_API_KEY
+    default_model: MiniMax-Text-01
+    anthropic_version: 2023-06-01
+    extra:
+      max_tokens: 4096
+
+  # ---- 后端三：任意 OpenAI 兼容端点 ----
+  # DeepSeek / 通义 / Kimi / 硅基流动 / 本地 vLLM / LM Studio 都填这里。
+  openai_compat:
+    type: openai_compat
+    protocol: openai_compat
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    default_model: gpt-4o-mini
+    models: []

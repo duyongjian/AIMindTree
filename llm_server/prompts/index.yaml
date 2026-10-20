@@ -1,0 +1,19 @@
+# 任务 → 提示词文件 映射（**只做映射，元信息一律以 md 的 front-matter 为准**）。
+#
+# 变体用「任务.变体」作键，文件名用双下划线 <name>__<variant>.md。
+# 这里若与 md 的 front-matter 不一致，服务端会以 md 为准并打 WARN 日志。
+
+T1: t1_extract.md
+T2: t2_normalize.md
+T3: t3_prerequisite.md
+T4: t4_gap_analysis.md
+T5: t5_ask.md
+T5.detect: t5_ask__detect.md
+T6: t6_explain.md
+T7: t7_socratic.md
+T8: t8_quiz.md
+T9: t9_grade.md
+T10: t10_lecture.md
+T11: t11_summary.md
+T12: t12_title_tags.md
+T13: t13_similarity.md

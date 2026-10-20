@@ -1,0 +1,11 @@
+# AIMindTree LLM Server —— 依赖白名单（只有这 4 个，勿加）
+#
+# 刻意**不引入** LangChain / openai SDK / anthropic SDK：
+#   ① 协议差异只有两处（/v1/chat/completions 与 /v1/messages），
+#      已在 backends/protocols/ 内自行实现，不需要第三方抽象；
+#   ② 保持纯 wheel 安装，Windows 上不需要编译工具链。
+# 可选适配层预留见 backends/langchain_adapter.py（本次不实现、不引入依赖）。
+fastapi>=0.110
+uvicorn>=0.27
+httpx>=0.26
+pyyaml>=6.0
