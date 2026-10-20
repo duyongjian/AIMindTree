@@ -587,7 +587,7 @@ sequenceDiagram
 
 ## 6. AI Provider 抽象层设计
 
-- **统一接口 `AiProvider`**：云端（OpenAI 兼容：OpenAI/DeepSeek/通义/Kimi/智谱/硅基流动/MiniMax OpenAI 端点）与本地（Ollama/llama.cpp，均暴露 `/v1/chat/completions`）共用 `OpenAiCompatibleClient`；MiniMax 另提供 **Anthropic 兼容端点**（Coding Plan Key 常走此），由独立 `AnthropicCompatibleClient` 承载；Dify 由 `DifyClient` 承载。**三类协议（openai / anthropic / dify）各自一个客户端，但都 `implements AiProvider`**——接口协议无关，差异封装在客户端内部并归一化到 `AiChunk`，上层 `AiService` 不感知底层协议。靠配置（含 `protocol` 字段）区分，可插拔不绑一家。
+- **统一接口 `AiProvider`**：云端（OpenAI 兼容：OpenAI/DeepSeek/通义/Kimi/智谱/硅基流动/MiniMax OpenAI 端点）与本地（Ollama/llama.cpp，均暴露 `/v1/chat/completions`）共用 `OpenAiCompatibleClient`；MiniMax 另提供 **Anthropic 兼容端点**（Coding Plan Key 常走此），由独立 `AnthropicCompatibleClient` 承载；自研本地服务由 `LlmServerClient` 承载（**第四协议 `llm_server`，见 §6 末新增小节**）；Dify 由 `DifyClient` 承载（**已停用保留**）。**四类协议（openai / anthropic / llm_server / dify）各自一个客户端，但都 `implements AiProvider`**——接口协议无关，差异封装在客户端内部并归一化到 `AiChunk`，上层 `AiService` 不感知底层协议。靠配置（含 `protocol` 字段）区分，可插拔不绑一家。
 - **13 类任务统一入口**：`AiTask` 枚举（T1 提取 / T2 规范化 / T3 前置推断 / T4 缺口分析[纯本地] / T5 追问 / T6 讲解 / T7 苏格拉底 / T8 出题 / T9 批改误区 / T10 讲义 / T11 总结 / T12 标题标签 / T13 相似度[P2]）。`AiService` 按 `AiTask` 拼装提示词与 `responseFormat`，统一返回 `{content, parsed, usage, latency, modelId}`，便于埋点/降级/缓存/路由。
 - **流式**：SSE 逐块解析 `data:` 行，UI 用 Riverpod `StreamProvider`/`AsyncValue` 增量渲染。
 - **结构化输出三层保障（红色风险兜底，PRD §8.2）**：
@@ -601,7 +601,11 @@ sequenceDiagram
 - **密钥存储**：`SecretStore` 按平台分支（原生 flutter_secure_storage / Web localStorage+明示），**不同步**。
 - **Web 代理**：Web 端 AI 经 Supabase Edge Function `ai-proxy`（服务端持 Key、设 CORS）；`OpenAiCompatibleClient` 在 Web 指向该代理。
 
-### Dify 本地工作流 Provider（第三类 AI 后端）
+### Dify 本地工作流 Provider（第三类 AI 后端）⚠️ 已停用保留
+> **状态：已停用（自研 `llm_server` 取代），代码整段注释保留、可三步回退，本节不删除。**
+> 停用原因：Dify 的 Key **按应用签发**，13 类任务要建 N 个应用 / N 把 Key，且 Key 必须下发到客户端（可反编译提取）。
+> 替代方案见本节末尾「LLM Server（第四协议 `llm_server`）」。
+
 Dify Service API 与 OpenAI 协议**不兼容**，独立 `DifyClient implements AiProvider`，用 `Authorization: Bearer <app-api-key>`（`app-api-key` **按应用签发**，非全局账号 Key）；三类端点：`/v1/chat-messages`（多轮 `conversation_id` + SSE）、`/v1/completion-messages`、`/v1/workflows/run`（具名 `inputs`/`outputs`）。**流式事件模型差异**：Dify SSE 事件为 `workflow_started/node_finished/workflow_finished/message/message_end/error`，非 OpenAI 的 `chat.completion.chunk` delta。`AiProvider.streamChat` 的 `AiChunk` 须同时容纳两种事件模型——`OpenAiCompatibleClient` 把 delta 包成 `AiChunk.data`，`DifyClient` 把 Dify 事件归一化为 `AiChunk`（content 增量 + 终态事件），UI 不感知底层差异。
 
 1. **任务 → Provider 类型 → 调用形态映射**：
@@ -617,7 +621,11 @@ Dify Service API 与 OpenAI 协议**不兼容**，独立 `DifyClient implements 
 4. **降级策略**：本地 Dify 未启动/报错时，按 `AiService` 的 Provider 链自动回退云端 Provider（与 H8 主模型失败切备用一致）；UI 提示「本地 Dify 不可用，已切换云端」。Dify 与 Ollama 同级参与路由与降级。
 5. **Web 端**：浏览器直连用户本机 Dify 同 Ollama —— 有 CORS 与网络限制，**Web 不支持直连本地 Dify**，UI 明示「本地 Dify 仅桌面/移动可用」；若 Dify 部署在公网且配 CORS，则仍走 Edge Function 代理（同云端）。
 
-### Dify 任务级路由与 `ai_task_routes`（v1.2 补缺口，起因：Dify Key 按应用签发）
+### Dify 任务级路由与 `ai_task_routes`（v1.2 补缺口，起因：Dify Key 按应用签发）⚠️ 已停用保留
+> **状态：已停用，但 `ai_task_routes` 表与 `AiTaskRouter` 逻辑保留且仍在使用**
+> ——`llm_server` 方案下一个服务实例 = 一条 `ai_providers` 行（本地 Ollama 与云端
+> MiniMax 可共存），T3/T4 的专属绑定语义依然成立。
+
 **事实**：Dify 的 Service API Key **按应用签发**，一把 Key 只能调签发它的那个应用；AIMindTree 有 13 类任务（T1–T13），若用户为不同任务建不同 Dify 应用，就有 N 应用 / N Key / N 端点。现有「每供应商一把 Key + 单 `active` 供应商」模型表达不了「T1→Dify 应用 A、T5→Dify 应用 B、其余→MiniMax」。
 
 1. **新增表 `ai_task_routes`（任务级路由绑定）**：字段 `(ai_task enum, provider_id → ai_providers, api_key_ref_override? 本地安全存储引用, endpoint_override? url)`。**解析优先级（落在 `AiTaskRouter.resolve(task)`，§3 类图）**：
@@ -649,6 +657,66 @@ Dify Service API 与 OpenAI 协议**不兼容**，独立 `DifyClient implements 
 4. **依赖包**：**无需新增 HTTP/SSE 依赖**——`AnthropicCompatibleClient` 复用 `dio`（REST + SSE + CancelToken），仅按 Anthropic 请求/响应形态封装并归一化 `AiChunk`，与 Dify 同级。
 
 > **卡片 append-only 对同步的利好**：卡片内容不可变 → 双端「同时编辑同一卡片」退化为「各自产生新版本」，冲突面大幅缩小，与 PRD §9.4 一致。
+
+### LLM Server（**第四协议 `llm_server`**，自研本地服务，取代 Dify 直连）
+
+> 完整设计见 `docs/DESIGN_LLM_SERVER.md`；需求见 `docs/PRD_LLM_SERVER.md`；
+> 提示词资产与运维见 `llm_server/README.md`。
+
+**为什么取代 Dify**：Dify 的 Key 按应用签发（13 类任务 → N 应用 / N Key），且 Key 必须
+下发到客户端；自研服务把「提示词装载 / 密钥 / JSON 容错」三件事收回服务端，
+App 只认一个地址，且**上层业务零改动**（`AiProvider` 接口与字段名契约都不变）。
+
+1. **链路（真实调用路径）**
+
+   ```mermaid
+   flowchart LR
+     UI["业务页<br/>extract / agent / teacher / homework"]
+       --> SVC["AiService（13 任务统一入口）"]
+       --> RT["AiTaskRouter（任务级路由）"]
+       --> C["LlmServerClient<br/>protocol='llm_server'"]
+       -->|"HTTP + SSE（无密钥）"| S["llm_server :8787"]
+     S --> PS["core/prompt_store<br/>prompts/*.md（front-matter 为真相源）"]
+     S --> JR["core/json_repair<br/>六层容错 ★"]
+     S --> P1["protocols/openai_compat"]
+     S --> P2["protocols/anthropic_compat"]
+     P1 --> OLL["Ollama 11434"]
+     P1 --> OAI["OpenAI 兼容端点"]
+     P2 --> MM["MiniMax"]
+   ```
+
+2. **三处端点**：
+   - `POST /v1/task/{T1..T13}` —— 结构化任务（提示词在服务端装载，回填 `parsed`）；
+   - `POST /v1/chat` —— 会话任务，SSE（`data: {"delta":…}`）或 `stream:false` 一次性；
+   - `GET /health`、`GET|PUT /v1/prompts`、`POST /v1/prompts/reload`、`POST /v1/admin/reload`。
+
+3. **backend ≠ protocol（关键解耦）**：`ollama` / `minimax` / `openai_compat` 只是
+   `config.yaml` 里的三个可切换名字；HTTP 形态只有两类（`openai_compat` /
+   `anthropic_compat`），差异收敛在 `backends/protocols/`。对外统一
+   `Completion{text, model_id, usage, truncated}`，`stream_complete` 只 yield 纯文本
+   delta，**SSE 封装只在 `routers/chat.py` 一处**。新增第四个后端 = 加一个文件 +
+   一段 config，**不改 router**。
+
+4. **六层 JSON 容错**（`core/json_repair.py`，与客户端 `lib/ai/structured_parse.dart`
+   **逐层等价**）：⓪ 剥思考块（`<think>`/`<thinking>`/`<reasoning>`，含未闭合）
+   → ① 直接解 → ② 剥闭合 think → ③ 剥 ```json 围栏 → ④ **括号配对扫描**
+   （内含 ⑤ 截断抢救）→ ⑥ 首尾硬切。两条禁止事项：**不许「首 `{` → 末 `}`」硬切**、
+   **不许退化成解析内层片段**。服务端解析 + 客户端兜底 = 双保险。
+
+5. **密钥边界**：密钥只在 `llm_server/.env`（`.gitignore` 忽略），App 侧
+   `api_key_ref` 恒空串、设置页**无 Key 输入框**、`bootstrap` 不调 `resolveApiKey`。
+
+6. **表结构零改动**：`ai_providers.protocol` 直接写字符串 `'llm_server'`；
+   backend 复用 `type` 列、model 覆盖复用 `models` 列（JSON 数组，最多 1 个元素）。
+   语义在 `lib/data/db/tables.dart` 的注释里固化。
+
+7. **Dify 回退（三步）**：① 取消 `lib/ai/clients/dify_client.dart` 整段注释；
+   ② `extraction_service.dart` 的 import 与 bootstrap 分支改回 `DifyClient`；
+   ③ `settings_page.dart` 的 import 改回两个 dify dialog。**不需要 git revert。**
+
+8. **依赖**：服务端只允许 `fastapi / uvicorn / httpx / pyyaml` 四个包（纯 wheel，
+   无编译工具链）；客户端**不新增任何 Dart 依赖**（`dart:io HttpClient` +
+   `dart:convert` 已够，SSE 只解析 `data:` 行）。
 
 ---
 
