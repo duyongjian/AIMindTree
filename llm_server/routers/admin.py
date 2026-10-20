@@ -19,12 +19,14 @@ _log = get_logger('config')
 async def reload_config(request: Request) -> JSONResponse:
     """重载 config.yaml，并清空后端实例缓存（地址/密钥可能变了）。"""
     state = request.app.state
-    reloaded = state.config.load() or True  # type: ignore[attr-defined]
-    state.clear_backends()  # type: ignore[attr-defined]
+    state.config.load()  # type: ignore[attr-defined]
+    cleared = state.clear_backends()  # type: ignore[attr-defined]
+    _log.info('配置已重载，清理 %d 个后端实例缓存', cleared)
     return JSONResponse(
         {
             'ok': True,
             'reloaded': True,
+            'backends_cleared': cleared,
             'default_backend': state.config.default_backend,  # type: ignore[attr-defined]
             'backends': sorted(state.config.backends),  # type: ignore[attr-defined]
             'loaded_at': state.config._mtime,  # type: ignore[attr-defined]
