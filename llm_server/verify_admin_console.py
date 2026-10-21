@@ -15,10 +15,11 @@
    响应除 ``key_masked`` 之外的任何位置；
 5. 任务路由 ``GET/PUT /v1/admin/routes``（含非法值 400）；
 6. 统计埋点 ``GET /v1/admin/stats``（空缓冲 → 空数组；打 3 次坏请求 → 累加）；
-7. 配置写入往返（``app`` / ``sync`` / per-backend / ``task_backends``）+ **还原**；
-8. 静态资源挂载（``/admin``、``/static/*``）；
-9. 可选：真实链路 ``POST /v1/task/T1`` + ``POST /v1/chat``（blocking 与 SSE
-   两条路径都要进埋点）（``--live``，需要本机 Ollama 在跑，约 60s）。
+7. 运行日志 ``GET /v1/admin/logs``（过滤 / 游标分页 / 级别校验 / **密钥零泄露**）；
+8. 配置写入往返（``app`` / ``sync`` / per-backend / ``task_backends``）+ **还原**；
+9. 静态资源挂载（``/admin``、``/static/*``）；
+10. 可选：真实链路 ``POST /v1/task/T1`` + ``POST /v1/chat``（blocking 与 SSE
+    两条路径都要进埋点）（``--live``，需要本机 Ollama 在跑，约 60s）。
 
 用法::
 
@@ -325,8 +326,90 @@ def check_stats(c: TestClient) -> None:
           str(bad_window.get('window_s')))
 
 
+def check_logs(c: TestClient, secrets: dict[str, str]) -> None:
+    print('\n[6] GET /v1/admin/logs —— 运行日志（M7，环形缓冲）')
+    from core.logbuf import reset as logbuf_reset
+
+    logbuf_reset()
+    r = c.get('/v1/admin/logs')
+    if not check(r.status_code == 200, 'GET 返回 200', f'实际 {r.status_code}'):
+        return
+    empty = r.json()
+    check(empty.get('items') == [], '空缓冲：items 为 []（不返回 null 数组）', str(empty.get('items')))
+    for key in ('matched', 'buffer_size', 'since_startup', 'dropped', 'levels', 'next_cursor'):
+        check(key in empty, f'含字段 {key}')
+
+    # 打 3 次「未知任务」：server.py 的异常处理器会记 WARNING 级日志
+    for _ in range(3):
+        c.post('/v1/task/ZZZ', json={'inputs': {}})
+    after = c.get('/v1/admin/logs').json()
+    items = after.get('items') or []
+    check(len(items) >= 3, '3 次失败请求产生日志', f'items={len(items)}')
+    check(
+        all({'seq', 'ts', 'level', 'module', 'message'} <= set(i) for i in items),
+        '单条含 seq/ts/level/module/message',
+    )
+    check(
+        all(i.get('level') in ('DEBUG', 'INFO', 'WARNING', 'ERROR') for i in items),
+        '级别取值合法',
+    )
+    seqs = [i['seq'] for i in items]
+    check(seqs == sorted(seqs, reverse=True), 'items 按 seq 降序（新的在前）', str(seqs[:5]))
+
+    # 级别过滤：ERROR 之下不应混入 WARNING
+    err = c.get('/v1/admin/logs?level=ERROR').json()
+    check(
+        all(i['level'] == 'ERROR' for i in (err.get('items') or [])),
+        'level=ERROR 只留 ERROR',
+        str([i['level'] for i in err.get('items') or []]),
+    )
+    # 模块过滤：短名 config → llmserver.config（异常处理器的 logger）
+    mod = c.get('/v1/admin/logs?module=config').json()
+    check(
+        bool(mod.get('items')) and all(i['module'] == 'llmserver.config' for i in mod['items']),
+        'module=config → llmserver.config',
+        str({i['module'] for i in mod.get('items') or []}),
+    )
+    # 关键字过滤
+    kw = c.get('/v1/admin/logs?q=ZZZ').json()
+    check(
+        bool(kw.get('items')) and all('ZZZ' in i['message'] for i in kw['items']),
+        'q=ZZZ 只命中含该关键字的日志',
+        str(len(kw.get('items') or [])),
+    )
+    # limit 钳制（99999 → 500）
+    big = c.get('/v1/admin/logs?limit=99999').json()
+    check(len(big.get('items') or []) <= 500, 'limit 上限 500', str(len(big.get('items') or [])))
+    # 非法级别 → 400 invalid_request
+    bad = c.get('/v1/admin/logs?level=TRACE')
+    check(
+        bad.status_code == 400 and bad.json().get('error', {}).get('code') == 'invalid_request',
+        '非法 level → 400 invalid_request',
+        f'{bad.status_code} {bad.text[:100]}',
+    )
+    # 游标分页：before_seq 只返回更早的
+    first = c.get('/v1/admin/logs?limit=2').json()
+    if first.get('next_cursor') and len(first.get('items') or []) == 2:
+        older = c.get(f"/v1/admin/logs?limit=2&before_seq={first['next_cursor']}").json()
+        older_seqs = [i['seq'] for i in older.get('items') or []]
+        check(
+            bool(older_seqs) and all(s < first['next_cursor'] for s in older_seqs),
+            'before_seq 游标只返回更早的日志',
+            str(older_seqs),
+        )
+    else:
+        skip('before_seq 游标分页', '缓冲内日志不足')
+    # 密钥零扩散：日志响应体不得包含 .env 里任何真实密钥
+    if secrets:
+        blob = r.text + json.dumps(after, ensure_ascii=False)
+        leaked = [name for name, value in secrets.items() if value in blob]
+        check(not leaked, '日志响应不含 .env 任何密钥明文', f'泄露：{leaked}' if leaked else '')
+    else:
+        skip('日志密钥零泄露', '.env 无疑似密钥')
+
+
 def check_config_roundtrip(c: TestClient) -> None:
-    print('\n[6] POST /v1/admin/config —— 覆盖层往返 + 还原（AC-03/04, C9）')
+    print('\n[7] POST /v1/admin/config —— 覆盖层往返 + 还原（AC-03/04, C9）')
     settings_path = _HERE / 'settings.json'
     original: str | None = None
     existed = settings_path.is_file()
@@ -402,7 +485,7 @@ def check_config_roundtrip(c: TestClient) -> None:
 
 
 def check_static(c: TestClient) -> None:
-    print('\n[7] 静态资源挂载（AC-09）')
+    print('\n[8] 静态资源挂载（AC-09）')
     index = _HERE / 'static' / 'index.html'
     if not index.is_file():
         skip('/admin 返回 200', 'static/index.html 尚未创建（T03 后自动生效）')
@@ -412,7 +495,7 @@ def check_static(c: TestClient) -> None:
     check('<html' in r.text.lower(), '/admin 返回 HTML 骨架')
     r2 = c.get('/')
     check(r2.status_code == 200, 'GET / → 200', f'实际 {r2.status_code}')
-    for name in ('app.css', 'api.js', 'app.js', 'views-a.js', 'views-b.js'):
+    for name in ('app.css', 'api.js', 'app.js', 'views-a.js', 'views-b.js', 'views-c.js'):
         path = _HERE / 'static' / name
         if not path.is_file():
             skip(f'/static/{name} → 200', '文件尚未创建')
@@ -422,7 +505,7 @@ def check_static(c: TestClient) -> None:
 
 
 def check_live_t1(c: TestClient) -> None:
-    print('\n[8] 真实链路 POST /v1/task/T1（--live，需要本机 Ollama 在跑）')
+    print('\n[9] 真实链路 POST /v1/task/T1（--live，需要本机 Ollama 在跑）')
     note = ('牛顿第二定律：物体加速度的大小跟作用力成正比，跟物体的质量成反比，'
             '加速度的方向跟作用力的方向相同。公式 F=ma。')
     r = c.post('/v1/task/T1', json={'inputs': {'note_text': note}})
@@ -449,7 +532,7 @@ def check_live_chat(c: TestClient) -> None:
     任务埋点已在 [check_live_t1] 覆盖；这里补 chat —— 两条路径分别落在
     ``_blocking`` 与 ``_sse`` 里，改任一处都可能漏埋，必须各打一次。
     """
-    print('\n[9] 真实链路 POST /v1/chat（--live，blocking + SSE 两条路径）')
+    print('\n[10] 真实链路 POST /v1/chat（--live，blocking + SSE 两条路径）')
     from core.stats import snapshot as raw_snapshot
 
     query = '用一句话解释牛顿第二定律'
@@ -524,6 +607,7 @@ def main(argv: list[str] | None = None) -> int:
         check_admin_config(c, secrets)
         check_routes(c)
         check_stats(c)
+        check_logs(c, secrets)
         check_config_roundtrip(c)
         check_static(c)
         if live:

@@ -6,6 +6,10 @@
 
 ``--verbose``（或 ``config.server.verbose: true``）打开后额外打印完整
 prompt 与 response 原文，便于排查「模型为什么输出了这个形状」。
+
+``setup()`` 同时挂两个 handler：stdout（控制台）与
+``core.logbuf.LogBufferHandler``（环形缓冲，管理后台「运行日志」的数据源，
+幂等去重、永不抛异常）。
 """
 
 from __future__ import annotations
@@ -14,6 +18,8 @@ import logging
 import os
 import sys
 from typing import Any
+
+from core.logbuf import LogBufferHandler
 
 _PREFIX = 'llmserver'
 
@@ -29,12 +35,15 @@ def setup(level: str = 'info', verbose: bool = False) -> None:
     global VERBOSE
     VERBOSE = verbose
     root = logging.getLogger()
-    # 避免重复 addHandler 造成日志翻倍。
+    # 避免重复 addHandler 造成日志翻倍（含日志缓冲 handler，否则每次
+    # create_app() 都会多挂一个，同一条记录被抄送多遍）。
     for h in list(root.handlers):
         root.removeHandler(h)
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(logging.Formatter(_FORMAT, datefmt=_DATEFMT))
     root.addHandler(handler)
+    # 管理后台「运行日志」的数据源：与 stdout 同源同格式，环形缓冲不落盘。
+    root.addHandler(LogBufferHandler())
     root.setLevel(_level_of(level))
 
 

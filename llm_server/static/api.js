@@ -103,6 +103,16 @@ function adminStats(windowS) {
   var q = (windowS === undefined || windowS === null) ? '' : '?window_s=' + encodeURIComponent(windowS);
   return apiGet('/v1/admin/stats' + q);
 }
+function adminLogs(params) {
+  var p = params || {};
+  var qs = [];
+  if (p.level) qs.push('level=' + encodeURIComponent(p.level));
+  if (p.module) qs.push('module=' + encodeURIComponent(p.module));
+  if (p.q) qs.push('q=' + encodeURIComponent(p.q));
+  if (p.limit) qs.push('limit=' + encodeURIComponent(p.limit));
+  if (p.before_seq) qs.push('before_seq=' + encodeURIComponent(p.before_seq));
+  return apiGet('/v1/admin/logs' + (qs.length ? '?' + qs.join('&') : ''));
+}
 function adminRoutes() { return apiGet('/v1/admin/routes'); }
 function saveRoutes(taskBackends) { return apiPut('/v1/admin/routes', { task_backends: taskBackends }); }
 function appConfig() { return apiGet('/v1/app/config'); }

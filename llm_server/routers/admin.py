@@ -10,6 +10,7 @@
 - ``GET  /v1/admin/routes``   —— 任务路由（AC-05）
 - ``PUT  /v1/admin/routes``   —— 保存任务路由
 - ``GET  /v1/admin/stats``    —— 调用统计（AC-08）
+- ``GET  /v1/admin/logs``     —— 运行日志（M7：core/logbuf 环形缓冲查询）
 
 所有密钥一律**不回传明文**：只暴露 ``key_set``（是否设置）和 ``key_masked``（掩码）；
 ``sync`` 只回 ``token_set`` 布尔。
@@ -23,6 +24,8 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 from core.errors import invalid_request
+from core.logbuf import LEVELS as LOG_LEVELS
+from core.logbuf import query as logbuf_query
 from core.logging import get_logger
 from core.stats import snapshot as stats_snapshot
 
@@ -426,6 +429,42 @@ async def get_admin_stats(
     ``window_s`` 非正数或非法 → 回落 3600。
     """
     payload = stats_snapshot(window_s if window_s is not None else _DEFAULT_WINDOW_S)
+    return JSONResponse(payload, headers={'Cache-Control': 'no-store'})
+
+
+# ---------------------------------------------------------------- 运行日志
+
+
+@router.get('/v1/admin/logs')
+async def get_admin_logs(
+    request: Request,
+    level: str | None = Query(default=None),
+    module: str | None = Query(default=None),
+    q: str | None = Query(default=None),
+    limit: int | None = Query(default=None),
+    before_seq: int | None = Query(default=None),
+) -> JSONResponse:
+    """运行日志查询（M7）：``core/logbuf`` 环形缓冲，**新的在前**。
+
+    Query 参数（均可选）：
+        - ``level``：最低级别（DEBUG / INFO / WARNING / ERROR），非法值 400；
+        - ``module``：模块名，``task`` 或 ``llmserver.task`` 均可；
+        - ``q``：消息关键字（大小写不敏感）；
+        - ``limit``：返回条数（1..500，默认 100）；
+        - ``before_seq``：游标，只返回 ``seq`` 更小的（「加载更早」）。
+
+    响应：``items`` / ``matched`` / ``buffer_size`` / ``since_startup`` /
+    ``dropped`` / ``levels`` / ``next_cursor``。空缓冲时数组为 ``[]``。
+    """
+    if level is not None and level.strip().upper() not in LOG_LEVELS:
+        raise invalid_request(f'level 必须是 {list(LOG_LEVELS)} 之一（或不传）')
+    payload = logbuf_query(
+        level=level,
+        module=module,
+        q=q,
+        limit=limit if limit is not None else 100,
+        before_seq=before_seq,
+    )
     return JSONResponse(payload, headers={'Cache-Control': 'no-store'})
 
 

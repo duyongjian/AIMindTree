@@ -332,6 +332,23 @@ pre {
 .check-line.fail .mark { color: var(--bad); }
 .check-line.unknown .mark { color: var(--muted); }
 
+/* ---------------- M7 运行日志 ---------------- */
+
+.chips { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+tr.log-row { cursor: pointer; }
+tr.log-row:hover { background: #f5f7fb; }
+td.log-msg { max-width: 640px; }
+tr.log-detail td { background: #f8fafc; }
+tr.log-detail pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
 /* ---------------- 响应式 ---------------- */
 
 @media (max-width: 900px) {
