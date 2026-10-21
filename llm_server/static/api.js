@@ -115,6 +115,16 @@ function adminLogs(params) {
 }
 function adminRoutes() { return apiGet('/v1/admin/routes'); }
 function saveRoutes(taskBackends) { return apiPut('/v1/admin/routes', { task_backends: taskBackends }); }
+function adminJobs(params) {
+  var p = params || {};
+  var qs = [];
+  if (p.status) qs.push('status=' + encodeURIComponent(p.status));
+  if (p.limit) qs.push('limit=' + encodeURIComponent(p.limit));
+  return apiGet('/v1/jobs' + (qs.length ? '?' + qs.join('&') : ''));
+}
+function cancelJob(jobId) {
+  return apiPost('/v1/jobs/' + encodeURIComponent(jobId) + '/cancel', {});
+}
 function appConfig() { return apiGet('/v1/app/config'); }
 function prompts() { return apiGet('/v1/prompts'); }
 function prompt(task, variant) {

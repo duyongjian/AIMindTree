@@ -349,6 +349,23 @@ tr.log-detail pre {
   color: var(--text);
 }
 
+/* ---------------- M10 任务队列 ---------------- */
+
+tr.job-row { cursor: pointer; }
+tr.job-row:hover { background: #f5f7fb; }
+tr.job-detail td { background: #f8fafc; }
+tr.job-detail pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  max-height: 320px;
+  overflow: auto;
+}
+
 /* ---------------- 响应式 ---------------- */
 
 @media (max-width: 900px) {

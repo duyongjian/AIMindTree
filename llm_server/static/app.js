@@ -14,6 +14,7 @@ var MODULES = {
   m7: { title: '运行日志', hint: '进程内日志环形缓冲：按级别 / 模块 / 关键字过滤，点击行看全文', render: renderLogs },
   m8: { title: '同步（Supabase）', hint: 'P1：同步地址与令牌', render: renderPlaceholder },
   m9: { title: '备份与系统信息', hint: 'P1：配置导出 / 导入', render: renderPlaceholder },
+  m10: { title: '任务队列', hint: '批量型 AI 任务的实时队列：状态 / 进度 / 资源锁 / 取消（与 M7 日志互补）', render: renderJobs },
 };
 
 var currentPage = 'm1';

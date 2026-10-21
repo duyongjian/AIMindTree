@@ -1,8 +1,7 @@
-# AI 任务队列 · 完整方案（需求 + 设计，待评审）
+# AI 任务队列 · 完整方案（需求 + 设计）
 
-> 状态：**方案评审稿**。管理后台日志（M7）与 AI 助手知识库工具已实现并提交
-> （`fec47cc` / `a955c42`）；本文对应的任务队列**尚未动工**，等本方案确认后
-> 按 §9 批次实施。
+> 状态：**已全部实施完成**（2026-10-22，B0–B4 + M10 全绿，见 §14 实施状态）。
+> 管理后台日志（M7）与 AI 助手知识库工具已实现并提交（`fec47cc` / `a955c42`）。
 >
 > 关联代码：`llm_server/`（自研 LLM Server）、`aimindtree_app/lib/ai/`、
 > `aimindtree_app/lib/features/`。所有字段名以现有代码为准。
@@ -420,6 +419,7 @@ App 切回前台时立即全量对账一次。
 | **B2 连线/补前置入队** | C5 T3、C6 T4（含 `onProgress` → job 上报）+ `tree:{id}` 锁全量接通 | `canvas_page.dart`、`auto_graph_service.dart`、`ai_job_service.dart` | 锁矩阵 §6.2 全绿；T4 真实层级进度；连边进行中手动加边被挡并提示 |
 | **B3 检测入队** | C4 `_runDetection` 改队列提交（静默特性保留：无 SnackBar，只占锁计时） | `agent_page.dart` | 检测运行中托盘可见；不打扰主问答 |
 | **B4 会话类纳管** | C8/C9：交互通道保留流式，但登记锁 + 托盘计时；`kp:{id}` / `homework:{id}` 锁生效 | `teacher_page.dart`、`homework_page.dart` | 同点重复开老师模式被挡；托盘显示讲解计时 |
+| **M10 后台面板** | 管理后台「任务队列」：当前任务 + concurrency + 取消 + 自动刷新（Q5） | `llm_server/static/views-d.js`(新)、`app.js`、`api.js`、`index.html` | 面板可见 queued/running/done；取消按钮对 queued 立即生效 |
 
 > B1 依赖 B0；B2–B4 互相独立，可并行开发（不同文件集）。
 
@@ -440,25 +440,38 @@ App 切回前台时立即全量对账一次。
 6. **不谎报**：等模型阶段 percent 不跳动（只走计时），进度条可不确定态；
 7. **降级**：关 `kAiJobQueueEnabled` 后全部功能退回现状且行为不变；
    服务端不通时提交走同步兜底；
-8. **回归**：`verify_admin_console`（现 82 项）+ jobs 新增 ≥ 12 项；
-   `flutter test` 全量绿（存量 1 项画布拖拽阈值失败除外，已确认与本次无关）；
-   Dart 门禁 0/0/0；
+8. **回归**：`verify_admin_console` **109/109**（含 jobs 段 26 项：锁 409 /
+   取消双路径 / 保留环 / M7 日志联动 / 密钥零泄露）；`selftest` 38/38；
+   M10 面板 Node 桩测 **52/52**（`verify_m10_panel.js` + 真队列夹具
+   `gen_m10_fixture.py`）；`flutter test` **213/213**（含修掉的存量画布
+   拖拽阈值回归：布局固化不再对 (0,0) 无意义落库）；Dart 门禁 0/0/0；
 9. **性能**：轮询 800ms × 5 个并发 job 的 CPU 占用可忽略（本地 HTTP）；
 10. **安全**：`/v1/jobs` 全链路无密钥字段；日志（M7）不记录 job 的
     用户内容原文（只记 task/label/latency）。
 
 ---
 
-## 11. 未决问题（请拍板）
+## 11. 未决问题 → 已决问题（2026-10-22 用户拍板）
 
-| # | 问题 | 建议 | 影响 |
+| # | 问题 | 决策 | 落地说明 |
 |---|---|---|---|
-| Q1 | T4 递归驱动权：服务端编排 vs App 侧每层一 job？ | **服务端编排**（进度/取消/原子性闭环；`autoPrerequisites` 逻辑整体搬 `routers/jobs.py`） | B2 工作量 ±1 天 |
-| Q2 | `jobs.concurrency` 默认值？ | Ollama=1；检测到 minimax 默认后端时=2 | 吞吐 |
-| Q3 | 托盘默认展开还是折叠？ | 默认折叠（4px 细条），有任务时轻量不挡内容 | 观感 |
-| Q4 | 手动拖节点（△）在 T3 进行中是否放行？ | 放行（只改坐标），但删边/加边/删树硬挡 | §6.2 一行 |
-| Q5 | 管理后台要不要 jobs 面板（P1）？ | 先不做；M7 日志已能看到 `llmserver.job` 记录 | 排期 |
-| Q6 | C1→C2 复合 job 的 T3 段失败时，T1 成果是否保留？ | **保留**（提取已入库是有价值的），SnackBar 明说「已收录 N 个，自动连线失败可手动重试」 | 语义 |
+| Q1 | T4 递归驱动权：服务端编排 vs App 侧每层一 job？ | **服务端编排** | `autoPrerequisites` 的递归循环（frontier 逐层展开、gaps 去重、maxBreadth 截断）整体搬进服务端 T4 job 执行体；进度按 `AutoPrereqProgress.label` 同款文案经 `stage.message` 上报；取消检查点在每层每个节点请求前 |
+| Q2 | `jobs.concurrency` 默认值？ | **固定 1** | 不搞「检测 minimax 就 2」的动态逻辑；`config.yaml` 的 `jobs.concurrency` 可手改 |
+| Q3 | 托盘默认展开还是折叠？ | **默认折叠** | 4px 细条 + 「N 个任务进行中」，点击展开 |
+| Q4 | 手动拖节点（△）在 T3 进行中是否放行？ | **放行 + 提示** | 拖节点只改坐标不改边；放行但首次拖动时 SnackBar 提示「AI 连线进行中，拖动不影响连线结果」；加/删边/删树仍硬挡 |
+| Q5 | 管理后台要不要 jobs 面板？ | **做（M10 任务队列）** | `static/views-d.js renderJobs`：当前任务列表 + concurrency + 取消按钮 + 自动刷新；与 M7 日志互补（日志看历史事件，面板看当前态） |
+| Q6 | 复合 job 的语义 | **取消回滚 / 失败保留** | 取消：已落库半成品（T1 笔记 + 知识点 + 入树）整体回滚（软删笔记连带知识点）；失败：保留已完成 stage 成果，SnackBar 明说「已收录 N 个，自动连线失败可手动重试」 |
+
+### 11.1 实施期修正（相对评审稿的两处实体变化）
+
+1. **复合流水线 C1→C2 改为 App 侧链式提交**（原设计：服务端一个 job 两个 stage）。
+   根因：T3 需要「新知识点入库后的 id」才能连线，而 DB 在 App 侧（Drift sqlite），
+   服务端拿不到新 id。落地：App 提交 T1 job（`keepLockOnDone` 不释放锁）→
+   onDone 落库 → 同锁提交 T3 job → onDone 连线。锁跨两个 job 不落空，
+   托盘显示两行；取消任一段 → 回滚；T3 失败 → 保留 T1 成果（Q6）。
+2. **服务端锁为二道防线**：App 侧 `isLocked` 是唯一判定入口（§6.4 不变）；
+   服务端对 `/v1/jobs` 提交按 `resource_key` 互斥（409 `lock_conflict`），
+   防的是 App 侧判定被绕过的极端情况；交互通道（SSE）的锁仍只在 App 侧登记。
 
 ---
 
@@ -485,6 +498,22 @@ App 切回前台时立即全量对账一次。
 | B4 | 0.5 天 |
 | 测试与验收 | 1 天 |
 | **合计** | **约 5.5 天** |
+
+---
+
+## 14. 实施状态（2026-10-22 全部完成）
+
+| 批次 | 内容 | 验证 |
+|---|---|---|
+| B0 | 服务端 `core/jobs.py` + `routers/jobs.py`（幂等/锁 409/取消/保留环）；App `ai_job_service.dart` + `job_tray.dart`（默认折叠） | selftest 38 + verify 109 + Dart 门禁 0/0/0 |
+| B1 | 提取入队（`extract_screen`）；复合链 `extract_into_tree_chain.dart`（T1 持锁 → 落库 → T3，Q6 取消回滚） | 213/213 |
+| B2 | 连线/补前置入队；**T4 递归搬服务端（Q1）**；锁矩阵硬挡 + Q4 拖拽放行提示；真机 3m36s 层级进度实测 | 同上 |
+| B3 | 检测入队（`silent` 静默，不弹 SnackBar） | 同上 |
+| B4 | 老师模式 T6/T7（`kp:{id}` 锁）+ 作业 T8（`homework:{id}` 锁）交互会话纳管 + 托盘计时 | 同上 |
+| M10 | 后台任务队列面板 `static/views-d.js`（当前任务/concurrency/取消/2s 自动刷新/行展开快照） | `verify_m10_panel.js` 52/52 + 真队列夹具 |
+
+实施期附加项：修复存量画布回归（`tree_canvas.dart` 布局固化对 (0,0)
+无意义落库导致「手抖 2px 移动卡片」用例变红）。
 
 ---
 
