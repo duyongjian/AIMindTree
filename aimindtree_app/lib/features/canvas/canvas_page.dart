@@ -533,7 +533,79 @@ class CanvasPageState extends State<CanvasPage> {
     await _loadForTree(tree.id);
   }
 
-  // ============ 自动图谱（DSL 优先 + 本地兜底） ============
+  /// P1-4：把已有知识点（不在当前树里的）加入当前树。
+  ///
+  /// 弹窗多选；提交后 `addPoints` 幂等跳过已在树的，新点用布局引擎铺位避免全挤在 (0,0)。
+  Future<void> _addKnowledgePoints() async {
+    final tree = _selectedTree;
+    if (tree == null) return;
+    final existing = await _treesRepo.memberPointIds(tree.id);
+    final all = await _repo.allKnowledgePoints();
+    final candidates =
+        all.where((p) => !existing.contains(p.id)).toList();
+    if (!mounted) return;
+    final selected = <String>{};
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSt) => AlertDialog(
+          title: Text('向「${tree.name}」添加知识点'),
+          content: candidates.isEmpty
+              ? const SizedBox(
+                  height: 120,
+                  child: Center(
+                    child: Text('没有可添加的知识点（都已经在树里了）',
+                        style: TextStyle(color: Colors.grey)),
+                  ),
+                )
+              : SizedBox(
+                  width: 420,
+                  height: 360,
+                  child: ListView.builder(
+                    itemCount: candidates.length,
+                    itemBuilder: (_, i) {
+                      final kp = candidates[i];
+                      return CheckboxListTile(
+                        dense: true,
+                        value: selected.contains(kp.id),
+                        onChanged: (v) => setSt(() {
+                          if (v == true) {
+                            selected.add(kp.id);
+                          } else {
+                            selected.remove(kp.id);
+                          }
+                        }),
+                        title: Text(kp.name),
+                        subtitle: Text(kp.type.label),
+                      );
+                    },
+                  ),
+                ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: selected.isEmpty ? null : () => Navigator.pop(ctx, true),
+              child: const Text('添加'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (ok != true || selected.isEmpty) return;
+    final ids = selected.toList();
+    final res = await _treesRepo.addPoints(tree.id, ids);
+    if (!mounted) return;
+    await _autoPlaceNewPoints(tree.id, ids);
+    res.fold(
+      (added) =>
+          _toast(added == 0 ? '都在树里了' : '已添加 $added 个知识点'),
+      (e, _) => _toast('添加失败：$e'),
+    );
+    await _loadForTree(tree.id);
+  }
 
   /// 自动连线（B2：默认走队列，提交即返回；同步路径保留）。
   Future<void> _autoLink() async {
@@ -1728,6 +1800,12 @@ class CanvasPageState extends State<CanvasPage> {
                 iconSize: 20,
                 tooltip: '把某篇笔记的知识点并入当前树',
                 onPressed: tree == null ? null : _mergeFromNote,
+              ),
+              IconButton(
+                icon: const Icon(Icons.playlist_add),
+                iconSize: 20,
+                tooltip: '把已有知识点加入当前树',
+                onPressed: tree == null ? null : _addKnowledgePoints,
               ),
               IconButton(
                 icon: const Icon(Icons.auto_fix_high),

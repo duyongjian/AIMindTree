@@ -506,6 +506,89 @@ class KnowledgeRepository {
 
   // ============ 查询 ============
 
+  /// 手动新建知识点（origin = 'user_manual'，锚点四件套豁免，见 PRD §4.2）。
+  ///
+  /// 手动知识点是产品权威来源，不要求 `source_quote` 自证；[sourceNoteId]
+  /// 默认空串哨兵 ''（见 §4.3），表示该知识点不来自某篇笔记。
+  Future<Result<KnowledgePoint>> createManualKnowledgePoint({
+    required String name,
+    KnowledgePointType type = KnowledgePointType.concept,
+    String definition = '',
+    String sourceNoteId = '',
+  }) async {
+    try {
+      if (name.trim().isEmpty) {
+        return Failure(ArgumentError('知识点名称不能为空'));
+      }
+      final kp = KnowledgePoint(
+        name: name.trim(),
+        type: type,
+        definition: definition,
+        sourceNoteId: sourceNoteId,
+        sourceStart: -1,
+        sourceEnd: -1,
+        sourceQuote: '',
+        origin: 'user_manual',
+        deviceId: deviceId,
+      );
+      await _db.into(_db.knowledgePoints).insert(KnowledgePointsCompanion(
+            id: Value(kp.id),
+            notebookId: Value(kp.notebookId),
+            name: Value(kp.name),
+            type: Value(kp.type.name),
+            definition: Value(kp.definition),
+            sourceNoteId: Value(kp.sourceNoteId),
+            sourceStart: Value(kp.sourceStart),
+            sourceEnd: Value(kp.sourceEnd),
+            sourceQuote: Value(kp.sourceQuote),
+            origin: Value(kp.origin),
+            confidence: Value(kp.confidence),
+            updatedAt: Value(kp.updatedAt),
+            version: Value(kp.version),
+            deviceId: Value(kp.deviceId),
+          ));
+      _log.i('手动新建知识点 ${kp.name}（origin=user_manual）');
+      return Success(kp);
+    } on Object catch (e, s) {
+      _log.e('手动新建知识点失败', error: e, stackTrace: s);
+      return Failure(e, s);
+    }
+  }
+
+  /// 编辑知识点的展示性字段（名称 / 类型 / 定义 / 来源笔记）。
+  ///
+  /// 锚点四件套不可改（AI 提取点的出处是硬约束；手动点也不应改写锚点语义）。
+  Future<Result<KnowledgePoint>> updateKpMeta(KnowledgePoint kp) async {
+    try {
+      final row = await (_db.select(_db.knowledgePoints)
+            ..where((t) => t.id.equals(kp.id)))
+          .getSingleOrNull();
+      if (row == null) return Failure(StateError('知识点不存在'));
+      await (_db.update(_db.knowledgePoints)..where((t) => t.id.equals(kp.id)))
+          .write(KnowledgePointsCompanion(
+        name: Value(kp.name),
+        type: Value(kp.type.name),
+        definition: Value(kp.definition),
+        sourceNoteId: Value(kp.sourceNoteId),
+        updatedAt: Value(DateTime.now().toUtc()),
+        version: Value(row.version + 1),
+      ));
+      _log.i('编辑知识点 ${kp.name}');
+      return Success(kp);
+    } on Object catch (e, s) {
+      _log.e('编辑知识点失败', error: e, stackTrace: s);
+      return Failure(e, s);
+    }
+  }
+
+  /// 某知识点涉及的前置边数量（删除时用于弹窗提示影响面，见 PRD §4.1）。
+  Future<int> countPrerequisiteEdges(String kpId) async {
+    final rows = await (_db.select(_db.prerequisiteEdges)
+          ..where((t) => t.fromKpId.equals(kpId) | t.toKpId.equals(kpId)))
+        .get();
+    return rows.length;
+  }
+
   /// 全部**未删除**知识点（按更新时间倒序）。
   ///
   /// 软删铁律：KP 一旦软删（`deletedAt` 非 null）即视为墓碑，必须过滤，

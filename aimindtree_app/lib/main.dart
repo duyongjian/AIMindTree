@@ -6,16 +6,18 @@ import 'core/result.dart';
 import 'core/secret_store.dart';
 import 'data/db/drift_database.dart';
 import 'data/models/knowledge_point.dart';
+import 'data/models/knowledge_tree.dart';
 import 'data/repositories/ai_session_repository.dart';
+import 'data/repositories/knowledge_repository.dart';
 import 'data/repositories/settings_repository.dart';
 import 'data/sync/sync_context.dart';
 import 'features/agent/agent_page.dart';
 import 'features/canvas/canvas_page.dart';
+import 'features/knowledge/knowledge_manage_page.dart';
 import 'features/notes/delete_note_dialog.dart';
 import 'features/notes/note_editor_page.dart';
 import 'features/teacher/teacher_page.dart';
 import 'features/settings/settings_page.dart';
-import 'ui/extract_screen.dart';
 import 'ui/job_tray.dart';
 
 void main() async {
@@ -136,7 +138,11 @@ class _AppShellState extends State<AppShell> {
           _canvasKey.currentState?.refresh();
         },
       ),
-      ExtractScreen(service: widget.service),
+      KnowledgeManagePage(
+        service: widget.service,
+        db: widget.db,
+        onOpenTeacher: _openTeacher,
+      ),
       CanvasPage(
         key: _canvasKey,
         service: widget.service,
@@ -184,9 +190,9 @@ class _AppShellState extends State<AppShell> {
             label: '笔记',
           ),
           NavigationDestination(
-            icon: Icon(Icons.auto_awesome_outlined),
-            selectedIcon: Icon(Icons.auto_awesome),
-            label: '提取',
+            icon: Icon(Icons.lightbulb_outline),
+            selectedIcon: Icon(Icons.lightbulb),
+            label: '知识点',
           ),
           NavigationDestination(
             icon: Icon(Icons.account_tree_outlined),
@@ -228,6 +234,10 @@ class NotesListPage extends StatefulWidget {
 
 class NotesListPageState extends State<NotesListPage> {
   List<Note> _notes = <Note>[];
+
+  /// P1-2：多选删除模式。
+  bool _selectionMode = false;
+  Set<String> _selected = <String>{};
 
   @override
   void initState() {
@@ -365,6 +375,92 @@ class NotesListPageState extends State<NotesListPage> {
     await _reload();
   }
 
+  // ============ P1-2：多选删除 ============
+
+  void _enterSelection(String id) => setState(() {
+        _selectionMode = true;
+        _selected = <String>{id};
+      });
+
+  void _toggle(String id) => setState(() {
+        if (_selected.contains(id)) {
+          _selected.remove(id);
+        } else {
+          _selected.add(id);
+        }
+        if (_selected.isEmpty) _selectionMode = false;
+      });
+
+  void _exitSelection() => setState(() {
+        _selectionMode = false;
+        _selected.clear();
+      });
+
+  void _selectAll() =>
+      setState(() => _selected = <String>{for (final n in _notes) n.id});
+
+  /// 批量删除：摊开影响面（涉及知识点总数 + 涉及的树），统一应用删除方案。
+  Future<void> _deleteSelected() async {
+    final notes = _notes.where((n) => _selected.contains(n.id)).toList();
+    if (notes.isEmpty) return;
+
+    final allKpIds = <String>{};
+    final impactsMap = <String, TreeImpact>{};
+    for (final n in notes) {
+      final kpIds = await widget.service.repo.pointIdsOfNote(n.id);
+      allKpIds.addAll(kpIds);
+      final impacts =
+          await widget.service.trees.treesContaining(kpIds);
+      for (final im in impacts) {
+        final cur = impactsMap[im.treeId];
+        impactsMap[im.treeId] = cur == null
+            ? im
+            : TreeImpact(
+                treeId: im.treeId,
+                treeName: im.treeName,
+                pointCount: cur.pointCount + im.pointCount,
+              );
+      }
+    }
+    if (!mounted) return;
+
+    final plan = await showDeleteNoteDialog(
+      context: context,
+      noteTitle: '${notes.length} 篇笔记',
+      pointCount: allKpIds.length,
+      impacts: impactsMap.values.toList(),
+    );
+    if (plan == null) return;
+
+    var deletedPoints = 0;
+    var maxTreesAffected = 0;
+    for (final n in notes) {
+      final res = await widget.service.repo.deleteNote(
+        noteId: n.id,
+        deletePoints: plan.deletePoints,
+        removeFromTrees: plan.removeFromTrees,
+      );
+      if (res is Success<NoteDeleteSummary>) {
+        deletedPoints += res.value.pointsDeleted;
+        if (res.value.treesAffected > maxTreesAffected) {
+          maxTreesAffected = res.value.treesAffected;
+        }
+      }
+    }
+    if (!mounted) return;
+    final tail = plan.deletePoints
+        ? '，并删除 $deletedPoints 个知识点'
+        : (maxTreesAffected > 0
+            ? '，从 $maxTreesAffected 棵知识树移除知识点'
+            : '，知识点保留');
+    _toast('已删除 ${notes.length} 篇笔记$tail');
+    setState(() {
+      _selectionMode = false;
+      _selected.clear();
+    });
+    await _reload();
+  }
+
   void _toast(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
@@ -379,13 +475,34 @@ class NotesListPageState extends State<NotesListPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('笔记'),
+        title: _selectionMode
+            ? Text('已选 ${_selected.length} 篇')
+            : const Text('笔记'),
+        leading: _selectionMode
+            ? IconButton(
+                onPressed: _exitSelection,
+                icon: const Icon(Icons.close),
+                tooltip: '退出多选',
+              )
+            : null,
         actions: [
-          IconButton(
-            onPressed: () => _openEditor(),
-            icon: const Icon(Icons.add),
-            tooltip: '新笔记',
-          ),
+          if (_selectionMode) ...[
+            IconButton(
+              onPressed: _selectAll,
+              icon: const Icon(Icons.select_all),
+              tooltip: '全选',
+            ),
+            IconButton(
+              onPressed: _selected.isEmpty ? null : _deleteSelected,
+              icon: const Icon(Icons.delete),
+              tooltip: '删除所选',
+            ),
+          ] else
+            IconButton(
+              onPressed: () => _openEditor(),
+              icon: const Icon(Icons.add),
+              tooltip: '新笔记',
+            ),
         ],
       ),
       body: _notes.isEmpty
@@ -412,7 +529,12 @@ class NotesListPageState extends State<NotesListPage> {
                     ? '${n.contentMd.substring(0, 80)}…'
                     : n.contentMd;
                 return ListTile(
-                  leading: const Icon(Icons.description_outlined),
+                  leading: _selectionMode
+                      ? Checkbox(
+                          value: _selected.contains(n.id),
+                          onChanged: (_) => _toggle(n.id),
+                        )
+                      : const Icon(Icons.description_outlined),
                   title: Text(n.title.isEmpty ? '(无标题)' : n.title),
                   subtitle: Text(preview, maxLines: 2, overflow: TextOverflow.ellipsis),
                   trailing: Row(
@@ -442,7 +564,10 @@ class NotesListPageState extends State<NotesListPage> {
                       ),
                     ],
                   ),
-                  onTap: () => _openEditor(id: n.id),
+                  onTap: _selectionMode
+                      ? () => _toggle(n.id)
+                      : () => _openEditor(id: n.id),
+                  onLongPress: _selectionMode ? null : () => _enterSelection(n.id),
                 );
               },
             ),

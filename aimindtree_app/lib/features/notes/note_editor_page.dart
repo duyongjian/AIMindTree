@@ -11,6 +11,8 @@ import '../../ai/extraction_service.dart';
 import '../../core/result.dart';
 import '../../data/db/drift_database.dart';
 import '../../data/models/knowledge_point.dart';
+import '../../data/repositories/ai_session_repository.dart';
+import '../../features/teacher/teacher_page.dart';
 import 'markdown_render.dart';
 
 class NoteEditorPage extends StatefulWidget {
@@ -39,6 +41,9 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   String _status = '';
   Note? _note;
 
+  /// 本笔记提取出的知识点（P1-5：笔记详情展示并可跳转）。
+  List<KnowledgePoint> _kps = <KnowledgePoint>[];
+
   @override
   void initState() {
     super.initState();
@@ -66,6 +71,28 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
       );
       _dirty = false;
     });
+    await _reloadKps();
+  }
+
+  /// P1-5：回读本笔记提取的知识点。
+  Future<void> _reloadKps() async {
+    if (_note == null) return;
+    final kps = await widget.service.repo.pointsForNote(_note!.id);
+    if (!mounted) return;
+    setState(() => _kps = kps);
+  }
+
+  /// P1-5：跳转到知识点详情 / 老师模式页。
+  Future<void> _openKp(KnowledgePoint kp) async {
+    await Navigator.of(context).push<bool>(MaterialPageRoute(
+      builder: (_) => TeacherPage(
+        kp: kp,
+        sessions: AiSessionRepository(widget.db),
+        ai: widget.service.ai,
+        repo: widget.service.repo,
+        jobs: widget.service.jobs,
+      ),
+    ));
   }
 
   Future<String> _save() async {
@@ -121,17 +148,59 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     if (!mounted) return;
     switch (res) {
       case Success(value: final v):
-    setState(() {
+      setState(() {
       _status =
           '✅ 已入库 ${v.savedCount} 条，幻觉剔除 ${v.rejectedCount} 条';
       _busy = false;
     });
+    await _reloadKps();
       case Failure():
         setState(() {
           _status = '❌ 提取失败：${res.message}';
           _busy = false;
         });
     }
+  }
+
+  /// P1-5：本笔记提取的知识点区（正文下方），逐条可点进详情 / 老师模式。
+  Widget _buildKpSection() {
+    if (_note == null) return const SizedBox.shrink();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(color: Colors.grey.shade50),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '本笔记提取的知识点（${_kps.length}）',
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+          ),
+          const SizedBox(height: 6),
+          if (_kps.isEmpty)
+            const Text(
+              '还没有知识点，点右上角「提取知识点」试试。',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            )
+          else
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final kp in _kps)
+                  ActionChip(
+                    label: Text(
+                      kp.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    avatar: const Icon(Icons.lightbulb_outline, size: 16),
+                    onPressed: () => _openKp(kp),
+                  ),
+              ],
+            ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -212,6 +281,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
               ],
             ),
           ),
+          _buildKpSection(),
           if (_status.isNotEmpty)
             Container(
               width: double.infinity,

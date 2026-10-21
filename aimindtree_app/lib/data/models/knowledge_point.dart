@@ -173,24 +173,28 @@ class KnowledgePoint {
   final DateTime? deletedAt;
 
   KnowledgePoint copyWith({
+    String? name,
+    KnowledgePointType? type,
     MasteryStatus? mastery,
     String? definition,
     double? confidence,
+    String? sourceNoteId,
+    DateTime? updatedAt,
   }) =>
       KnowledgePoint(
         id: id,
         notebookId: notebookId,
-        name: name,
-        type: type,
+        name: name ?? this.name,
+        type: type ?? this.type,
         definition: definition ?? this.definition,
-        sourceNoteId: sourceNoteId,
+        sourceNoteId: sourceNoteId ?? this.sourceNoteId,
         sourceStart: sourceStart,
         sourceEnd: sourceEnd,
         sourceQuote: sourceQuote,
         origin: origin,
         confidence: confidence ?? this.confidence,
         mastery: mastery ?? this.mastery,
-        updatedAt: updatedAt,
+        updatedAt: updatedAt ?? this.updatedAt,
         version: version,
         deviceId: deviceId,
         deletedAt: deletedAt,
