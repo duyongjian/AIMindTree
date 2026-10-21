@@ -23,6 +23,7 @@ from core.logging import get_logger
 from core.prompt_store import PromptStore
 from core.registry import TaskRegistry
 from routers import build_router
+from routers.jobs import create_queue
 
 _log = get_logger('config')
 
@@ -98,7 +99,9 @@ def create_app(
         if state.store.errors:
             for err in state.store.errors:
                 _log.error('提示词加载错误：%s', err)
+        app.state.jobs.start()
         yield
+        await app.state.jobs.stop()
         _log.info('llm_server 关闭')
 
     app = FastAPI(
@@ -124,6 +127,8 @@ def create_app(
     app.state.get_backend = state.get_backend
     app.state.clear_backends = state.clear_backends
     app.state._state = state
+    # 任务队列（/v1/jobs）：执行体在 lifespan 前装配好，worker 池在 lifespan 起。
+    app.state.jobs = create_queue(state)
 
     @app.exception_handler(LlmError)
     async def _llm_error_handler(request: Request, exc: LlmError) -> JSONResponse:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from routers import admin, app_config, chat, health, prompts, tasks
+from routers import admin, app_config, chat, health, jobs, prompts, tasks
 
 
 def build_router() -> APIRouter:
@@ -14,9 +14,19 @@ def build_router() -> APIRouter:
     router.include_router(app_config.router)  # GET /v1/app/config（无鉴权）
     router.include_router(tasks.router)
     router.include_router(chat.router)
+    router.include_router(jobs.router)  # /v1/jobs 异步任务队列
     router.include_router(prompts.router)
     router.include_router(admin.router)
     return router
 
 
-__all__ = ['build_router', 'admin', 'app_config', 'chat', 'health', 'prompts', 'tasks']
+__all__ = [
+    'build_router',
+    'admin',
+    'app_config',
+    'chat',
+    'health',
+    'jobs',
+    'prompts',
+    'tasks',
+]

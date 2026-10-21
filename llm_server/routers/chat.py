@@ -88,18 +88,42 @@ def _build_messages(request_meta, query: str, extra: dict | None) -> list[Messag
 # 不能让 FastAPI 拿它去推 pydantic 响应模型（会直接起不来）。
 @router.post('/v1/chat', response_model=None)
 async def chat(request: Request) -> JSONResponse | StreamingResponse:
-    """会话任务入口。"""
-    state = request.app.state
-    config = state.config
-    config.maybe_reload()
+    """会话任务入口。
 
+    ``stream:false`` 走 :func:`chat_blocking_core`（``/v1/jobs`` 的 worker
+    复用同一函数，零重复）；SSE 路径行为不变。
+    """
     body = await _read_body(request)
+    state = request.app.state
+    state.config.maybe_reload()
+
+    if not bool(body.get('stream', True)):
+        return JSONResponse(await chat_blocking_core(state, body))
+
+    resolved = _resolve_chat(state, body)
+    return StreamingResponse(
+        _sse(**resolved),
+        media_type='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+        },
+    )
+
+
+def _resolve_chat(state, body: dict) -> dict:
+    """解析 chat 请求：装载提示词 / 选后端 / 渲染 messages（SSE 与 blocking 共用）。
+
+    Returns:
+        可直接展开传给 :func:`_sse` / :func:`_blocking` 的 kwargs dict。
+    """
+    config = state.config
     task_code = (body.get('task') or '').strip() or None
     variant = (body.get('variant') or '').strip() or None
     query = str(body.get('query') or '')
     if not query:
         raise invalid_request('缺少 query')
-    stream = bool(body.get('stream', True))
     timeout_s = float(body.get('timeout_s') or config.timeout('chat_s', 120.0))
     model_override = (body.get('model') or '').strip() or None
     if model_override is None and task_code:
@@ -131,49 +155,33 @@ async def chat(request: Request) -> JSONResponse | StreamingResponse:
     max_tokens = int(meta.max_tokens) if meta else 4096
     need_json = bool(meta.json_output) if meta else False
 
-    if not stream:
-        return await _blocking(
-            backend,
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            timeout_s=timeout_s,
-            model=model_override,
-            need_json=need_json,
-            conversation_id=conversation_id,
-            backend_name=backend_conf.name,
-            task_code=task_code,
-            input_chars=len(query),
-        )
+    return {
+        'backend': backend,
+        'messages': messages,
+        'temperature': temperature,
+        'max_tokens': max_tokens,
+        'timeout_s': timeout_s,
+        'model': model_override,
+        'need_json': need_json,
+        'conversation_id': conversation_id,
+        'backend_name': backend_conf.name,
+        'task_code': task_code,
+        'variant': variant_used,
+        'input_chars': len(query),
+    }
 
-    return StreamingResponse(
-        _sse(
-            backend,
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            timeout_s=timeout_s,
-            model=model_override,
-            need_json=need_json,
-            conversation_id=conversation_id,
-            backend_name=backend_conf.name,
-            task_code=task_code,
-            variant=variant_used,
-            input_chars=len(query),
-        ),
-        media_type='text/event-stream',
-        headers={
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no',
-        },
-    )
+
+async def chat_blocking_core(state, body: dict) -> dict:
+    """``stream:false``：一次性返回 payload dict（HTTP 端点与 job worker 共用）。"""
+    resolved = _resolve_chat(state, body)
+    resolved.pop('variant', None)  # _blocking 不关心 variant
+    return await _blocking(**resolved)
 
 
 async def _blocking(backend, messages, *, temperature, max_tokens, timeout_s, model,
                     need_json, conversation_id, backend_name, task_code,
-                    input_chars=0) -> JSONResponse:
-    """``stream:false``：一次性返回。"""
+                    input_chars=0) -> dict:
+    """``stream:false``：一次性返回 payload dict（调用方包 JSONResponse）。"""
     started = time.time()
     completion = await backend.complete(
         messages,
@@ -202,17 +210,15 @@ async def _blocking(backend, messages, *, temperature, max_tokens, timeout_s, mo
         input_chars=input_chars,
         output_chars=len(content),
     )
-    return JSONResponse(
-        {
-            'content': content,
-            'parsed': parsed,
-            'conversation_id': conversation_id,
-            'usage': completion.usage,
-            'backend': backend_name,
-            'model_id': completion.model_id,
-            'latency_ms': latency_ms,
-        }
-    )
+    return {
+        'content': content,
+        'parsed': parsed,
+        'conversation_id': conversation_id,
+        'usage': completion.usage,
+        'backend': backend_name,
+        'model_id': completion.model_id,
+        'latency_ms': latency_ms,
+    }
 
 
 async def _sse(backend, messages, *, temperature, max_tokens, timeout_s, model,

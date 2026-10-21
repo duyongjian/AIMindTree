@@ -16,6 +16,8 @@
 5. 任务路由 ``GET/PUT /v1/admin/routes``（含非法值 400）；
 6. 统计埋点 ``GET /v1/admin/stats``（空缓冲 → 空数组；打 3 次坏请求 → 累加）；
 7. 运行日志 ``GET /v1/admin/logs``（过滤 / 游标分页 / 级别校验 / **密钥零泄露**）；
+7b. 任务队列 ``POST/GET /v1/jobs``（202 提交 / 幂等去重 / 409 锁冲突 / 取消
+    queued 即消 / running 检查点 / 终态环形保留 / M7 日志联动 / **密钥零泄露**）；
 8. 配置写入往返（``app`` / ``sync`` / per-backend / ``task_backends``）+ **还原**；
 9. 静态资源挂载（``/admin``、``/static/*``）；
 10. 可选：真实链路 ``POST /v1/task/T1`` + ``POST /v1/chat``（blocking 与 SSE
@@ -408,8 +410,192 @@ def check_logs(c: TestClient, secrets: dict[str, str]) -> None:
         skip('日志密钥零泄露', '.env 无疑似密钥')
 
 
+def check_jobs(c: TestClient, secrets: dict[str, str]) -> None:
+    print('\n[7] POST/GET /v1/jobs —— 异步任务队列（提交即返回 / 取消 / 锁 / 幂等）')
+    import asyncio
+
+    from core.jobs import JobQueue
+    from core.logbuf import reset as logbuf_reset
+
+    # ---- 7.1 HTTP 级：空列表结构（空态不返回 null 数组）----
+    r = c.get('/v1/jobs')
+    if not check(r.status_code == 200, 'GET /v1/jobs 返回 200', f'实际 {r.status_code}'):
+        return
+    body = r.json()
+    for key in ('jobs', 'buffer_size', 'concurrency'):
+        check(key in body, f'列表含字段 {key}')
+    check(isinstance(body.get('jobs'), list), 'jobs 为数组', str(type(body.get('jobs'))))
+    check(body.get('concurrency') == 1, 'concurrency 默认 1（Q2 决策）', str(body.get('concurrency')))
+
+    # ---- 7.2 参数校验：缺 task → 400 ----
+    bad = c.post('/v1/jobs', json={'inputs': {}})
+    check(
+        bad.status_code == 400 and bad.json().get('error', {}).get('code') == 'invalid_request',
+        '缺少 task → 400 invalid_request',
+        f'{bad.status_code} {bad.text[:80]}',
+    )
+
+    # ---- 7.3 未知任务：202 提交 → worker 内 failed(unknown_task) ----
+    logbuf_reset()
+    r = c.post('/v1/jobs', json={'task': 'ZZZ', 'label': '未知任务探测'})
+    if check(r.status_code == 202, '未知任务也先 202（异步语义：失败在终态）', f'实际 {r.status_code}'):
+        jid = r.json()['job_id']
+        job = None
+        for _ in range(50):
+            job = c.get(f'/v1/jobs/{jid}').json()
+            if job.get('status') in ('done', 'failed', 'canceled'):
+                break
+            import time as _t
+
+            _t.sleep(0.1)
+        check(
+            job is not None and job.get('status') == 'failed'
+            and (job.get('error') or {}).get('code') == 'unknown_task',
+            '终态 failed + error.code=unknown_task',
+            str(job.get('error') if job else None),
+        )
+        check(
+            job is not None and job.get('stage', {}).get('message') == '失败'
+            and (job.get('error') or {}).get('code') == 'unknown_task',
+            '失败时 stage.message=失败 + error.code=unknown_task',
+            str(job.get('stage') if job else None),
+        )
+
+    # ---- 7.4 幂等：60s 内同 key 重复提交 → deduped=True 且同一 job ----
+    r1 = c.post('/v1/jobs', json={'task': 'T1', 'inputs': {'note_text': 'x'}, 'idempotency_key': 'verify-idem-1'})
+    r2 = c.post('/v1/jobs', json={'task': 'T1', 'inputs': {'note_text': 'x'}, 'idempotency_key': 'verify-idem-1'})
+    check(
+        r1.status_code == 202 and r2.status_code == 202
+        and r1.json().get('job_id') == r2.json().get('job_id')
+        and r2.json().get('deduped') is True,
+        '幂等键 TTL 内重复提交 → deduped=True、同一 job_id',
+        f'{r1.json()} / {r2.json()}',
+    )
+
+    # ---- 7.5 404：不存在的 job ----
+    nf = c.get('/v1/jobs/job_does_not_exist')
+    check(nf.status_code == 404, 'GET 不存在 job → 404（App 据此判定服务重启）', f'实际 {nf.status_code}')
+
+    # ---- 7.6 日志联动：llmserver.job 模块进 M7 ----
+    logs = c.get('/v1/admin/logs?module=job&limit=50').json()
+    items = logs.get('items') or []
+    check(
+        bool(items) and all(i['module'] == 'llmserver.job' for i in items),
+        'module=job 过滤出 llmserver.job 日志（M7 联动）',
+        f'items={len(items)}',
+    )
+    check(
+        any('已提交' in i['message'] for i in items),
+        '日志含「已提交」记录',
+        items[0]['message'] if items else '(空)',
+    )
+
+    # ---- 7.7 状态机单测（内存 executor，无 Ollama 依赖）：done / 锁 / 取消 / 保留 ----
+    async def _scenario() -> None:
+        q = JobQueue(concurrency=1, retain=5)
+
+        async def slow_exec(job):
+            for i in range(20):
+                job.check_cancelled()
+                job.report(i * 5, f'第 {i} 步')
+                await asyncio.sleep(0.05)
+            return {'ok': True, 'echo': job.label}
+
+        q.set_executor(slow_exec)
+        q.start()
+        try:
+            # (a) done 路径：进度上报 + 100% 终态（slow_exec 共 20×0.05≈1s）
+            j1, d1 = q.submit({'task': 'T1', 'label': 'done 路径'})
+            await asyncio.sleep(1.4)
+            s1 = j1.snapshot()
+            check(
+                s1['status'] == 'done' and s1['stage']['percent'] == 100
+                and s1['stage']['message'] == '已完成' and s1['result'] == {'ok': True, 'echo': 'done 路径'},
+                '状态机：running → done，percent=100、result 回填',
+                str(s1['stage']),
+            )
+            check(d1 is False, '首次提交 deduped=False')
+
+            # (b) 锁：同 resource_key 未终态 → lock_conflict
+            j2, _ = q.submit({'task': 'T1', 'resource_key': 'tree:a', 'label': '占锁'})
+            await asyncio.sleep(0.12)  # 让 worker 取到 j2（j1 已 done）
+            check(j2.status == 'running', 'j2 已被 worker 取到（running）', j2.status)
+            try:
+                q.submit({'task': 'T3', 'resource_key': 'tree:a', 'label': '冲突'})
+                check(False, '锁冲突应抛 lock_conflict', '未抛异常')
+            except Exception as exc:  # noqa: BLE001 - 断言错误码
+                check(
+                    getattr(exc, 'code', None) == 'lock_conflict'
+                    and getattr(exc, 'http_status', None) == 409,
+                    '状态机：同 resource_key → 409 lock_conflict',
+                    f'{type(exc).__name__}: {exc}',
+                )
+            # 不同 key 不受影响
+            j3, _ = q.submit({'task': 'T1', 'resource_key': 'tree:b', 'label': '异键'})
+            check(j3.status == 'queued', '不同 resource_key 放行')
+
+            # (c) 取消 queued：立即生效（j3 还在排队，worker 忙于 j2）
+            q.cancel(j3.job_id)
+            check(j3.status == 'canceled', '取消 queued → canceled（立即）', j3.status)
+
+            # (d) 取消 running：检查点生效（slow_exec 每步前 check_cancelled）
+            q.cancel(j2.job_id)
+            check(
+                j2.cancel_requested is True and j2.status == 'running',
+                '取消 running → cancel_requested=True（检查点前仍 running）',
+                j2.status,
+            )
+            await asyncio.sleep(0.3)
+            check(
+                j2.status == 'canceled' and j2.finished_at is not None,
+                '检查点生效：running → canceled',
+                j2.status,
+            )
+
+            # (e) 终态可见：list(status=canceled) 含两个被取消任务
+            lst_c = q.list_jobs(status='canceled')
+            check(
+                any(j['job_id'] == j2.job_id for j in lst_c['jobs'])
+                and any(j['job_id'] == j3.job_id for j in lst_c['jobs']),
+                'list(status=canceled) 含两个被取消任务',
+                str([j['job_id'] for j in lst_c['jobs']]),
+            )
+
+            # (f) 保留环：换即时 executor 灌 8 个 → retain=5 封顶
+            async def fast_exec(job):
+                return {'ok': True}
+
+            q.set_executor(fast_exec)
+            for i in range(8):
+                q.submit({'task': 'T1', 'label': f'灌水{i}'})
+            await asyncio.sleep(0.5)
+            lst = q.list_jobs(status='done', limit=50)
+            check(
+                len(lst['jobs']) <= 5 and lst['buffer_size'] <= 5,
+                'retain=5：终态环封顶（done 列表 ≤5）',
+                f"buffer_size={lst['buffer_size']} done={len(lst['jobs'])}",
+            )
+            lst3 = q.list_jobs(limit=99999)
+            check(len(lst3['jobs']) <= 200, 'limit 越界钳制 ≤200', str(len(lst3['jobs'])))
+        finally:
+            await q.stop()
+
+    try:
+        asyncio.run(_scenario())
+    except Exception as exc:  # noqa: BLE001 - 场景本身崩了要报出来
+        check(False, '状态机场景执行', f'{type(exc).__name__}: {exc}')
+
+    # ---- 7.8 密钥零扩散 ----
+    if secrets:
+        blob = r.text + r1.text + r2.text
+        leaked = [name for name, value in secrets.items() if value in blob]
+        check(not leaked, 'jobs 响应不含 .env 任何密钥明文', f'泄露：{leaked}' if leaked else '')
+    else:
+        skip('jobs 密钥零泄露', '.env 无疑似密钥')
+
+
 def check_config_roundtrip(c: TestClient) -> None:
-    print('\n[7] POST /v1/admin/config —— 覆盖层往返 + 还原（AC-03/04, C9）')
+    print('\n[8] POST /v1/admin/config —— 覆盖层往返 + 还原（AC-03/04, C9）')
     settings_path = _HERE / 'settings.json'
     original: str | None = None
     existed = settings_path.is_file()
@@ -485,7 +671,7 @@ def check_config_roundtrip(c: TestClient) -> None:
 
 
 def check_static(c: TestClient) -> None:
-    print('\n[8] 静态资源挂载（AC-09）')
+    print('\n[9] 静态资源挂载（AC-09）')
     index = _HERE / 'static' / 'index.html'
     if not index.is_file():
         skip('/admin 返回 200', 'static/index.html 尚未创建（T03 后自动生效）')
@@ -505,7 +691,7 @@ def check_static(c: TestClient) -> None:
 
 
 def check_live_t1(c: TestClient) -> None:
-    print('\n[9] 真实链路 POST /v1/task/T1（--live，需要本机 Ollama 在跑）')
+    print('\n[10] 真实链路 POST /v1/task/T1（--live，需要本机 Ollama 在跑）')
     note = ('牛顿第二定律：物体加速度的大小跟作用力成正比，跟物体的质量成反比，'
             '加速度的方向跟作用力的方向相同。公式 F=ma。')
     r = c.post('/v1/task/T1', json={'inputs': {'note_text': note}})
@@ -532,7 +718,7 @@ def check_live_chat(c: TestClient) -> None:
     任务埋点已在 [check_live_t1] 覆盖；这里补 chat —— 两条路径分别落在
     ``_blocking`` 与 ``_sse`` 里，改任一处都可能漏埋，必须各打一次。
     """
-    print('\n[10] 真实链路 POST /v1/chat（--live，blocking + SSE 两条路径）')
+    print('\n[11] 真实链路 POST /v1/chat（--live，blocking + SSE 两条路径）')
     from core.stats import snapshot as raw_snapshot
 
     query = '用一句话解释牛顿第二定律'
@@ -608,6 +794,7 @@ def main(argv: list[str] | None = None) -> int:
         check_routes(c)
         check_stats(c)
         check_logs(c, secrets)
+        check_jobs(c, secrets)
         check_config_roundtrip(c)
         check_static(c)
         if live:

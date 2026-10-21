@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from typing import Any
 
-# ---- 12 个错误码 → 默认 HTTP 状态码 ----
+# ---- 错误码 → 默认 HTTP 状态码 ----
+#: 前 12 个为 S-11 既有码；``lock_conflict`` 是 2026-10-22 任务队列新增
+#: （仅 ``POST /v1/jobs`` 用：资源锁被其它任务占用，App 侧据此禁用入口）。
 CODE_STATUS: dict[str, int] = {
     'unknown_task': 400,
     'missing_input': 400,
@@ -27,6 +29,7 @@ CODE_STATUS: dict[str, int] = {
     'upstream_error': 502,
     'invalid_request': 400,
     'internal': 500,
+    'lock_conflict': 409,
 }
 
 #: 可重试的错误码（客户端可原样重跑）。

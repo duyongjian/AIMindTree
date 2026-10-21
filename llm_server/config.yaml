@@ -36,6 +36,15 @@ timeouts:
 retry:
   structured_on_bad_json: 1   # 六层容错失败后原地重跑次数（S-13）
 
+# 任务队列（POST /v1/jobs）：App 的批量型 AI 功能（T1 提取 / T3 连线 / T4 补前置 /
+# T5 检测）走这里，提交即返回、worker 池异步执行、进度可轮询。
+# 运维参数，只改这个文件 + POST /v1/admin/reload（不进管理后台热改）。
+jobs:
+  concurrency: 1    # worker 协程数，**进程启动时固定**（改后需重启 llm_server）。
+                    # 本地 Ollama 单模型：1 最稳（并发只在 Ollama 内部排队）；
+                    # 切 MiniMax 云端可改 2-3。
+  retain: 200       # 终态 job 内存环形保留条数（托盘 / 管理后台 M10 都读这里）
+
 backends:
   # ---- 后端一：Ollama（本地，当前默认）----
   # 前置：ollama serve 已在跑，且 pull 过下面列出的模型。

@@ -48,6 +48,13 @@ DEFAULTS: dict[str, Any] = {
     'retry': {
         'structured_on_bad_json': 1,
     },
+    #: 任务队列（``/v1/jobs``）段。运维参数：只落 config.yaml，不走 settings.json
+    #: 后台热改（P1 再收进 M2）。concurrency=1：本地 Ollama 单模型串行最稳，
+    #: 并发请求只会在 Ollama 内部排队、互相拖慢。
+    'jobs': {
+        'concurrency': 1,
+        'retain': 200,
+    },
     'backends': {},
     #: App 下发用的展示段（服务显示名 / 后台地址 / 下发超时）。
     'app': {
@@ -181,6 +188,8 @@ class Config:
         self.sync: dict[str, Any] = dict(DEFAULTS['sync'])
         self.timeouts: dict[str, Any] = dict(DEFAULTS['timeouts'])
         self.retry: dict[str, Any] = dict(DEFAULTS['retry'])
+        #: 任务队列段（concurrency / retain）。
+        self.jobs: dict[str, Any] = dict(DEFAULTS['jobs'])
         self.backends: dict[str, BackendConf] = {}
         #: 顶层默认模型（管理后台用）；来自默认后端的 default_model，可能被 settings 覆盖。
         self.default_model: str = ''
@@ -222,6 +231,7 @@ class Config:
         self.sync = _deep_merge(DEFAULTS['sync'], merged.get('sync') or {})
         self.timeouts = _deep_merge(DEFAULTS['timeouts'], merged.get('timeouts') or {})
         self.retry = _deep_merge(DEFAULTS['retry'], merged.get('retry') or {})
+        self.jobs = _deep_merge(DEFAULTS['jobs'], merged.get('jobs') or {})
 
         backends: dict[str, BackendConf] = {}
         for name, conf in (merged.get('backends') or {}).items():

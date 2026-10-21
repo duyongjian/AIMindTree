@@ -72,13 +72,27 @@ async def run_task(task_code: str, request: Request) -> JSONResponse:
 
 
 async def _run_task_impl(task_code: str, request: Request) -> JSONResponse:
-    """执行一次结构化任务（原 ``run_task`` 函数体，逐行不变 + 成功埋点）。"""
-    state = request.app.state
+    """薄壳：读 body → 调 :func:`run_task_core` → 包 JSONResponse。
+
+    业务体在 :func:`run_task_core`（job worker ``/v1/jobs`` 也走它，零重复）。
+    """
+    body = await _read_body(request)
+    payload = await run_task_core(request.app.state, task_code, body)
+    return JSONResponse(payload)
+
+
+async def run_task_core(state, task_code: str, body: dict) -> dict:
+    """执行一次结构化任务，返回响应 payload  dict（**不**含 HTTP 外壳）。
+
+    调用方：``POST /v1/task/{code}`` 薄壳与 ``/v1/jobs`` 的 worker。
+    成功埋点写在这里（拿得到 backend / model / attempts）；失败埋点由调用方
+    的 ``except LlmError`` 负责（HTTP 薄壳见 :func:`run_task`，job worker 见
+    ``routers/jobs.py`` 的 executor）。
+    """
     config = state.config
     registry = state.registry
     config.maybe_reload()
 
-    body = await _read_body(request)
     variant = (body.get('variant') or '').strip() or None
 
     # 1) 提示词（未知任务 / 文件缺失 → unknown_task）
@@ -175,23 +189,21 @@ async def _run_task_impl(task_code: str, request: Request) -> JSONResponse:
         output_chars=len(content),
     )
 
-    return JSONResponse(
-        {
-            'task': meta.task,
-            'variant': meta.variant,
-            'content': content,
-            'parsed': parsed,
-            'backend': backend_conf.name,
-            'model_id': model_id,
-            'latency_ms': latency_ms,
-            'usage': usage,
-            'attempts': attempts,
-            'output_key': meta.output_key,
-            'prompt_sha1': meta.sha1,
-            'user': user,
-            'last_error': last_error,
-        }
-    )
+    return {
+        'task': meta.task,
+        'variant': meta.variant,
+        'content': content,
+        'parsed': parsed,
+        'backend': backend_conf.name,
+        'model_id': model_id,
+        'latency_ms': latency_ms,
+        'usage': usage,
+        'attempts': attempts,
+        'output_key': meta.output_key,
+        'prompt_sha1': meta.sha1,
+        'user': user,
+        'last_error': last_error,
+    }
 
 
 @router.post('/v1/task')
