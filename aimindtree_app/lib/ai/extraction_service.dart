@@ -29,7 +29,9 @@ import 'ai_provider.dart';
 import 'ai_service.dart';
 import 'ai_task.dart';
 import 'ai_task_router.dart';
+import 'app_config_service.dart';
 import 'clients/llm_server_client.dart';
+import 'unavailable_ai_provider.dart';
 
 /// 本地 LLM 服务配置（P0 引导用，开箱即跑）。
 ///
@@ -193,6 +195,13 @@ class ExtractionService {
 
     // === Settings ===
     final settings = SettingsRepository(database, secretStore: store);
+
+    // === App 下发配置（AC-16/17）：拉一次 + 幂等落库，永不抛异常 ===
+    // 放在 seedFromLocalIfEmpty 之前：下发的地址/后端/模型先落库，seed 才会
+    // 发现「已有 llm_server 行」而不再塞一条内置默认行。
+    final prefs = await SharedPreferences.getInstance();
+    await AppConfigService.fetchAndApply(settings, prefs);
+
     await settings.seedFromLocalIfEmpty(config);
 
     // === AI Provider ===
@@ -250,12 +259,13 @@ class ExtractionService {
       return null;
     }
 
-    final fallback = pickFallback();
-    if (fallback == null) {
-      throw StateError(
-        '没有可用的 AI provider。请到「设置」页添加并启用一个 LLM 服务'
-        '（默认 $kLlmServerDefaultBaseUrl），并确认 llm_server 已启动。',
-      );
+    // 没有可用行 → 用空对象（Null Object，D5）：**不抛 StateError**，
+    // bootstrap 照常返回五元组，App 照常可用，AI 入口走 Failure 分支。
+    final fallback = pickFallback() ?? UnavailableAiProvider();
+    if (fallback is UnavailableAiProvider) {
+      _log.w('AI 降级态：没有可用的 llm_server provider'
+          '（source=${AppConfigService.lastSource}），'
+          '笔记/画布/同步照常可用，AI 入口会提示未连接');
     }
 
     final router = AiTaskRouter(
@@ -270,7 +280,7 @@ class ExtractionService {
 
     // === Sync（T03）===
     final outbox = SyncOutboxRepo(database, deviceId: did);
-    final prefs = await SharedPreferences.getInstance();
+    // prefs 已在上面取过（bootstrap 前置的下发拉取也用它存 sha1），此处复用。
     final statusStore = SyncStatusStore(prefs);
     final syncConfig = SyncConfig(prefs: prefs, secretStore: store);
 

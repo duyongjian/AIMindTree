@@ -140,7 +140,7 @@ class _AppShellState extends State<AppShell> {
         onChanged: () {
           // 设置变更提示：当前 P0 需重启生效，给个 SnackBar 提示。
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Provider 设置已保存，重启 App 后生效。'),
+            content: Text('AI 服务配置已刷新。'),
             duration: Duration(seconds: 3),
           ));
         },

@@ -37,7 +37,12 @@ class AiService {
 
     final provider = await router.resolve(task);
     if (provider == null) {
-      return Failure(StateError('没有任何可用的 AI Provider（先在设置里配置）'));
+      // 设置页已不再有 Provider 增删改 UI（已迁至管理后台），所以引导文案
+      // 指向「AI 服务状态」与「管理后台」，不再指向已移除的配置页。
+      return Failure(StateError(
+        'AI 服务未连接。请在「设置 → AI 服务状态」点重新连接，'
+        '或打开管理后台检查配置。',
+      ));
     }
 
     try {
@@ -70,7 +75,10 @@ class AiService {
   }) async* {
     final provider = await router.resolve(task) ?? fallback;
     if (provider == null) {
-      throw StateError('没有任何可用的 AI Provider（先在设置里配置）');
+      throw StateError(
+        'AI 服务未连接。请在「设置 → AI 服务状态」点重新连接，'
+        '或打开管理后台检查配置。',
+      );
     }
     yield* provider.streamChat(
       query,
