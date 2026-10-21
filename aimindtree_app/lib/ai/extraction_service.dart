@@ -10,6 +10,7 @@ library;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/logger.dart';
+import '../core/remote_log_forwarder.dart';
 import '../core/result.dart';
 import '../core/secret_store.dart';
 import '../data/db/drift_database.dart';
@@ -363,6 +364,12 @@ class ExtractionService {
     // 任务队列：与 llm_server 同一信任域（只走本地 127.0.0.1）。
     final jobs = AiJobService(
       baseUrl: llmServerBaseUrl ?? kLlmServerDefaultBaseUrl,
+    );
+
+    // P0-5：把 App 侧日志抄送到本机 llm_server，使管理后台 M7 能看到 App 日志。
+    // 只与本机通信；服务未启动 / 代理异常一律 best-effort 吞掉，不影响业务。
+    AppLog.forwarder = RemoteLogForwarder(
+      llmServerBaseUrl ?? kLlmServerDefaultBaseUrl,
     );
 
     return (

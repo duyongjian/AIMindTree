@@ -191,7 +191,10 @@ class AiJob {
 /// 任务队列服务（单例，bootstrap 装配，AppShell 挂托盘）。
 class AiJobService {
   AiJobService({required this.baseUrl, HttpClient? client})
-      : _client = client ?? HttpClient();
+      // 只与本机 llm_server 通信：强制不走系统代理（否则本机 HTTP_PROXY 会
+      // 把 127.0.0.1 请求发往代理而「假连不上」，队列提交失败→回落同步→
+      // 后台 M10 看不到任务）。对齐服务端 trust_env=false。
+      : _client = client ?? (HttpClient()..findProxy = (Uri uri) => 'DIRECT');
 
   /// 形如 ``http://127.0.0.1:8787``（来自 llm_server provider 行 / 内置默认）。
   final String baseUrl;

@@ -76,7 +76,9 @@ class LlmServerClient implements AiProvider {
     HttpClient? client,
   })  : assert(baseUrl.isNotEmpty),
         blockingChat = blockingChat ?? kLlmServerBlockingChat,
-        _client = client ?? HttpClient();
+        // 只与本机 llm_server 通信：强制不走系统代理（否则本机 HTTP_PROXY 会
+        // 把 127.0.0.1 请求发往代理而「假连不上」，AI 调用/队列提交失败）。
+        _client = client ?? (HttpClient()..findProxy = (Uri uri) => 'DIRECT');
 
   @override
   final String id;
