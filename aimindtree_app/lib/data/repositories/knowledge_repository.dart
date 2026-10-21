@@ -495,6 +495,30 @@ class KnowledgeRepository {
     return rows.map(_kpFromRow).toList();
   }
 
+  /// 全部未删除笔记（按更新时间倒序）。
+  ///
+  /// 软删铁律：`deletedAt` 非空的必须滤掉（与 main.dart / canvas_page 的
+  /// 笔记列表同规则，此处收敛成仓库方法，供 AI 助手工具等复用）。
+  Future<List<Note>> listNotes() async {
+    final rows = await (_db.select(_db.notes)
+          ..where((t) => t.deletedAt.isNull()))
+        .get();
+    return rows
+        .map((r) => Note(
+              id: r.id,
+              notebookId: r.notebookId,
+              title: r.title,
+              contentMd: r.contentMd,
+              contentHash: r.contentHash,
+              updatedAt: r.updatedAt,
+              version: r.version,
+              deviceId: r.deviceId,
+              deletedAt: r.deletedAt,
+            ))
+        .toList()
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+  }
+
   Future<Note?> getNote(String id) async {
     final row = await (_db.select(_db.notes)..where((t) => t.id.equals(id)))
         .getSingleOrNull();

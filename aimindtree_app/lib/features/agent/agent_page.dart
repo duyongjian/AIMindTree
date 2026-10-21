@@ -16,6 +16,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import '../../ai/ai_task.dart';
+import '../../ai/agent_tools.dart';
 import '../../ai/auto_graph_service.dart';
 import '../../ai/extraction_service.dart';
 import '../../canvas/layout_autoplace.dart';
@@ -25,6 +26,19 @@ import '../../data/db/drift_database.dart';
 import '../../data/models/knowledge_tree.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
+
+/// 工具协议（**客户端透传**，与 ``_runDetection`` 同款模式）：
+/// 工具目录是 Dart 侧动态生成的，放不进服务端提示词文件；服务端主形态
+/// ``t5_ask.md`` 保证「模型没按协议输出」时退化为正常问答，不会崩。
+/// 协议要求模型要么输出**一行工具调用 JSON**，要么直接自然语言回答。
+const String _kToolProtocol = '''
+你可以使用下列「只读工具」查询用户自己的知识库（知识树 / 知识点 / 笔记 / 前置关系）：
+- 需要数据时：只输出一行 JSON，形如 {"tool":"工具名","args":{...}}；
+  不要任何解释、不要 ``` 围栏、不要输出思考过程。
+- 不需要工具时：直接用自然语言回答，不要输出 JSON。
+- 工具只能读取，不能修改任何数据。
+- tree_id / point_id / note_id 必须是工具结果里出现过的真实 id，不要臆造；
+  传入不存在的 id 会返回错误，请改正参数或直接说明查不到。''';
 
 /// 对话中检测到的「知识点建议」：分「需要的知识点」与「薄弱点」两类。
 class AgentDetectedItem {
@@ -89,9 +103,19 @@ class _AgentPageState extends State<AgentPage> {
   List<KnowledgeTree> _trees = const <KnowledgeTree>[];
   KnowledgeTree? _activeTree;
 
+  /// 知识库只读工具集（T5 问答可查询用户自己的数据；权限字段预留）。
+  late final AgentToolset _tools;
+
+  /// 输入栏上方的瞬态状态（思考中 / 正在查某个工具）。
+  String _status = '';
+
   @override
   void initState() {
     super.initState();
+    _tools = AgentToolset.create(
+      repo: widget.service.repo,
+      trees: widget.service.trees,
+    );
     _loadTrees();
   }
 
@@ -127,24 +151,71 @@ class _AgentPageState extends State<AgentPage> {
     setState(() {
       _busy = true;
       _error = null;
+      _status = 'AI 正在思考…';
       _history = [..._history, _Msg(role: 'user', content: text)];
     });
     _input.clear();
     _scrollToEnd();
 
-    final ctx = _activeTree == null
-        ? ''
-        : '（你正在帮用户在知识树「${_activeTree!.name}」里补全知识点，'
-            '回答时请围绕这张树的脉络展开。）\n\n';
+    // 工具循环：每一轮都是一次完整的 T5 问答；整轮输出是合法工具调用 →
+    // 就地执行（只读）并把结果并入下一轮；否则即为最终答案。
+    // 轮数上限 kAgentToolMaxRounds 防模型反复调用工具不回答。
+    final toolLog = StringBuffer();
+    for (var round = 1; round <= kAgentToolMaxRounds; round++) {
+      final buf = StringBuffer();
+      var convId = _conversationId;
+      try {
+        await for (final c in widget.service.ai.chat(
+          AiTask.t5Ask,
+          _composeQuery(text, toolLog.toString()),
+          conversationId: _conversationId,
+        )) {
+          if (c.conversationId != null) convId = c.conversationId;
+          if (c.delta != null) buf.write(c.delta);
+        }
+      } on Object catch (e) {
+        if (!mounted) return;
+        setState(() {
+          _error = _friendlyError(e);
+          _busy = false;
+          _status = '';
+        });
+        return;
+      }
+      _conversationId = convId;
 
+      final call = AgentToolset.parseCall(buf.toString());
+      if (call == null) {
+        // 最终答案（自然语言）。
+        await _finishWithAnswer(buf.toString());
+        return;
+      }
+
+      // 工具调用：执行 + 回显（用户看得见 AI 查了什么）。
+      if (!mounted) return;
+      setState(() => _status = '🔧 正在查询知识库（${call.name}）…');
+      final result = await _tools.dispatch(call.name, call.args);
+      toolLog.writeln('【第 $round 轮工具调用】${call.name} ${jsonEncode(call.args)}');
+      toolLog.writeln('【第 $round 轮工具结果】$result');
+      if (!mounted) return;
+      setState(() {
+        _history = [
+          ..._history,
+          _Msg(role: 'tool', content: '🔧 ${call.name} → ${cutText(result, 140)}'),
+        ];
+      });
+      _scrollToEnd();
+    }
+
+    // 轮数用尽：最后再问一次，明确禁止工具、基于已有结果直接作答；
+    // 这一轮的输出一律当最终答案（即使形状像工具调用也不再执行）。
     final buf = StringBuffer();
     try {
       await for (final c in widget.service.ai.chat(
         AiTask.t5Ask,
-        '$ctx$text',
+        _composeQuery(text, toolLog.toString(), forceAnswer: true),
         conversationId: _conversationId,
       )) {
-        if (c.conversationId != null) _conversationId = c.conversationId;
         if (c.delta != null) buf.write(c.delta);
       }
     } on Object catch (e) {
@@ -152,15 +223,48 @@ class _AgentPageState extends State<AgentPage> {
       setState(() {
         _error = _friendlyError(e);
         _busy = false;
+        _status = '';
       });
       return;
     }
+    await _finishWithAnswer(buf.toString());
+  }
 
-    final answer = buf.toString();
+  /// 拼接带工具协议的 query（透传模式：上下文全在 user message 里）。
+  ///
+  /// [forceAnswer] = 工具轮数用尽后的收尾轮：追加「禁止再调用工具」。
+  String _composeQuery(String text, String toolLog, {bool forceAnswer = false}) {
+    final ctx = _activeTree == null
+        ? ''
+        : '（你正在帮用户在知识树「${_activeTree!.name}」里补全知识点，'
+            '回答时请围绕这张树的脉络展开。）\n\n';
+    final b = StringBuffer()
+      ..write(ctx)
+      ..write(_kToolProtocol)
+      ..write('\n\n【可用工具】\n')
+      ..write(_tools.catalogText());
+    if (toolLog.isNotEmpty) {
+      b
+        ..write('\n\n【已执行的工具调用与结果】\n')
+        ..write(toolLog)
+        ..write('\n（工具结果已给出。还缺关键信息才可以再调用一个工具，'
+            '否则请直接用自然语言给出最终回答，不要输出 JSON。）');
+    }
+    b.write('\n\n【用户问题】\n$text\n');
+    if (forceAnswer) {
+      b.write('\n（工具调用次数已达上限：禁止再调用工具，必须基于以上信息直接回答；'
+          '信息不足就直说，不要编造。）');
+    }
+    return b.toString();
+  }
+
+  /// 收尾：落最终答案 + 跑每轮检测。
+  Future<void> _finishWithAnswer(String answer) async {
     if (!mounted) return;
     setState(() {
       _history = [..._history, _Msg(role: 'assistant', content: answer)];
       _busy = false;
+      _status = '';
     });
     _scrollToEnd();
 
@@ -603,32 +707,45 @@ class _AgentPageState extends State<AgentPage> {
           decoration: BoxDecoration(
             border: Border(top: BorderSide(color: Colors.grey.shade300)),
           ),
-          child: Row(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Expanded(
-                child: TextField(
-                  controller: _input,
-                  minLines: 1,
-                  maxLines: 4,
-                  onSubmitted: (_) => _send(),
-                  decoration: const InputDecoration(
-                    border: OutlineInputBorder(),
-                    hintText: '问：导数和微分到底有什么区别？',
-                    isDense: true,
-                  ),
+              // 瞬态状态：思考中 / 正在查某个工具（工具循环的进度可视化）。
+              if (_busy && _status.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(left: 4, bottom: 6),
+                  child: Text(_status,
+                      style: const TextStyle(fontSize: 12, color: Colors.teal)),
                 ),
-              ),
-              const SizedBox(width: 8),
-              IconButton.filled(
-                onPressed: _busy ? null : _send,
-                icon: _busy
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.send),
-                tooltip: '发送',
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _input,
+                      minLines: 1,
+                      maxLines: 4,
+                      onSubmitted: (_) => _send(),
+                      decoration: const InputDecoration(
+                        border: OutlineInputBorder(),
+                        hintText: '问：导数和微分到底有什么区别？',
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton.filled(
+                    onPressed: _busy ? null : _send,
+                    icon: _busy
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.send),
+                    tooltip: '发送',
+                  ),
+                ],
               ),
             ],
           ),
@@ -678,7 +795,8 @@ class _AgentPageState extends State<AgentPage> {
   }
 }
 
-/// 对话气泡。
+/// 对话气泡。role='user' 用户（青色右对齐）；'tool' 工具调用回显
+/// （小号灰色左对齐，不带气泡）；其余为 AI 回答。
 class _Bubble extends StatelessWidget {
   const _Bubble({required this.role, required this.content});
   final String role;
@@ -686,6 +804,18 @@ class _Bubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (role == 'tool') {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 4),
+          child: SelectableText(
+            content,
+            style: const TextStyle(fontSize: 11, color: Colors.grey),
+          ),
+        ),
+      );
+    }
     final isUser = role == 'user';
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
