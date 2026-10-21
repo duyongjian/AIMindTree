@@ -1,0 +1,143 @@
+%% AIMindTree 管理后台增量设计 —— 类图
+%% 源：docs/DESIGN_ADMIN_CONSOLE.md §7
+classDiagram
+    class BackendConf {
+        <<frozen dataclass>>
+        +str name
+        +str type
+        +str protocol
+        +str base_url
+        +str api_key_env
+        +str default_model
+        +tuple models
+        +str anthropic_path
+        +str openai_path
+        +str health_path
+        +Mapping extra
+        +path_for(protocol) str
+        +model() str
+    }
+
+    class Config {
+        +dict server
+        +str default_backend
+        +str default_model
+        +dict task_backends
+        +dict task_models
+        +dict timeouts
+        +dict retry
+        +dict backends
+        +dict app
+        +dict sync
+        -dict _settings
+        -dict _settings_api_keys
+        +load() None
+        +maybe_reload() bool
+        +backend(name) BackendConf
+        +task_route(task) tuple
+        +app_timeouts() dict
+        +save_settings(data) dict
+        +resolve_api_key(conf) str
+        +mask(secret) str
+    }
+
+    class TaskRegistry {
+        +PromptStore store
+        +Config config
+        +get(task, variant) PromptMeta
+        +require_inputs(meta, inputs) dict
+        +resolve_backend(task, override) BackendConf
+        +resolve_model(task) str?
+    }
+
+    class StatsRing {
+        <<module core.stats>>
+        +int MAX_ENTRIES$ = 500
+        +record(**fields) None
+        +snapshot(window_s) dict
+        +reset() None
+        +size() int
+    }
+
+    class AppConfigBuilder {
+        <<module core.app_config>>
+        +int SCHEMA_VERSION$ = 1
+        +str SERVER_VERSION$ = 0.1.0
+        +build_app_config(config, server_version, updated_at) dict
+        +config_sha1(payload) str
+    }
+
+    class AppConfigSnapshot {
+        <<Dart>>
+        +int schema
+        +String serviceName
+        +String baseUrl
+        +String backend
+        +String model
+        +String consoleUrl
+        +Map timeouts
+        +Map taskBackends
+        +SyncPush? sync
+        +String configSha1
+        +String updatedAt
+    }
+
+    class AppConfigService {
+        <<Dart static>>
+        +AppConfigSnapshot? last$
+        +AppConfigSource lastSource$
+        +parse(Object?) AppConfigSnapshot
+        +shouldWrite(lastSha1, snap, row, name, base, backend, model) bool
+        +fetch(candidates, perTry, totalBudget) Future~AppConfigSource~
+        +fetchAndApply(repo, prefs) Future
+    }
+
+    class UnavailableAiProvider {
+        <<Dart>>
+        +String reason
+        +runTask(task, inputs) Future
+        +streamChat(query) Stream~AiChunk~
+        +dispose() void
+    }
+
+    class AiProviderRow {
+        <<Drift 生成，结构不改>>
+        +String id
+        +String name
+        +String type
+        +String protocol
+        +String baseUrl
+        +String models
+        +bool enabled
+        +bool isDefault
+    }
+
+    class SettingsRepository {
+        <<Dart，仅复用不新增表>>
+        +allProviders() Future~List~
+        +addLlmServerProvider(...) Future~Row~
+        +updateLlmServerProvider(id, ...) Future~Row?~
+        +setEnabled(id, bool) Future
+        +seedFromLocalIfEmpty(cfg) Future
+        +testLlmServer(baseUrl) Future~String?~
+    }
+
+    class AiServiceStatusSection {
+        <<Dart Widget>>
+        +SettingsRepository settings
+        -_probe() Future
+        -_reconnect() Future
+        -_copyConsoleUrl() void
+    }
+
+    Config "1" o-- "*" BackendConf : backends
+    Config ..> BackendConf : replace() 重建（D1）
+    TaskRegistry --> Config : config
+    AppConfigBuilder --> Config : 只读（白名单字段）
+    AppConfigService --> SettingsRepository : 落库（4 个现有方法）
+    AppConfigService ..> AppConfigSnapshot : parse()
+    AppConfigService ..> UnavailableAiProvider : 失败时由 bootstrap 装配
+    SettingsRepository --> AiProviderRow : 读写 ai_providers（结构零改动）
+    AiServiceStatusSection --> SettingsRepository : 读行 + 探活
+    AiServiceStatusSection ..> AppConfigSnapshot : 读 AppConfigService.last
+    StatsRing ..> Config : 无依赖（独立模块）

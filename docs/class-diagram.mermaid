@@ -1,0 +1,189 @@
+%% 来源：docs/DESIGN_LLM_SERVER.md（AIMindTree 自研 LLM Server 替换 Dify）
+%% 本文件为 DESIGN_LLM_SERVER.md §2.2 / §3.1 的类图提取件，以 .md 为准。
+
+%% ============ ① 服务端（Python）关键类 ============
+classDiagram
+    class Message {
+        +str role
+        +str content
+    }
+    class Completion {
+        +str text
+        +str model_id
+        +dict usage
+        +bool truncated
+    }
+
+    class LLMBackend {
+        <<abstract>>
+        +str name
+        +BackendConf conf
+        +complete(list messages, float temperature, int max_tokens, bool json_mode, float timeout_s) Completion
+        +stream_complete(...) AsyncIterator~str~
+        +health(float timeout_s) BackendHealth
+    }
+
+    class BaseProtocol {
+        <<abstract>>
+        +str base_url
+        +str api_key
+        +complete(...) Completion
+        +stream_complete(...) AsyncIterator~str~
+        +list_models() list~str~
+    }
+    class OpenAICompatProtocol {
+        +str path = /v1/chat/completions
+        +str models_path = /v1/models
+        -_build_body()
+        -_parse_sse()
+    }
+    class AnthropicCompatProtocol {
+        +str path = /anthropic/v1/messages
+        -_build_body()
+        -_parse_sse()
+    }
+
+    class OllamaBackend {
+        +str health_path = /api/tags
+    }
+    class MiniMaxBackend {
+        +str protocol_name
+    }
+    class OpenAICompatBackend {
+    }
+
+    class PromptMeta {
+        +str task
+        +str variant
+        +bool structured
+        +bool json_output
+        +float temperature
+        +int max_tokens
+        +list inputs
+        +str output_key
+        +str preferred_backend
+        +Path path
+        +str system
+        +str user
+        +float mtime
+        +int size
+        +str sha1
+        +render(dict values) list~dict~
+    }
+    class PromptStore {
+        +Path dir
+        +load() tuple
+        +reload() tuple
+        +get(str task, str variant) PromptMeta
+        +list() list~PromptMeta~
+        +save(str task, str variant, str content) Path
+    }
+    class TaskRegistry {
+        +PromptStore store
+        +Config config
+        +validate_inputs(PromptMeta, dict) list~str~
+        +resolve_backend(str task, str override) str
+        +get(str task, str variant) PromptMeta
+    }
+    class JsonRepair {
+        +repair(str raw) tuple
+        +strip_think_blocks(str s) str
+        -_try_decode(str s)
+        -_scan_json(str s)
+        -_salvage(str s, int start)
+        -_stack_at(str s, int, int)
+        -_match_end(str s, int) int
+    }
+    class LlmError {
+        +str code
+        +str message
+        +str backend
+        +bool retryable
+        +int http_status
+        +to_dict() dict
+    }
+    class Config {
+        +dict server
+        +str default_backend
+        +dict task_backends
+        +dict timeouts
+        +dict retry
+        +dict backends
+        +maybe_reload() bool
+        +resolve_api_key(BackendConf) str
+    }
+
+    LLMBackend <|-- OllamaBackend
+    LLMBackend <|-- MiniMaxBackend
+    LLMBackend <|-- OpenAICompatBackend
+    BaseProtocol <|-- OpenAICompatProtocol
+    BaseProtocol <|-- AnthropicCompatProtocol
+    OllamaBackend o-- OpenAICompatProtocol
+    MiniMaxBackend o-- BaseProtocol
+    OpenAICompatBackend o-- OpenAICompatProtocol
+    TaskRegistry --> PromptStore
+    PromptStore --> PromptMeta
+    TaskRegistry --> Config
+    LLMBackend ..> LlmError : raise
+
+%% ============ ② 客户端（Dart）关键类 ============
+
+classDiagram
+    class AiProvider {
+        <<abstract>>
+        +String id
+        +String protocol
+        +runTask(AiTask task, Map inputs) Future~AiTaskResult~
+        +streamChat(String query) Stream~AiChunk~
+        +dispose() void
+    }
+
+    class LlmServerClient {
+        +String id
+        +String baseUrl
+        +String backend
+        +String model
+        -HttpClient _client
+        +String protocol = "llm_server"
+        +runTask(AiTask task, Map inputs) Future~AiTaskResult~
+        +streamChat(String query) Stream~AiChunk~
+        +dispose() void
+        -_postJson(String path, Map body, Duration timeout) Future~Map~
+        -_openSse(String path, Map body, Duration timeout) Stream~Map~
+        -_parseChunk(String chunk) AiChunk
+    }
+
+    class StructuredText {
+        <<utility>>
+        +parse(String raw) Object
+        +stripThinkBlocks(String s) String
+    }
+
+    class LlmServerException {
+        +String code
+        +String message
+        +bool retryable
+        +int statusCode
+        +toString() String
+    }
+
+    class AiTaskResult {
+        +String content
+        +Object parsed
+        +Map usage
+        +int latencyMs
+        +String modelId
+    }
+    class AiChunk {
+        +String delta
+        +Object structured
+        +Map usage
+        +String conversationId
+        +bool done
+    }
+
+    AiProvider <|.. LlmServerClient : implements
+    LlmServerClient ..> StructuredText : parsed 为空时兜底
+    LlmServerClient ..> LlmServerException : 失败抛出
+    LlmServerClient ..> AiTaskResult : 构造
+    LlmServerClient ..> AiChunk : yield

@@ -1,0 +1,78 @@
+%% 来源：docs/DESIGN_LLM_SERVER.md（AIMindTree 自研 LLM Server 替换 Dify）
+%% 本文件为 DESIGN_LLM_SERVER.md §1.2 / §1.3 的时序图提取件，以 .md 为准。
+
+%% ============ ① 结构化任务（T1 知识点提取）============
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant ES as ExtractionService
+    participant AI as AiService
+    participant RT as AiTaskRouter
+    participant C as LlmServerClient
+    participant S as LLM Server<br/>routers/tasks.py
+    participant PS as PromptStore
+    participant B as OllamaBackend<br/>(openai_compat)
+    participant JR as json_repair
+
+    U->>ES: extract(noteContent)
+    ES->>ES: repo.saveNote(content)
+    ES->>AI: run(T1, {note_text})
+    AI->>RT: resolve(T1)
+    RT-->>AI: LlmServerClient 实例
+    AI->>C: runTask(T1, inputs, timeout=120s)
+    C->>S: POST /v1/task/T1<br/>{inputs, backend:null, model:null, timeout_s:120}
+    S->>PS: get("T1")
+    alt 提示词缺失
+        PS-->>S: PromptNotFound
+        S-->>C: 400 {error:{code:"unknown_task"}}
+        C-->>AI: throw LlmServerException
+    end
+    PS-->>S: PromptMeta(system, user, temperature, output_key)
+    S->>S: render({{note_text}}) → messages[]
+    S->>B: complete(messages, temperature, max_tokens)
+    B->>B: POST {base}/v1/chat/completions
+    B-->>S: text（可能含 <think> / 围栏 / 截断）
+    S->>JR: repair(text)
+    JR-->>S: parsed | None
+    alt parsed 为 None 且 retry>0
+        S->>B: complete(messages + “上次输出不是合法 JSON”)
+        B-->>S: text'
+        S->>JR: repair(text')
+    end
+    S-->>C: 200 {task, content, parsed, backend, model_id, latency_ms, usage, attempts}
+    C->>C: parsed ?? StructuredText.parse(content)（双保险）
+    C-->>AI: AiTaskResult(content, parsed)
+    AI-->>ES: Success(AiTaskResult)
+    ES->>ES: _mapToRaw → saveExtracted（锚点校验）
+    ES-->>U: ExtractionSaveResult
+
+%% ============ ② chat 任务（T5 流式，含 detect 变体）============
+
+sequenceDiagram
+    autonumber
+    participant P as agent_page / teacher_page
+    participant AI as AiService
+    participant C as LlmServerClient
+    participant S as LLM Server<br/>routers/chat.py
+    participant PS as PromptStore
+    participant B as MiniMaxBackend<br/>(anthropic_compat)
+    participant JR as json_repair
+
+    P->>AI: chat(T5, prompt, variant:'detect')
+    AI->>C: streamChat(prompt, task:T5, variant:'detect', conversationId)
+    C->>S: POST /v1/chat<br/>{task:"T5", variant:"detect", query, stream:true}
+    S->>PS: get("T5", variant="detect")
+    PS-->>S: t5_ask__detect.md（json_output:true）
+    S->>B: stream_complete(messages)
+    B->>B: POST {base}/anthropic/v1/messages (stream)
+    loop 每个上游 chunk
+        B-->>S: text delta
+        S-->>C: SSE `data: {"delta":"…"}`
+        C-->>P: AiChunk(delta)
+    end
+    B-->>S: [DONE]
+    S->>JR: repair(full_buffer)
+    JR-->>S: parsed | None
+    S-->>C: SSE `data: {"done":true, conversation_id, content, parsed, usage, backend, model_id}`
+    C-->>P: AiChunk(done:true, conversationId, structured:parsed)
+    P->>P: _parseDetection(buffer)（既有逻辑，不变）

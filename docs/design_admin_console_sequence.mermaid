@@ -1,0 +1,80 @@
+%% AIMindTree 管理后台增量设计 —— 调用流
+%% 源：docs/DESIGN_ADMIN_CONSOLE.md §8
+%% 流程①：管理员改配置 → 热重载 → App 下次启动生效
+sequenceDiagram
+    autonumber
+    actor A as 管理员
+    participant UI as static/（原生 JS）
+    participant API as routers/admin.py
+    participant CFG as core/config.py
+    participant ST as settings.json
+    participant APP as App（下次启动）
+    participant DB as ai_providers
+
+    A->>UI: 打开 http://127.0.0.1:8787/admin
+    UI->>API: GET /v1/admin/config + /health + /v1/admin/stats
+    API-->>UI: 配置（掩码）/ 健康 / 统计
+    A->>UI: M2 改 ollama.base_url + 填 Key →「保存」
+    UI->>API: POST /v1/admin/config {backends:{ollama:{base_url, api_key}}, app:{...}}
+    API->>CFG: save_settings(canonical)
+    CFG->>ST: 写盘（不碰 config.yaml，C10）
+    API->>CFG: load() → _load_settings()
+    CFG->>CFG: replace(BackendConf, base_url=...) 写回 self.backends（D1）
+    API->>API: clear_backends()（旧实例含旧 Key 失效）
+    API-->>UI: _config_summary()（掩码，含新 base_url）
+    UI-->>A: 已保存，已热重载
+
+    APP->>APP: 重启
+    APP->>API: GET /v1/app/config（无鉴权）
+    API->>CFG: build_app_config(config)
+    CFG-->>API: 13 字段白名单（无密钥）
+    API-->>APP: {base_url, backend, model, service_name, config_sha1, ...}
+    APP->>APP: shouldWrite(sha1, row) ？
+    alt 变了 / 首次
+        APP->>DB: updateLlmServerProvider / addLlmServerProvider + setEnabled
+    else 相同
+        APP->>APP: 跳过写库（不刷新 updated_at）
+    end
+    APP-->>A: 设置页状态区显示新服务名 / 后端 / 模型
+
+%% 流程②：App 启动引导 + 降级
+sequenceDiagram
+    autonumber
+    participant M as main()
+    participant B as bootstrap
+    participant S as AppConfigService
+    participant R as SettingsRepository
+    participant H as 候选服务
+    participant DB as ai_providers
+
+    M->>B: await bootstrap()
+    B->>R: allProviders() → 候选地址（去重）
+    loop 候选（总预算 8s / 单地址 3s）
+        B->>S: GET {c}/v1/app/config
+        S->>H: HTTP（no auth）
+        alt 200 且 schema==1
+            H-->>S: JSON
+            S->>S: parse() → snapshot(source=pushed)
+            Note over B: 命中即 break
+        else 404/405
+            H-->>S: 404
+            Note over S: source=legacyService + break
+        else 失败
+            H-->>S: 超时/拒绝/坏JSON
+            Note over B: 试下一个候选
+        end
+    end
+    alt 全部失败
+        S-->>B: snapshot(source=unreachable，内置默认)
+    end
+    B->>S: apply(repo, prefs)
+    S->>DB: sha1 相同且四列一致 → 跳过；否则写入（复用现有方法）
+    B->>R: seedFromLocalIfEmpty(cfg)
+    B->>B: 实例化 enabled 行
+    alt 有可用行
+        B-->>M: 五元组（fallback=LlmServerClient）
+    else 无
+        B->>B: fallback = UnavailableAiProvider()（不抛 StateError）
+        B-->>M: 五元组（AI 入口走 Failure 分支，App 照常可用）
+    end
+    M->>M: runApp
