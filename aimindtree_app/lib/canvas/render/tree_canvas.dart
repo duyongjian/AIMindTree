@@ -446,6 +446,10 @@ class TreeCanvasState extends State<TreeCanvas> {
       // 所以 (0,0) 视为「还没布局」，交由布局引擎铺开并固化。
       final sp = widget.savedPositions[n.kpId];
       if (sp != null && (sp.x != 0 || sp.y != 0)) continue;
+      // 库里本就是 (0,0) 且引擎算出来还是同一个点：写回一遍完全相同的值是
+      // **无意义落库**（白跑一次 DB 往返，还会污染「手势不该落库」的观测），
+      // 直接跳过。引擎给出不同坐标时（真正的新点）照常固化。
+      if (sp != null && sp.x == n.x && sp.y == n.y) continue;
       if (!_persistedIds.add(n.kpId)) continue;
       onMove(n.kpId, n.x, n.y);
     }

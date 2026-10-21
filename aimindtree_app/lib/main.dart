@@ -16,6 +16,7 @@ import 'features/notes/note_editor_page.dart';
 import 'features/teacher/teacher_page.dart';
 import 'features/settings/settings_page.dart';
 import 'ui/extract_screen.dart';
+import 'ui/job_tray.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -100,12 +101,25 @@ class _AppShellState extends State<AppShell> {
   }
 
   Future<void> _openTeacher(KnowledgePoint kp) async {
+    // B4：同点的老师模式会话已开着（或该 kp 锁被别的任务占着）→ 挡住，
+    // 不静默失败：toast 说人话 + 展开托盘让用户看到是谁占着。
+    if (widget.service.jobs.isLocked('kp:${kp.id}')) {
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.clearSnackBars();
+      messenger.showSnackBar(const SnackBar(
+        content: Text('该知识点的老师模式会话已打开，完成或关闭后再试'),
+        duration: Duration(seconds: 2),
+      ));
+      widget.service.jobs.requestExpandTray();
+      return;
+    }
     await Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => TeacherPage(
         kp: kp,
         sessions: _sessions,
         ai: widget.service.ai,
         repo: widget.service.repo,
+        jobs: widget.service.jobs,
       ),
     ));
   }
@@ -148,7 +162,13 @@ class _AppShellState extends State<AppShell> {
       AgentPage(service: widget.service, db: widget.db),
     ];
     return Scaffold(
-      body: IndexedStack(index: _index, children: pages),
+      // 任务托盘置顶（方案 §5.2）：折叠 4px 细条不挡内容，5 Tab 常驻可见。
+      body: Column(
+        children: [
+          JobTray(jobs: widget.service.jobs),
+          Expanded(child: IndexedStack(index: _index, children: pages)),
+        ],
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: (i) {

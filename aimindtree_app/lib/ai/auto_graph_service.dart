@@ -132,6 +132,7 @@ class AutoGraphService {
 
   // ============ 自动连线（T3） ============
 
+  /// 自动连线（**同步路径**，开关关闭时用）：取点 → 调 T3 → 落库。
   Future<Result<AutoLinkResult>> autoLink(String treeId) async {
     try {
       final kpIds = await trees.memberPointIds(treeId);
@@ -146,22 +147,7 @@ class AutoGraphService {
         ));
       }
 
-      // T3 工作流的 `points` 输入字段是 string 类型（部署态），必须把知识点列表
-      // 序列化成 JSON 字符串再发；直接发 List/Map 会被 Dify 输入表单以
-      // "must be a string" 拒绝（400）。模型在 prompt 里能直接解析这段 JSON 文本。
-      final inputs = <String, dynamic>{
-        'points': jsonEncode([
-          for (final p in points)
-            {
-              'id': p.id,
-              'name': p.name,
-              'type': p.type.name,
-              'definition': p.definition,
-            }
-        ]),
-      };
-
-      final aiRes = await _run(AiTask.t3Prerequisite, inputs);
+      final aiRes = await _run(AiTask.t3Prerequisite, _linkInputs(points));
       if (aiRes is! Success<AiTaskResult> || aiRes.value.parsed is! Map) {
         // 工作流不可用 / 解析失败 → 直接报错，不静默走本地启发式（用户要求只跑工作流）。
         final why = switch (aiRes) {
@@ -174,20 +160,73 @@ class AutoGraphService {
         return Failure(StateError(why));
       }
       // 只接受工作流结果；AI 没给出边就返回空（不再本地启发式兜底）。
-      final edges = _parsePrereqEdges(aiRes.value.parsed, points);
-      final usedFallback = false;
-
-      final created = await _mergeAndPersist(points, edges);
-      return Success(AutoLinkResult(
-        created: created,
-        total: edges.length,
-        edges: edges,
-        usedFallback: usedFallback,
-      ));
+      return await _finishLink(points, aiRes.value.parsed);
     } on Object catch (e, s) {
       _log.e('自动连线失败', error: e, stackTrace: s);
       return Failure(e, s);
     }
+  }
+
+  /// 队列路径 · 提交时：取当前树成员 → 构造 T3 job 的 inputs。
+  /// 成员不足 2 个返回 null（调用方直接提示，不必提交）。
+  Future<Map<String, dynamic>?> linkInputsFor(String treeId) async {
+    final kpIds = await trees.memberPointIds(treeId);
+    final points = await repo.pointsByIds(kpIds);
+    if (points.length < 2) return null;
+    return _linkInputs(points);
+  }
+
+  /// 队列路径 · 完成时：把 T3 job 的 ``parsed`` 落库（去重 / 防环 / 单后继）。
+  Future<Result<AutoLinkResult>> linkFromParsed(
+    String treeId,
+    Object? parsed,
+  ) async {
+    try {
+      final kpIds = await trees.memberPointIds(treeId);
+      final points = await repo.pointsByIds(kpIds);
+      if (points.length < 2) {
+        return Success(AutoLinkResult(
+          created: 0,
+          total: 0,
+          edges: const <PrerequisiteEdge>[],
+          usedFallback: false,
+          note: '知识点不足 2 个，无法自动连线',
+        ));
+      }
+      return await _finishLink(points, parsed);
+    } on Object catch (e, s) {
+      _log.e('自动连线失败', error: e, stackTrace: s);
+      return Failure(e, s);
+    }
+  }
+
+  /// T3 的 ``points`` 输入（部署态工作流要求 string，须序列化成 JSON 字符串）。
+  Map<String, dynamic> _linkInputs(List<KnowledgePoint> points) =>
+      <String, dynamic>{
+        'points': jsonEncode([
+          for (final p in points)
+            {
+              'id': p.id,
+              'name': p.name,
+              'type': p.type.name,
+              'definition': p.definition,
+            }
+        ]),
+      };
+
+  /// 解析 AI 边 + 合并去重防环落库，返回连线结果。
+  Future<Result<AutoLinkResult>> _finishLink(
+    List<KnowledgePoint> points,
+    Object? parsed,
+  ) async {
+    final edges = _parsePrereqEdges(parsed, points);
+    final created = await _mergeAndPersist(points, edges);
+    return Success(AutoLinkResult(
+      created: created,
+      total: edges.length,
+      edges: edges,
+      usedFallback: false,
+    ));
   }
 
   /// 按分组连线（用户诉求：先按逻辑分层，再按组序连线）。

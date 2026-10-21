@@ -12,6 +12,9 @@
 ///
 /// 设计要点：作业**不产生知识点**，题目本身也不是知识实体，所以出题不受「锚点铁律」
 /// 约束；但 prompt 会把知识点的 `sourceQuote` 一并喂给模型，作为「不脱离原文」的唯一防线。
+///
+/// B4 互斥：会话打开期间持 `homework:{id}` 锁（编辑）或 `homework:new:{canvasId}`
+/// 锁（新建，入口处挡「同树再开一个布置作业」），托盘同步显示一行计时。
 library;
 
 import 'dart:convert';
@@ -19,6 +22,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../ai/ai_job_service.dart';
 import '../../ai/ai_service.dart';
 import '../../ai/ai_task.dart';
 import '../../core/id.dart';
@@ -35,6 +39,7 @@ class HomeworkPage extends StatefulWidget {
     required this.db,
     required this.canvasId,
     required this.points,
+    required this.jobs,
     this.existingId,
   });
 
@@ -48,6 +53,9 @@ class HomeworkPage extends StatefulWidget {
 
   /// 出题上下文：被选中的薄弱点（名称 / 定义 / 原文出处）。
   final List<KnowledgePoint> points;
+
+  /// 任务队列服务（B4：会话持 `homework:{id}` 锁 + 托盘计时）。
+  final AiJobService jobs;
 
   /// 非空 → 编辑已有作业（从库里载入题目）。
   final String? existingId;
@@ -69,16 +77,36 @@ class _HomeworkPageState extends State<HomeworkPage> {
   String? _error;
   bool _withAnswer = true;
 
+  /// B4：交互会话 id（持 `homework:{id}` 锁；dispose 时释放）。
+  ///
+  /// 编辑已有作业锁作业本身；新作业还没 id，退而锁「该树的新作业会话」，
+  /// 防止同一棵树同时开两个「布置作业」。
+  String _sessionTicket = '';
+
   @override
   void initState() {
     super.initState();
+    final names = widget.points.map((p) => p.name).take(2).join('、');
+    _sessionTicket = widget.jobs.holdInteractive(
+      widget.existingId != null
+          ? 'homework:${widget.existingId}'
+          : 'homework:new:${widget.canvasId}',
+      label: widget.existingId != null ? '编辑作业（$names）' : '布置作业（$names）',
+    );
     if (widget.existingId != null) _loadExisting();
   }
 
   @override
   void dispose() {
+    widget.jobs.releaseInteractive(_sessionTicket);
     _titleCtrl.dispose();
     super.dispose();
+  }
+
+  /// 托盘文案联动：出题中 ↔ 会话进行中。
+  void _ticket(String message) {
+    if (_sessionTicket.isEmpty) return;
+    widget.jobs.setInteractiveMessage(_sessionTicket, message);
   }
 
   Future<void> _loadExisting() async {
@@ -182,6 +210,7 @@ class _HomeworkPageState extends State<HomeworkPage> {
       _error = null;
       _streaming = '';
     });
+    _ticket('正在出题…');
     final buf = StringBuffer();
     try {
       await for (final c in widget.ai.chat(AiTask.t8Quiz, _buildPrompt())) {
@@ -197,6 +226,7 @@ class _HomeworkPageState extends State<HomeworkPage> {
         _streaming = '';
         _error = _friendlyError(e);
       });
+      _ticket('会话进行中');
       return;
     }
     final parsed = _parseQuestions(buf.toString());
@@ -211,6 +241,7 @@ class _HomeworkPageState extends State<HomeworkPage> {
       _busy = false;
       _streaming = '';
     });
+    _ticket('会话进行中');
   }
 
   String _friendlyError(Object e) {

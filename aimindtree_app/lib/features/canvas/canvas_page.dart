@@ -12,7 +12,10 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../ai/ai_job_service.dart' show kAiJobQueueEnabled, AiJob;
+import '../../ai/ai_task.dart';
 import '../../ai/auto_graph_service.dart';
+import '../../ai/extract_into_tree_chain.dart';
 import '../../ai/extraction_service.dart';
 import '../../ai/prereq_depth.dart';
 import '../../canvas/layout_autoplace.dart';
@@ -83,6 +86,18 @@ class CanvasPageState extends State<CanvasPage> {
 
   /// 自动知识连线 / 自动补前置（DSL 优先 + 本地兜底）。
   late final AutoGraphService _auto;
+
+  /// Q4：拖节点放行提示已展示过的锁持有者（同一把锁只提示一次）。
+  String? _warnedLockKey;
+
+  /// 「提取 → 入树 → 自动连线」复合链（与 AI 助手页共用同一实现）。
+  ExtractIntoTreeChain get _chain => ExtractIntoTreeChain(
+        service: widget.service,
+        auto: _auto,
+        db: widget.db,
+        onRefresh: (tree) => _loadForTree(tree.id),
+        onMessage: _toast,
+      );
 
   @override
   void initState() {
@@ -186,9 +201,38 @@ class CanvasPageState extends State<CanvasPage> {
 
   // ================= 画布编辑回调 =================
 
+  /// R4：当前树是否被 AI 任务占锁（互斥判定唯一入口在 AiJobService）。
+  bool _treeLocked() {
+    final tree = _selectedTree;
+    if (tree == null) return false;
+    return widget.service.jobs.isLocked('tree:${tree.id}');
+  }
+
+  /// R4：被挡时提示 + 展开托盘。返回 true = 调用方应放弃操作。
+  bool _blockedByJob(String action) {
+    if (!_treeLocked()) return false;
+    _toast('$action：AI 任务正在处理这棵树，完成后再试');
+    widget.service.jobs.requestExpandTray();
+    return true;
+  }
+
+  /// Q4：拖节点在 AI 连线进行中**放行**（只改坐标不改边），但提示一次。
+  void _warnDragIfLocked() {
+    if (!_treeLocked()) {
+      _warnedLockKey = null;
+      return;
+    }
+    final key = 'tree:${_selectedTree?.id ?? ''}';
+    if (_warnedLockKey == key) return;
+    _warnedLockKey = key;
+    _toast('AI 正在处理这棵树，拖动节点不影响其结果');
+  }
+
   Future<void> _onCreateEdge(String fromKpId, String toKpId) async {
     final treeId = _selectedTree?.id;
     if (treeId == null) return;
+    // R4：T3/T4 进行中手动加边会与其同表竞争，硬挡。
+    if (_blockedByJob('手动建立前置关系')) return;
     final res = await _repo.addManualPrerequisiteEdge(fromKpId, toKpId);
     if (!mounted) return;
     res.fold(
@@ -202,6 +246,8 @@ class CanvasPageState extends State<CanvasPage> {
   Future<void> _onDeleteEdge(String edgeId) async {
     final treeId = _selectedTree?.id;
     if (treeId == null) return;
+    // R4：删边与 T3/T4 同表竞争，硬挡。
+    if (_blockedByJob('删除前置关系')) return;
     final res = await _repo.deletePrerequisiteEdge(edgeId);
     if (!mounted) return;
     res.fold(
@@ -215,6 +261,8 @@ class CanvasPageState extends State<CanvasPage> {
   Future<void> _onMoveNode(String kpId, double x, double y) async {
     final treeId = _selectedTree?.id;
     if (treeId == null) return;
+    // Q4：放行 + 提示。
+    _warnDragIfLocked();
     await _repo.saveNodePosition(treeId, kpId, x, y);
   }
 
@@ -225,6 +273,8 @@ class CanvasPageState extends State<CanvasPage> {
   Future<void> _onMoveNodes(Map<String, Offset> positions) async {
     final treeId = _selectedTree?.id;
     if (treeId == null) return;
+    // Q4：放行 + 提示。
+    _warnDragIfLocked();
     for (final e in positions.entries) {
       await _repo.saveNodePosition(
         treeId,
@@ -389,6 +439,8 @@ class CanvasPageState extends State<CanvasPage> {
   Future<void> _deleteTree() async {
     final tree = _selectedTree;
     if (tree == null) return;
+    // R4：AI 任务在写这棵树时删树，硬挡。
+    if (_blockedByJob('删除知识树')) return;
     final kpIds = await _treesRepo.memberPointIds(tree.id);
 
     if (!mounted) return;
@@ -483,10 +535,55 @@ class CanvasPageState extends State<CanvasPage> {
 
   // ============ 自动图谱（DSL 优先 + 本地兜底） ============
 
-  /// 自动连线：调用 [AutoGraphService] 推断前置关系并落库。
+  /// 自动连线（B2：默认走队列，提交即返回；同步路径保留）。
   Future<void> _autoLink() async {
     final tree = _selectedTree;
     if (tree == null) return;
+    if (!kAiJobQueueEnabled) {
+      await _autoLinkSync(tree);
+      return;
+    }
+    if (_blockedByJob('自动连线')) return;
+    final inputs = await _auto.linkInputsFor(tree.id);
+    if (inputs == null) {
+      _toast('知识点不足 2 个，无法自动连线');
+      return;
+    }
+    try {
+      final job = await widget.service.jobs.submit(
+        task: AiTask.t3Prerequisite.code,
+        resourceKey: 'tree:${tree.id}',
+        label: '自动连线《${tree.name}》',
+        inputs: inputs,
+        onDone: (j) async {
+          final res = await _auto.linkFromParsed(tree.id, j.result?['parsed']);
+          if (!mounted) return;
+          res.fold(
+            (r) {
+              j.doneMessage = r.created > 0
+                  ? '已自动建立 ${r.created} 条前置关系（AI）'
+                  : (r.note.isNotEmpty
+                      ? r.note
+                      : '没有可自动连接的新关系（可能已全部连好）');
+              // 连完新线不再自动重排（用户要求）：只刷新让新边显示。
+              _loadForTree(tree.id);
+            },
+            (e, _) => _toast('自动连线失败：$e'),
+          );
+        },
+      );
+      if (job == null) {
+        _toast('这棵树有 AI 任务正在进行，完成后再试');
+        widget.service.jobs.requestExpandTray();
+      }
+    } on Object {
+      _toast('AI 服务连接失败，改用同步处理');
+      await _autoLinkSync(tree);
+    }
+  }
+
+  /// 自动连线 · 同步路径（开关关闭 / 服务不可达兜底）。
+  Future<void> _autoLinkSync(KnowledgeTree tree) async {
     final loading = showDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -697,12 +794,77 @@ class CanvasPageState extends State<CanvasPage> {
     );
   }
 
-  /// 跑深度补前置：Success → 弹建议 BottomSheet；Failure → toast。
+  /// 跑深度补前置（B2：默认走队列——递归驱动权已在服务端，Q1）。
   ///
-  /// T4 走 Dify 网络调用（ollama 可能耗十几秒），点击「生成」后立即弹加载框，
-  /// 并通过 [AutoPrereqProgress] 实时刷新「第 X/Y 层，本层已完成 a/b」，避免
-  /// 「点击没反应」的错觉；空结果也给出明确提示而非空白 sheet。
+  /// 提交后立即释放界面；进度（第 X/Y 层，本层 a/b）经 job.stage.message
+  /// 在托盘实时可见，与原先页面内文案同一套。
   Future<void> _runPrereq(
+    KnowledgePoint p,
+    PrereqDepth depth,
+    String? custom,
+  ) async {
+    if (!mounted) return;
+    if (!kAiJobQueueEnabled) {
+      await _runPrereqSync(p, depth, custom);
+      return;
+    }
+    if (_blockedByJob('补前置')) return;
+    final tree = _selectedTree;
+    final resourceKey = tree != null ? 'tree:${tree.id}' : 'kp:${p.id}';
+    try {
+      final job = await widget.service.jobs.submit(
+        task: AiTask.t4GapAnalysis.code,
+        resourceKey: resourceKey,
+        label: '补前置：${p.name}',
+        inputs: <String, dynamic>{
+          'target': {
+            'name': p.name,
+            'type': p.type.label,
+            'definition': p.definition,
+          },
+          'depth': depth.code,
+          if (depth == PrereqDepth.custom && (custom?.trim().isNotEmpty ?? false))
+            'custom_instruction': custom!.trim(),
+        },
+        onDone: (j) => _onPrereqDone(j),
+      );
+      if (job == null) {
+        _toast('这棵树有 AI 任务正在进行，完成后再试');
+        widget.service.jobs.requestExpandTray();
+      }
+    } on Object {
+      _toast('AI 服务连接失败，改用同步处理');
+      await _runPrereqSync(p, depth, custom);
+    }
+  }
+
+  /// T4 job 完成：suggestions → 建议 BottomSheet（与同步路径同一收尾）。
+  void _onPrereqDone(AiJob j) {
+    if (!mounted) return;
+    final list = (j.result?['suggestions'] as List?) ?? const <dynamic>[];
+    final suggestions = <SuggestedPrerequisite>[
+      for (final raw in list)
+        if (raw is Map)
+          SuggestedPrerequisite(
+            name: (raw['name'] as String?) ?? '',
+            type: (raw['type'] as String?) ?? '',
+            definition: (raw['definition'] as String?) ?? '',
+            reason: (raw['reason'] as String?) ?? '',
+            level: (raw['level'] as num?)?.toInt() ?? 1,
+          ),
+    ].where((s) => s.name.isNotEmpty).toList();
+    if (suggestions.isEmpty) {
+      _toast('AI 未返回前置建议（该知识点可能已是最基础，或结果被过滤）。');
+    } else {
+      _showSuggestions(AutoPrereqResult(
+        suggestions: suggestions,
+        usedFallback: false,
+      ));
+    }
+  }
+
+  /// 补前置 · 同步路径（开关关闭 / 服务不可达兜底）。
+  Future<void> _runPrereqSync(
     KnowledgePoint p,
     PrereqDepth depth,
     String? custom,
@@ -884,12 +1046,19 @@ class CanvasPageState extends State<CanvasPage> {
       _toast('请先框选薄弱点，或点「全选薄弱点」');
       return;
     }
+    // B4：同一棵树的「布置作业」会话已开着 → 挡（不静默失败）。
+    if (widget.service.jobs.isLocked('homework:new:${tree.id}')) {
+      _toast('该树的「布置作业」会话已打开，完成后再试');
+      widget.service.jobs.requestExpandTray();
+      return;
+    }
     await Navigator.of(context).push<bool>(MaterialPageRoute(
       builder: (_) => HomeworkPage(
         ai: widget.service.ai,
         db: widget.db,
         canvasId: tree.id,
         points: sel,
+        jobs: widget.service.jobs,
       ),
     ));
     if (!mounted) return;
@@ -987,22 +1156,29 @@ class CanvasPageState extends State<CanvasPage> {
                                     }
                                   },
                                 ),
-                                onTap: () async {
-                                  // 用作业记录的 kpIds 重新取知识点作为出题上下文。
-                                  final pts =
-                                      await _repo.pointsByIds(hw.kpIds);
-                                  if (!mounted) return;
-                                  Navigator.of(ctx).pop();
-                                  await Navigator.of(context)
-                                      .push<bool>(MaterialPageRoute(
-                                    builder: (_) => HomeworkPage(
-                                      ai: widget.service.ai,
-                                      db: widget.db,
-                                      canvasId: canvasId,
-                                      points: pts,
-                                      existingId: hw.id,
-                                    ),
-                                  ));
+                onTap: () async {
+                  // 用作业记录的 kpIds 重新取知识点作为出题上下文。
+                  final pts =
+                      await _repo.pointsByIds(hw.kpIds);
+                  if (!mounted) return;
+                  Navigator.of(ctx).pop();
+                  // B4：同一作业的编辑会话已开着 → 挡（不静默失败）。
+                  if (widget.service.jobs.isLocked('homework:${hw.id}')) {
+                    _toast('该作业的编辑会话已打开，完成后再试');
+                    widget.service.jobs.requestExpandTray();
+                    return;
+                  }
+                  await Navigator.of(context)
+                      .push<bool>(MaterialPageRoute(
+                    builder: (_) => HomeworkPage(
+                      ai: widget.service.ai,
+                      db: widget.db,
+                      canvasId: canvasId,
+                      points: pts,
+                      existingId: hw.id,
+                      jobs: widget.service.jobs,
+                    ),
+                  ));
                                   if (!mounted) return;
                                   setState(() => _homeworkMode = false);
                                 },
@@ -1233,11 +1409,12 @@ class CanvasPageState extends State<CanvasPage> {
     );
   }
 
-  /// 把勾选的补前置建议直接并入目标树。
+  /// 把勾选的补前置建议直接并入目标树（B2：默认走队列复合链，方案 §11.1）。
   ///
   /// 锚点铁律：建议本身没有可逐字锚定的原文，不能直接 `new KnowledgePoint` 入库。
-  /// 这里把它们拼成一篇 Markdown 笔记 → 调 [ExtractionService.extract] 跑一次 T1，
-  /// 由 T1 负责锚点校验、剔除无出处的幻觉点，再把**真正落库**的知识点 `addPoints` 进树。
+  /// 把它们拼成一篇 Markdown 笔记 → T1 负责锚点校验、剔除无出处的幻觉点，
+  /// 再把真正落库的知识点 addPoints 进树，最后同锁跑 T3 自动连线。
+  /// 取消任一段回滚半成品（Q6）；T3 失败保留 T1 成果。
   Future<void> _supplementIntoTree(
     List<SuggestedPrerequisite> items,
     KnowledgeTree tree,
@@ -1255,7 +1432,45 @@ class CanvasPageState extends State<CanvasPage> {
     }
     final md = buffer.toString().trim();
 
-    // 2) 加载框：T1 走 Dify 网络调用，可能耗时数秒。
+    if (!kAiJobQueueEnabled) {
+      await _supplementIntoTreeSync(items, tree, md);
+      return;
+    }
+
+    final Note note;
+    try {
+      final (outcome, saved) = await _chain.submit(
+        tree: tree,
+        md: md,
+        label: '补前置入库《${tree.name}》',
+      );
+      note = saved;
+      switch (outcome) {
+        case ChainOutcome.queued:
+          // 关建议 BottomSheet：提交即返回，不钉界面（R1）。
+          Navigator.of(context).pop();
+          return;
+        case ChainOutcome.locked:
+          _toast('「${tree.name}」有 AI 任务正在进行，完成后再试');
+          widget.service.jobs.requestExpandTray();
+          return;
+        case ChainOutcome.serviceDown:
+          _toast('AI 服务连接失败，改用同步处理');
+      }
+    } on Object catch (e) {
+      _toast('保存笔记失败：$e');
+      return;
+    }
+    await _supplementIntoTreeSync(items, tree, md, existingNote: note);
+  }
+
+  /// 补充进树 · 同步路径（开关关闭 / 服务不可达兜底）：原阻塞流程。
+  Future<void> _supplementIntoTreeSync(
+    List<SuggestedPrerequisite> items,
+    KnowledgeTree tree,
+    String md, {
+    Note? existingNote,
+  }) async {
     if (!mounted) return;
     final progress = ValueNotifier<String>('正在通过 T1 锚定知识点…');
     final loading = showDialog<void>(
@@ -1277,7 +1492,13 @@ class CanvasPageState extends State<CanvasPage> {
       ),
     );
 
-    final ext = await widget.service.extract(md);
+    final ext = existingNote == null
+        ? await widget.service.extract(md)
+        : await ExtractIntoTreeChain.extractWithExistingNote(
+            widget.service,
+            existingNote,
+            md,
+          );
     if (!mounted) return;
     if (ext is Failure<ExtractionSaveResult>) {
       Navigator.of(context, rootNavigator: true).pop();
@@ -1319,9 +1540,6 @@ class CanvasPageState extends State<CanvasPage> {
         // 新点落位后，立刻为它们补上前置关系：复用 T3「自动连线」这条**仅 AI** 的路径
         // （无本地启发式兜底，符合决策 15）。连线失败不阻断「补充进树」——用户仍可稍后
         // 手动点「自动连线」重试。
-        //
-        // T3 同样是 Dify 网络调用，可能耗时数秒；此时 T1 的加载框已关，故单独再开一个
-        // 加载框给用户明确反馈（与 T1 同一套写法：showDialog → await → pop）。
         if (!mounted) return;
         final linkLoading = showDialog<void>(
           context: context,

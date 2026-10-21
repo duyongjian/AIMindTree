@@ -15,14 +15,17 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
+import '../../ai/ai_job_service.dart' show kAiJobQueueEnabled;
 import '../../ai/ai_task.dart';
 import '../../ai/agent_tools.dart';
 import '../../ai/auto_graph_service.dart';
+import '../../ai/extract_into_tree_chain.dart';
 import '../../ai/extraction_service.dart';
 import '../../canvas/layout_autoplace.dart';
 import '../../core/logger.dart';
 import '../../core/result.dart';
 import '../../data/db/drift_database.dart';
+import '../../data/models/knowledge_point.dart';
 import '../../data/models/knowledge_tree.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
@@ -288,13 +291,50 @@ class _AgentPageState extends State<AgentPage> {
 
   /// 从当前对话抽「需要的知识点」与「薄弱点」两类建议。
   ///
-  /// 复用 T5 流式调用，让模型只输出 JSON；解析失败则静默忽略（检测是增强能力，
-  /// 不应因解析问题阻断主问答流程）。
+  /// 复用 T5（``variant='detect'``，服务端透传 + JSON 修复）。队列路径（B3）：
+  /// 静默提交——占 ``conversation:agent`` 锁 + 托盘计时，终态不弹 SnackBar，
+  /// 失败只写日志（检测是增强能力，不阻断主问答）；开关关闭 / 服务不可达 →
+  /// 原流式路径兜底。
   Future<void> _runDetection() async {
     if (_detecting || _history.isEmpty) return;
     if (!mounted) return;
-    setState(() => _detecting = true);
 
+    final prompt = await _buildDetectPrompt();
+    if (prompt == null || !mounted) return;
+
+    if (kAiJobQueueEnabled) {
+      try {
+        final job = await widget.service.jobs.submit(
+          task: 'T5',
+          resourceKey: 'conversation:agent',
+          label: '分析对话中的知识点建议',
+          query: prompt,
+          variant: 'detect',
+          silent: true,
+          onDone: (j) => _applyDetection(j.result?['content'] as String? ?? ''),
+          onError: (e) => _log.w('检测失败（忽略）：$e'),
+          onCancel: () {
+            if (mounted) setState(() => _detecting = false);
+          },
+        );
+        if (job == null) {
+          // 锁被占（上一轮检测仍在跑）：静默跳过，下轮问答后再检测。
+          _log.i('检测跳过：conversation:agent 锁被占');
+          return;
+        }
+        if (mounted) setState(() => _detecting = true);
+      } on Object catch (e) {
+        _log.w('检测提交失败（回落同步路径）：$e');
+        await _runDetectionSync(prompt);
+      }
+      return;
+    }
+    await _runDetectionSync(prompt);
+  }
+
+  /// 拼检测 prompt：树上下文（活跃树已有知识点）+ 对话转录。
+  /// 页面在查库期间被销毁则返回 null。
+  Future<String?> _buildDetectPrompt() async {
     var treeCtx = '';
     if (_activeTree != null) {
       final ids = await widget.service.trees.memberPointIds(_activeTree!.id);
@@ -309,13 +349,19 @@ class _AgentPageState extends State<AgentPage> {
     final transcript = _history
         .map((m) => '${m.role == 'user' ? '用户' : 'AI'}：${m.content}')
         .join('\n');
-    final prompt = '${treeCtx}下面是用户与 AI 助手的对话。请识别其中：\n'
+    return '${treeCtx}下面是用户与 AI 助手的对话。请识别其中：\n'
         '1) needed：对话涉及、用户应当掌握的知识点；\n'
         '2) weak：用户明显薄弱 / 混淆 / 答错的知识点。\n'
         '只输出一个 JSON 对象，不要任何解释或代码块标记：\n'
         '{"needed":[{"name":"","definition":"","reason":""}],'
         '"weak":[{"name":"","definition":"","reason":""}]}\n\n'
         '对话：\n$transcript';
+  }
+
+  /// 同步路径（开关关闭 / 提交失败兜底）：原流式实现。
+  Future<void> _runDetectionSync(String prompt) async {
+    if (!mounted) return;
+    setState(() => _detecting = true);
 
     final buf = StringBuffer();
     try {
@@ -329,8 +375,13 @@ class _AgentPageState extends State<AgentPage> {
       if (mounted) setState(() => _detecting = false);
       return;
     }
+    _applyDetection(buf.toString());
+  }
 
-    final items = _parseDetection(buf.toString());
+  /// 解析检测输出 → 按名字去重合并进 [_detected] → 清进行中标。
+  /// 队列路径（服务端已 JSON 修复）与同步路径共用。
+  void _applyDetection(String raw) {
+    final items = _parseDetection(raw);
     if (!mounted) return;
     if (items.isNotEmpty) {
       final merged = <AgentDetectedItem>[..._detected];
@@ -382,6 +433,10 @@ class _AgentPageState extends State<AgentPage> {
 
   // ===================== 加入知识树（锚定铁律） =====================
 
+  /// 加入知识树（B1：T1 入队；T3 连线作为第二段**同锁链式提交**，方案 §11.1）。
+  ///
+  /// 队列路径全程不弹加载框，进度在全局托盘；取消任一段回滚半成品（Q6）；
+  /// 服务不可达 → 复用已存笔记走同步兜底。
   Future<void> _addToTree() async {
     final chosen = _detected.where((d) => _picked.contains(d)).toList();
     if (chosen.isEmpty) {
@@ -397,9 +452,66 @@ class _AgentPageState extends State<AgentPage> {
     // 1) 拼成 Markdown 笔记 → T1 锚定（无原文出处的不入库）。
     final md = chosen.map((i) => i.toMarkdown()).join('\n\n');
 
+    // 同步路径（开关关闭）：原阻塞流程原样保留。
+    if (!kAiJobQueueEnabled) {
+      await _addToTreeSync(tree, md);
+      return;
+    }
+
+    final Note note;
+    try {
+      final (outcome, saved) = await _chain.submit(
+        tree: tree,
+        md: md,
+        label: '提取并加入《${tree.name}》',
+      );
+      note = saved;
+      switch (outcome) {
+        case ChainOutcome.queued:
+          return; // 已入队：进度见托盘（R1）。
+        case ChainOutcome.locked:
+          _toast('「${tree.name}」有 AI 任务正在进行，完成后再试');
+          widget.service.jobs.requestExpandTray();
+          return;
+        case ChainOutcome.serviceDown:
+          _toast('AI 服务连接失败，改用同步处理');
+      }
+    } on Object catch (e) {
+      _toast('保存笔记失败：$e');
+      return;
+    }
+    // 同步兜底：复用已存笔记，不重复存。
+    await _addToTreeSync(tree, md, existingNote: note);
+  }
+
+  /// 「提取 → 入树 → 自动连线」复合链（与 canvas 页共用同一实现）。
+  ExtractIntoTreeChain get _chain => ExtractIntoTreeChain(
+        service: widget.service,
+        auto: _autoGraph,
+        db: widget.db,
+        onRefresh: (_) {
+          if (!mounted) return;
+          setState(() {
+            _detected = _detected.where((d) => !_picked.contains(d)).toList();
+            _picked.clear();
+          });
+        },
+        onMessage: _toast,
+      );
+
+  AutoGraphService get _autoGraph => AutoGraphService(
+        ai: widget.service.ai,
+        repo: widget.service.repo,
+        trees: widget.service.trees,
+      );
+  /// 同步路径（开关关闭 / 服务不可达兜底）：原阻塞流程。
+  Future<void> _addToTreeSync(
+    KnowledgeTree tree,
+    String md, {
+    Note? existingNote,
+  }) async {
     if (!mounted) return;
     final progress = ValueNotifier<String>('正在通过 T1 锚定知识点…');
-    // 阻塞等对话框被关闭；提取完成后由各分支显式 pop，不会卡住主流程。
     await showDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -419,7 +531,10 @@ class _AgentPageState extends State<AgentPage> {
       ),
     );
 
-    final ext = await widget.service.extract(md);
+    final ext = existingNote == null
+        ? await widget.service.extract(md)
+        : await ExtractIntoTreeChain.extractWithExistingNote(
+            widget.service, existingNote, md);
     if (!mounted) return;
     if (ext is Failure<ExtractionSaveResult>) {
       Navigator.of(context, rootNavigator: true).pop();
@@ -441,7 +556,6 @@ class _AgentPageState extends State<AgentPage> {
     if (!mounted) return;
     await addRes.fold(
       (added) async {
-        // 新并入的点默认 x/y=0，会被布局引擎当成「放在原点」→ 用布局引擎算不重叠坐标。
         await autoPlaceNewPointsInTree(
           db: widget.db,
           trees: widget.service.trees,
@@ -450,16 +564,8 @@ class _AgentPageState extends State<AgentPage> {
           newIds: newIds,
         );
 
-        // 新点落位后，立刻为它们补上前置关系：复用 T3「自动连线」这条**仅 AI** 的路径
-        // （无本地启发式兜底）。连线失败不阻断「加入知识树」——用户可稍后手动点「自动连线」。
-        // ExtractionService 暴露了 ai / repo / trees，直接就地组装 AutoGraphService。
         var linkNote = '';
-        final autoGraph = AutoGraphService(
-          ai: widget.service.ai,
-          repo: widget.service.repo,
-          trees: widget.service.trees,
-        );
-        final linkRes = await autoGraph.autoLink(tree.id);
+        final linkRes = await _autoGraph.autoLink(tree.id);
         linkRes.fold(
           (r) {
             if (r.created > 0) {
@@ -474,7 +580,6 @@ class _AgentPageState extends State<AgentPage> {
         if (!mounted) return;
         Navigator.of(context, rootNavigator: true).pop();
         setState(() {
-          // 已加入的从候选里移除，避免重复加。
           _detected = _detected.where((d) => !_picked.contains(d)).toList();
           _picked.clear();
         });

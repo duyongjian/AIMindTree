@@ -6,6 +6,9 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../ai/ai_job_service.dart';
+import '../ai/ai_provider.dart';
+import '../ai/ai_task.dart';
 import '../ai/extraction_service.dart';
 import '../core/result.dart';
 import '../data/models/knowledge_point.dart';
@@ -49,6 +52,10 @@ class _ExtractScreenState extends State<ExtractScreen> {
     setState(() => _stored = all);
   }
 
+  /// 提取（B1：默认走任务队列，提交即返回，进度见全局托盘）。
+  ///
+  /// 路径：存笔记拿 noteId → 提交 T1 job →（立即释放界面）→ onDone 落库。
+  /// 队列关闭或服务不可达 → 同一篇笔记同步兜底（不重复存笔记）。
   Future<void> _onExtract() async {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
@@ -59,23 +66,83 @@ class _ExtractScreenState extends State<ExtractScreen> {
       _rejected = <RejectedPoint>[];
     });
     try {
-      final res = await widget.service.extract(text);
-      if (res is Success<ExtractionSaveResult>) {
-        await _reloadStored();
-        if (!mounted) return;
-        setState(() {
-          _saved = res.value.saved;
-          _rejected = res.value.rejected;
-        });
-      } else if (res is Failure<ExtractionSaveResult>) {
-        if (!mounted) return;
-        setState(() => _error = res.message);
+      // 1) 存笔记拿 noteId（资源锁 note:{id} 的依据；两条路径共用）。
+      final saved = await widget.service.stageSaveNote(text);
+      if (saved is Failure<Note>) {
+        setState(() => _error = saved.message);
+        return;
       }
+      final note = (saved as Success<Note>).value;
+
+      // 2) 队列路径：提交即返回。
+      if (kAiJobQueueEnabled) {
+        AiJob? job;
+        try {
+          job = await widget.service.jobs.submit(
+            task: AiTask.t1Extract.code,
+            resourceKey: 'note:${note.id}',
+            label: '提取《${note.title}》',
+            inputs: {'note_text': text},
+            onDone: (j) async {
+              await _applyT1(note, text, Success(aiTaskResultFromJob(
+                j.result ?? const <String, dynamic>{},
+              )));
+            },
+            onError: (e) {
+              if (mounted) setState(() => _error = 'T1 提取失败：$e');
+            },
+          );
+        } on Object {
+          job = null; // 服务不可达 → 落同步兜底。
+        }
+        if (job != null) {
+          // 入队成功：界面立即释放，进度去托盘看（R1）。
+          if (mounted) setState(() => _busy = false);
+          return;
+        }
+        // 锁冲突（submit 返回 null 而非抛异常）：互斥不可绕过，不回落同步（R4）。
+        if (mounted) {
+          setState(() => _error = '这篇笔记有 AI 任务正在进行，完成后再试');
+        }
+        return;
+      }
+
+      // 3) 同步兜底（开关关闭）：同一篇笔记直接调 T1 + 落库。
+      final aiRes =
+          await widget.service.ai.run(AiTask.t1Extract, {'note_text': text});
+      await _applyT1(note, text, aiRes);
     } on Object catch (e) {
-      if (!mounted) return;
-      setState(() => _error = e.toString());
+      if (mounted) setState(() => _error = e.toString());
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted && _busy) setState(() => _busy = false);
+    }
+  }
+
+  /// T1 结果落库 + 刷新右栏（队列 onDone 与同步路径共用）。
+  Future<void> _applyT1(
+    Note note,
+    String text,
+    Result<AiTaskResult> aiRes,
+  ) async {
+    if (aiRes is Failure<AiTaskResult>) {
+      if (mounted) setState(() => _error = 'T1 提取失败：${aiRes.message}');
+      return;
+    }
+    final res = await widget.service.stagePersist(
+      note: note,
+      noteContent: text,
+      t1: (aiRes as Success<AiTaskResult>).value,
+    );
+    if (!mounted) return;
+    if (res is Success<ExtractionSaveResult>) {
+      await _reloadStored();
+      if (!mounted) return;
+      setState(() {
+        _saved = res.value.saved;
+        _rejected = res.value.rejected;
+      });
+    } else if (res is Failure<ExtractionSaveResult>) {
+      setState(() => _error = res.message);
     }
   }
 

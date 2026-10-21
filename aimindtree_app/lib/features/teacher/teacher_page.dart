@@ -6,10 +6,14 @@
 ///   ai_sessions / ai_messages。
 ///
 /// 无可用 Provider 时给出明确提示（而非静默失败 / 空白）。
+///
+/// B4 互斥：会话打开期间持 `kp:{id}` 资源锁（入口处挡「同点另开老师模式」），
+/// 托盘同步显示一行计时；生成中 / 空闲两种文案联动。
 library;
 
 import 'package:flutter/material.dart';
 
+import '../../ai/ai_job_service.dart';
 import '../../ai/ai_service.dart';
 import '../../ai/ai_task.dart';
 import '../../data/models/knowledge_point.dart';
@@ -23,12 +27,16 @@ class TeacherPage extends StatefulWidget {
     required this.sessions,
     required this.ai,
     required this.repo,
+    required this.jobs,
   });
 
   final KnowledgePoint kp;
   final AiSessionRepository sessions;
   final AiService ai;
   final KnowledgeRepository repo;
+
+  /// 任务队列服务（B4：会话持 `kp:{id}` 锁 + 托盘计时）。
+  final AiJobService jobs;
 
   @override
   State<TeacherPage> createState() => _TeacherPageState();
@@ -46,6 +54,9 @@ class _TeacherPageState extends State<TeacherPage>
   String? _askConversationId;
   MasteryStatus _mastery = MasteryStatus.unknown;
 
+  /// B4：交互会话 id（持 `kp:{id}` 锁；dispose 时释放）。
+  String _sessionTicket = '';
+
   // —— 讲解（T6）态 ——
   late String _explainSessionId;
   bool _explainBusy = false;
@@ -56,6 +67,11 @@ class _TeacherPageState extends State<TeacherPage>
   void initState() {
     super.initState();
     _tab = TabController(length: 2, vsync: this);
+    // 会话级持锁：页开即占、页关即放（「同点另开老师模式」在入口处被挡）。
+    _sessionTicket = widget.jobs.holdInteractive(
+      'kp:${widget.kp.id}',
+      label: '老师模式：${widget.kp.name}',
+    );
     _bootstrap();
   }
 
@@ -88,6 +104,7 @@ class _TeacherPageState extends State<TeacherPage>
       _explainError = null;
       _explainText = '';
     });
+    _ticket('正在生成讲解…');
     final ctx = '知识点：${widget.kp.name}（${widget.kp.type.label}）。\n'
         '定义：${widget.kp.definition}\n'
         '来源：${widget.kp.sourceQuote}';
@@ -115,7 +132,10 @@ class _TeacherPageState extends State<TeacherPage>
     } on Object catch (e) {
       if (mounted) setState(() => _explainError = _friendlyError(e));
     } finally {
-      if (mounted) setState(() => _explainBusy = false);
+      if (mounted) {
+        setState(() => _explainBusy = false);
+        _ticket('会话进行中');
+      }
     }
   }
 
@@ -126,6 +146,7 @@ class _TeacherPageState extends State<TeacherPage>
       _askBusy = true;
       _askError = null;
     });
+    _ticket('正在回答追问…');
 
     await widget.sessions.addMessage(
         sessionId: _askSessionId, role: 'user', content: text);
@@ -154,6 +175,7 @@ class _TeacherPageState extends State<TeacherPage>
         _askError = _friendlyError(e);
         _askBusy = false;
       });
+      _ticket('会话进行中');
       return;
     }
 
@@ -172,6 +194,7 @@ class _TeacherPageState extends State<TeacherPage>
       _input.clear();
       _askBusy = false;
     });
+    _ticket('会话进行中');
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) {
         _scroll.animateTo(
@@ -181,6 +204,12 @@ class _TeacherPageState extends State<TeacherPage>
         );
       }
     });
+  }
+
+  /// 托盘文案联动：会话开着的整个期间托盘行都可见，生成中 / 空闲两种态。
+  void _ticket(String message) {
+    if (_sessionTicket.isEmpty) return;
+    widget.jobs.setInteractiveMessage(_sessionTicket, message);
   }
 
   /// 把「无 Provider」之类的底层错误翻译成用户能看懂的提示。
@@ -195,6 +224,8 @@ class _TeacherPageState extends State<TeacherPage>
 
   @override
   void dispose() {
+    // 先放锁再拆控件：会话页关掉 = `kp:{id}` 解锁 + 托盘行消失。
+    widget.jobs.releaseInteractive(_sessionTicket);
     _tab.dispose();
     _input.dispose();
     _scroll.dispose();

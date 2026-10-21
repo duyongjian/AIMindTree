@@ -26,6 +26,7 @@ import '../data/sync/sync_outbox.dart';
 import '../data/sync/sync_scheduler.dart';
 import '../data/sync/sync_status.dart';
 import 'ai_provider.dart';
+import 'ai_job_service.dart';
 import 'ai_service.dart';
 import 'ai_task.dart';
 import 'ai_task_router.dart';
@@ -64,6 +65,7 @@ class ExtractionService {
     required this.ai,
     required this.trees,
     required this.groups,
+    required this.jobs,
   });
 
   final KnowledgeRepository repo;
@@ -71,9 +73,15 @@ class ExtractionService {
   final GroupRepository groups;
   final AiService ai;
 
+  /// AI 任务队列（/v1/jobs）：批量型 AI 功能走这里，提交即返回。
+  final AiJobService jobs;
+
   static final AppLog _log = AppLog('extraction');
 
-  /// 对一段笔记原文执行完整 T1 流程，返回入库结果（含被剔除的幻觉点）。
+  /// 对一段笔记原文执行完整 T1 流程（**同步路径**：存笔记 → 调 T1 → 落库）。
+  ///
+  /// 队列路径（默认，方案 B1）请用三段式：
+  /// [stageSaveNote] → 提交 T1 job → [stagePersist]，中间不干等。
   Future<Result<ExtractionSaveResult>> extract(
     String noteContent, {
     String? notebookId,
@@ -84,38 +92,64 @@ class ExtractionService {
     }
 
     // 1) 存笔记
-    final note = Note(
-      contentMd: content,
-      title: _deriveTitle(content),
-      deviceId: repo.deviceId,
-    );
-    final savedNote = await repo.saveNote(note);
-    if (savedNote is Failure<Note>) {
-      return Failure(savedNote.error, savedNote.stackTrace);
+    final saved = await stageSaveNote(content);
+    if (saved is Failure<Note>) {
+      return Failure(saved.error, saved.stackTrace);
     }
-    final noteId = (savedNote as Success<Note>).value.id;
+    final note = (saved as Success<Note>).value;
 
     // 2) 调 T1（AiService → 路由 → LLM Server /v1/task/T1）
     final aiRes = await ai.run(AiTask.t1Extract, {'note_text': content});
     if (aiRes is Failure<AiTaskResult>) {
       return Failure(aiRes.error, aiRes.stackTrace);
     }
-    final result = (aiRes as Success<AiTaskResult>).value;
 
-    // 3) 映射为待校验的原始知识点
-    final rawPoints = _mapToRaw(result.parsed);
+    // 3) 锚点校验 + 落库
+    return stagePersist(
+      note: note,
+      noteContent: content,
+      t1: (aiRes as Success<AiTaskResult>).value,
+      notebookId: notebookId,
+    );
+  }
+
+  /// 队列路径 · 第一步：存笔记，拿 noteId（资源锁 ``note:{id}`` 的依据）。
+  Future<Result<Note>> stageSaveNote(String noteContent) async {
+    final content = noteContent.trim();
+    if (content.isEmpty) {
+      return Failure(ArgumentError('笔记内容为空'));
+    }
+    final note = Note(
+      contentMd: content,
+      title: _deriveTitle(content),
+      deviceId: repo.deviceId,
+    );
+    return repo.saveNote(note);
+  }
+
+  /// 队列路径 · 第三步：锚点校验 + 落库（[t1] 为 T1 job 的 result 转来）。
+  Future<Result<ExtractionSaveResult>> stagePersist({
+    required Note note,
+    required String noteContent,
+    required AiTaskResult t1,
+    String? notebookId,
+  }) async {
+    final content = noteContent.trim();
+
+    // 映射为待校验的原始知识点
+    final rawPoints = _mapToRaw(t1.parsed);
     if (rawPoints == null) {
       return Failure(
-        StateError('T1 返回结构无法解析为知识点列表：${_preview(result.content)}'),
+        StateError('T1 返回结构无法解析为知识点列表：${_preview(t1.content)}'),
       );
     }
     if (rawPoints.isEmpty) {
       _log.w('T1 提取结果为空');
     }
 
-    // 4) 锚点校验 + 落库
+    // 锚点校验 + 落库
     return repo.saveExtracted(
-      noteId: noteId,
+      noteId: note.id,
       noteContent: content,
       rawPoints: rawPoints,
       notebookId: notebookId,
@@ -226,8 +260,12 @@ class ExtractionService {
 
     final Map<String, AiProvider> providers = <String, AiProvider>{};
     final List<AiProviderRow> instantiated = <AiProviderRow>[];
+    // 记住 llm_server 行的地址：任务队列（/v1/jobs）复用同一信任域。
+    // 没有 llm_server 行（全 dify / 降级态）→ 用内置默认地址。
+    String? llmServerBaseUrl;
     for (final row in enabledRows) {
       if (row.protocol == kLlmServerProtocol) {
+        llmServerBaseUrl = row.baseUrl;
         // llm_server 无客户端密钥：**不调用** resolveApiKey（与旧 dify 分支的
         // 关键差别，C4）。后端与模型由服务端 config.yaml / 本行覆盖共同决定。
         // ⚠️ 必须走 helper：直接读 row.type 会绕过白名单容错，
@@ -322,8 +360,13 @@ class ExtractionService {
       scheduler.start();
     }
 
+    // 任务队列：与 llm_server 同一信任域（只走本地 127.0.0.1）。
+    final jobs = AiJobService(
+      baseUrl: llmServerBaseUrl ?? kLlmServerDefaultBaseUrl,
+    );
+
     return (
-      ExtractionService(repo: repo, ai: ai, trees: trees, groups: groups),
+      ExtractionService(repo: repo, ai: ai, trees: trees, groups: groups, jobs: jobs),
       database,
       router,
       settings,
