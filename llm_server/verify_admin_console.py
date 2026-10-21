@@ -17,7 +17,8 @@
 6. 统计埋点 ``GET /v1/admin/stats``（空缓冲 → 空数组；打 3 次坏请求 → 累加）；
 7. 配置写入往返（``app`` / ``sync`` / per-backend / ``task_backends``）+ **还原**；
 8. 静态资源挂载（``/admin``、``/static/*``）；
-9. 可选：真实链路 ``POST /v1/task/T1``（``--live``，需要本机 Ollama 在跑）。
+9. 可选：真实链路 ``POST /v1/task/T1`` + ``POST /v1/chat``（blocking 与 SSE
+   两条路径都要进埋点）（``--live``，需要本机 Ollama 在跑，约 60s）。
 
 用法::
 
@@ -438,8 +439,64 @@ def check_live_t1(c: TestClient) -> None:
     check(len(hit) > 0, 'source_quote 命中原文（锚点校验的前提）',
           f'{len(hit)}/{len(kps)} 条命中')
     stats = c.get('/v1/admin/stats').json()
-    check(stats.get('total', 0) > 0, 'stats.total 有累加（埋点真的接上了）',
+    check(stats.get('total', 0) > 0, 'stats.total 有累加（task 埋点真的接上了）',
           f"total={stats.get('total')} by_task={stats.get('by_task')}")
+
+
+def check_live_chat(c: TestClient) -> None:
+    """真实链路：chat 的两条路径（blocking / SSE）都要进埋点。
+
+    任务埋点已在 [check_live_t1] 覆盖；这里补 chat —— 两条路径分别落在
+    ``_blocking`` 与 ``_sse`` 里，改任一处都可能漏埋，必须各打一次。
+    """
+    print('\n[9] 真实链路 POST /v1/chat（--live，blocking + SSE 两条路径）')
+    from core.stats import snapshot as raw_snapshot
+
+    query = '用一句话解释牛顿第二定律'
+
+    # ---- blocking（stream:false）----
+    base = raw_snapshot(3600)['total']
+    r = c.post('/v1/chat', json={'task': 'T6', 'query': query, 'stream': False})
+    if not check(r.status_code == 200, 'chat(blocking) 返回 200', f'{r.status_code} {r.text[:160]}'):
+        return
+    body = r.json()
+    check(
+        set(body) == {'content', 'parsed', 'conversation_id', 'usage', 'backend',
+                      'model_id', 'latency_ms'},
+        'chat(blocking) 响应字段与改动前一致（C4）',
+        str(sorted(body)),
+    )
+    after_blocking = raw_snapshot(3600)['total']
+    check(
+        after_blocking == base + 1,
+        'chat(blocking) 埋点 +1',
+        f'{base} → {after_blocking}',
+    )
+
+    # ---- SSE（stream:true）----
+    base2 = after_blocking
+    r2 = c.post('/v1/chat', json={'task': 'T6', 'query': query, 'stream': True})
+    if not check(r2.status_code == 200, 'chat(SSE) 返回 200', f'{r2.status_code}'):
+        return
+    done = None
+    for line in (r2.text or '').splitlines():
+        if line.startswith('data: '):
+            try:
+                ev = json.loads(line[6:])
+            except ValueError:
+                continue
+            if isinstance(ev, dict) and ev.get('done'):
+                done = ev
+    check(done is not None, 'chat(SSE) 收到 done 帧')
+    if done is not None:
+        check(
+            set(done) == {'done', 'conversation_id', 'content', 'parsed', 'backend',
+                          'model_id', 'latency_ms'},
+            'chat(SSE) done 帧字段与改动前一致（C4）',
+            str(sorted(done)),
+        )
+    after_sse = raw_snapshot(3600)['total']
+    check(after_sse == base2 + 1, 'chat(SSE) 埋点 +1', f'{base2} → {after_sse}')
 
 
 # ---------------------------------------------------------------- main
@@ -471,6 +528,7 @@ def main(argv: list[str] | None = None) -> int:
         check_static(c)
         if live:
             check_live_t1(c)
+            check_live_chat(c)
 
     print()
     print('-' * 72)
