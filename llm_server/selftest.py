@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 from pathlib import Path
@@ -295,6 +296,146 @@ def run_contract_check(store: PromptStore) -> tuple[int, int]:
     return failures, missing
 
 
+# ---------------------------------------------------------------- D. 管理后台
+
+#: 临时 config.yaml 样例（用于 settings 覆盖层往返测试，写到系统临时目录，不污染仓库）。
+_SAMPLE_CONFIG_YAML = """
+server:
+  host: 127.0.0.1
+  port: 8787
+default_backend: minimax
+backends:
+  minimax:
+    type: minimax
+    protocol: anthropic_compat
+    base_url: https://api.minimax.cn
+    api_key_env: MINIMAX_API_KEY
+    default_model: MiniMax-Text-01
+    openai_path: /v1/chat/completions
+    anthropic_path: /anthropic/v1/messages
+    extra:
+      balance_path: /v1/token_plan/remains
+  ollama:
+    type: ollama
+    protocol: openai_compat
+    base_url: http://127.0.0.1:11434
+    default_model: llama3
+    models: [llama3]
+  openai_compat:
+    type: openai_compat
+    protocol: openai_compat
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    default_model: gpt-4o-mini
+"""
+
+
+#: 管理后台自检的断言点数（全部通过时 admin_failures=0）。
+_ADMIN_TOTAL = 7
+
+
+def run_admin_checks() -> int:
+    """D. 管理后台相关自检（离线、不污染仓库）。
+
+    1. settings.json 覆盖层往返：protocol / default_model / api_key 覆盖生效，
+       且优先级高于 config.yaml；mask 不泄露完整密钥。
+    2. MiniMaxBackend.balance() 在无 key / 无 base_url 时返回结构化 dict（绝不抛异常）。
+
+    Returns:
+        失败数。
+    """
+    failures = 0
+    failures += _check_settings_roundtrip()
+    failures += asyncio.run(_check_balance_structured())
+    return failures
+
+
+def _check_settings_roundtrip() -> int:
+    import tempfile
+
+    from core.config import Config
+
+    failures = 0
+    d = tempfile.mkdtemp(prefix='aimindtree_selftest_')
+    cfg_path = Path(d) / 'config.yaml'
+    cfg_path.write_text(_SAMPLE_CONFIG_YAML, encoding='utf-8')
+
+    config = Config(cfg_path)
+    if config.backends['minimax'].protocol != 'anthropic_compat':
+        print('  ❌ 基线 minimax protocol 应为 anthropic_compat')
+        failures += 1
+    else:
+        print('  ✅ 基线 minimax protocol = anthropic_compat（config.yaml 读取正常）')
+
+    # 写入覆盖层
+    config.save_settings(
+        {
+            'default_backend': 'minimax',
+            'default_model': 'MiniMax-M3.1-Flash',
+            'minimax_protocol': 'openai_compat',
+            'backends': {'minimax': {'api_key': 'sk-selftest-secret'}},
+        }
+    )
+    # 从磁盘重新加载，验证覆盖层被应用
+    config2 = Config(cfg_path)
+    if config2.backends['minimax'].protocol != 'openai_compat':
+        print('  ❌ settings 未覆盖 minimax protocol')
+        failures += 1
+    else:
+        print('  ✅ settings 覆盖 minimax protocol → openai_compat')
+
+    if config2.default_model != 'MiniMax-M3.1-Flash':
+        print('  ❌ settings 未覆盖 default_model（实际 %r）' % config2.default_model)
+        failures += 1
+    else:
+        print('  ✅ settings 覆盖 default_model → MiniMax-M3.1-Flash')
+
+    if config2.resolve_api_key(config2.backend('minimax')) != 'sk-selftest-secret':
+        print('  ❌ settings 未覆盖 minimax api_key')
+        failures += 1
+    else:
+        print('  ✅ settings 覆盖 minimax api_key（优先级高于 .env / 环境变量）')
+
+    # 掩码不得泄露完整密钥
+    masked = config2.mask('sk-selftest-secret')
+    if 'selftest-secret' in masked:  # noqa: S105 - 故意检查是否泄露
+        print('  ❌ mask 泄露了完整密钥：%s' % masked)
+        failures += 1
+    else:
+        print('  ✅ mask 掩码正确：%s' % masked)
+
+    # config.yaml 未被改动（覆盖层只写 settings.json）
+    reread = Config(cfg_path)
+    if reread.backends['minimax'].protocol != 'openai_compat':
+        print('  ❌ 重载后 protocol 丢失（settings.json 应被读取）')
+        failures += 1
+    return failures
+
+
+async def _check_balance_structured() -> int:
+    from backends.minimax import MiniMaxBackend
+    from core.config import BackendConf
+
+    failures = 0
+    # 无 base_url / 无 key：应直接返回结构化 dict，绝不抛异常、绝不发起网络请求。
+    conf = BackendConf(name='minimax', type='minimax', base_url='', api_key_env='')
+    backend = MiniMaxBackend(conf, api_key='')
+    try:
+        result = await backend.balance()
+    except Exception as exc:  # noqa: BLE001 - 这是要抓的违规
+        print('  ❌ balance() 抛出了异常（应永不抛异常）：%r' % exc)
+        return 1
+    if not isinstance(result, dict) or 'available' not in result or 'error' not in result or 'raw' not in result:
+        print('  ❌ balance() 未返回结构化 dict（available/error/raw）：%r' % result)
+        failures += 1
+    else:
+        print(
+            '  ✅ balance() 返回结构化 dict：available=%s error=%s'
+            % (result['available'], result['error'])
+        )
+    return failures
+
+
 # ---------------------------------------------------------------- main
 
 def main(argv: list[str] | None = None) -> int:
@@ -320,6 +461,12 @@ def main(argv: list[str] | None = None) -> int:
     app_failures, unwired = run_app_inputs_check(store)
 
     print()
+    print('=' * 72)
+    print('D. 管理后台（settings 覆盖层往返 + balance 结构化）')
+    print('=' * 72)
+    admin_failures = run_admin_checks()
+
+    print()
     print('-' * 72)
     print(f'提示词目录：{store.dir}')
     print(f'已加载 {store.count()} 个，跳过 {len(store.skipped)}，错误 {len(store.errors)}')
@@ -331,11 +478,19 @@ def main(argv: list[str] | None = None) -> int:
         f'契约 {len(EXPECTED_CONTRACT) - missing - contract_failures}'
         f'/{len(EXPECTED_CONTRACT)} 通过（未加载 {missing}），'
         f'App 对账 {len(APP_INPUTS) - unwired - app_failures}'
-        f'/{len(APP_INPUTS) - unwired} 通过（未接线 {unwired}）'
+        f'/{len(APP_INPUTS) - unwired} 通过（未接线 {unwired}），'
+        f'管理后台 {_ADMIN_TOTAL - admin_failures}'
+        f'/{_ADMIN_TOTAL} 通过'
     )
     print(f'耗时 {time.time() - started:.2f}s')
 
-    if repair_failures or contract_failures or app_failures or store.errors:
+    if (
+        repair_failures
+        or contract_failures
+        or app_failures
+        or store.errors
+        or admin_failures
+    ):
         print('❌ selftest FAILED')
         print(f'   反例提醒：截断样本绝不能产出 {_ANTI_INNER_FRAGMENT} 这种内层片段。')
         return 1

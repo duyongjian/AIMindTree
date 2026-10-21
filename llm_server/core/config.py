@@ -11,8 +11,9 @@
 
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -126,6 +127,13 @@ class Config:
         self.timeouts: dict[str, Any] = dict(DEFAULTS['timeouts'])
         self.retry: dict[str, Any] = dict(DEFAULTS['retry'])
         self.backends: dict[str, BackendConf] = {}
+        #: 顶层默认模型（管理后台用）；来自默认后端的 default_model，可能被 settings 覆盖。
+        self.default_model: str = ''
+        #: settings.json 覆盖层（运行时可调、持久化到 llm_server/settings.json，不碰 config.yaml）
+        self._settings: dict[str, Any] = {}
+        self._settings_api_keys: dict[str, str] = {}
+        self._settings_mtime: float = 0.0
+        self._settings_path: Path = self.path.parent / 'settings.json'
         self._env: dict[str, str] = {}
         self._mtime: float = 0.0
         self._env_mtime: float = 0.0
@@ -196,6 +204,15 @@ class Config:
             )
         self.backends = backends
 
+        # 顶层默认模型：默认取「默认后端」的 default_model，
+        # 随后 _load_settings 可能被 settings.json 覆盖。
+        if self.default_backend in self.backends:
+            self.default_model = self.backends[self.default_backend].default_model
+        else:
+            self.default_model = ''
+
+        self._load_settings()
+
         self._env = _load_env(self.env_path)
         try:
             self._mtime = self.path.stat().st_mtime if self.path.is_file() else 0.0
@@ -212,13 +229,20 @@ class Config:
         )
 
     def maybe_reload(self) -> bool:
-        """mtime 变了才重载；返回是否真的重载了。"""
+        """mtime 变了才重载；返回是否真的重载了（含 config.yaml / .env / settings.json）。"""
         try:
             mtime = self.path.stat().st_mtime if self.path.is_file() else 0.0
             env_mtime = self.env_path.stat().st_mtime if self.env_path.is_file() else 0.0
+            settings_mtime = (
+                self._settings_path.stat().st_mtime if self._settings_path.is_file() else 0.0
+            )
         except OSError:
             return False
-        if mtime != self._mtime or env_mtime != self._env_mtime:
+        if (
+            mtime != self._mtime
+            or env_mtime != self._env_mtime
+            or settings_mtime != self._settings_mtime
+        ):
             self.load()
             return True
         return False
@@ -244,12 +268,127 @@ class Config:
         except (TypeError, ValueError):
             return default
 
-    def resolve_api_key(self, conf: BackendConf) -> str:
-        """解析后端密钥：``api_key_env`` 是**环境变量名**。
+    # ---------- 运行时 settings 覆盖层 ----------
 
-        查找顺序：进程环境变量 → ``.env`` 文件。两者都没有返回空串
+    def _load_settings(self) -> None:
+        """读取 ``settings.json`` 覆盖层并合并。
+
+        覆盖优先级：**settings.json > config.yaml > 代码默认值**。
+        只影响：默认后端 / 默认模型 / 各后端 api_key / minimax 协议。
+        """
+        path = self._settings_path
+        raw: dict[str, Any] = {}
+        if path.is_file():
+            try:
+                parsed = json.loads(path.read_text(encoding='utf-8'))
+                raw = parsed if isinstance(parsed, dict) else {}
+            except Exception as exc:  # noqa: BLE001 - 坏文件不影响启动
+                _log.warning('settings.json 解析失败（%s），忽略覆盖层：%s', path, exc)
+                raw = {}
+        self._settings = raw
+        self._settings_api_keys = {}
+
+        # 默认后端覆盖（务必在 default_model / protocol 覆盖之前，保证落到正确后端）
+        db = raw.get('default_backend')
+        if isinstance(db, str) and db in self.backends:
+            self.default_backend = db
+
+        # 默认模型覆盖（落到当前默认后端）
+        dm = raw.get('default_model')
+        if isinstance(dm, str) and dm:
+            self._apply_default_model(dm)
+
+        # 各后端 api_key 覆盖
+        bk = raw.get('backends')
+        if isinstance(bk, dict):
+            for name, sub in bk.items():
+                if isinstance(sub, dict) and isinstance(sub.get('api_key'), str) and sub['api_key']:
+                    self._settings_api_keys[str(name)] = sub['api_key']
+
+        # minimax 协议覆盖
+        mp = raw.get('minimax_protocol')
+        if isinstance(mp, str) and mp in ('openai_compat', 'anthropic_compat'):
+            if 'minimax' in self.backends:
+                self._apply_backend_protocol(self.backends, 'minimax', mp)
+
+        try:
+            self._settings_mtime = path.stat().st_mtime if path.is_file() else 0.0
+        except OSError:  # pragma: no cover
+            self._settings_mtime = 0.0
+
+    def _apply_default_model(self, model: str) -> None:
+        """把默认模型写到「当前默认后端」的配置里（保持 ``conf.model()`` 一致）。"""
+        self.default_model = model
+        if self.default_backend in self.backends:
+            self.backends[self.default_backend] = replace(
+                self.backends[self.default_backend], default_model=model
+            )
+
+    @staticmethod
+    def _apply_backend_protocol(backends: dict[str, BackendConf], name: str, protocol: str) -> None:
+        """覆盖某后端的协议（dataclass 不可变，用 ``replace`` 重建）。"""
+        conf = backends.get(name)
+        if conf is not None:
+            backends[name] = replace(conf, protocol=protocol)
+
+    def save_settings(self, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        """把覆盖层持久化到 ``llm_server/settings.json``（**不写** config.yaml）。
+
+        Args:
+            data: 规范化后的覆盖层，允许字段：
+                ``default_backend`` / ``default_model`` / ``minimax_protocol`` /
+                ``backends: {name: {api_key}}``。
+                只持久化这些字段，且与已有 settings.json **合并**（不整体覆盖）。
+
+        Returns:
+            合并后写入磁盘的 settings 字典。
+        """
+        data = data or {}
+        existing: dict[str, Any] = {}
+        if self._settings_path.is_file():
+            try:
+                parsed = json.loads(self._settings_path.read_text(encoding='utf-8'))
+                existing = parsed if isinstance(parsed, dict) else {}
+            except Exception:  # noqa: BLE001
+                existing = {}
+        if not isinstance(existing, dict):
+            existing = {}
+
+        out: dict[str, Any] = dict(existing)
+        if isinstance(data.get('default_backend'), str) and data['default_backend']:
+            out['default_backend'] = data['default_backend']
+        if isinstance(data.get('default_model'), str) and data['default_model']:
+            out['default_model'] = data['default_model']
+        if isinstance(data.get('minimax_protocol'), str) and data['minimax_protocol']:
+            out['minimax_protocol'] = data['minimax_protocol']
+        if isinstance(data.get('backends'), dict):
+            merged_backends: dict[str, Any] = dict(out.get('backends') or {})
+            for name, sub in data['backends'].items():
+                if isinstance(sub, dict) and 'api_key' in sub:
+                    cur = dict(merged_backends.get(str(name)) or {})
+                    cur['api_key'] = sub['api_key']
+                    merged_backends[str(name)] = cur
+            out['backends'] = merged_backends
+
+        self._settings_path.write_text(
+            json.dumps(out, ensure_ascii=False, indent=2) + '\n', encoding='utf-8'
+        )
+        _log.info(
+            '已写入 settings.json（默认后端=%s，默认模型=%s）',
+            out.get('default_backend'),
+            out.get('default_model'),
+        )
+        return out
+
+    def resolve_api_key(self, conf: BackendConf) -> str:
+        """解析后端密钥：settings.json 的 per-backend 覆盖 > 进程环境变量 > ``.env``。
+
+        查找顺序：settings.json 覆盖 → 进程环境变量 → ``.env`` 文件。都没有返回空串
         （本地后端如 Ollama 不需要密钥，不报错）。
         """
+        override = self._settings_api_keys.get(conf.name)
+        if override:
+            return override.strip()
         if not conf.api_key_env:
             return ''
         value = os.environ.get(conf.api_key_env) or self._env.get(conf.api_key_env) or ''

@@ -54,19 +54,24 @@ backends:
       json_mode_field: format   # P0 可选：Ollama 的 format=json
 
   # ---- 后端二：MiniMax（云端，当前默认后端）----
-  # Q-D：默认走 anthropic_compat（/anthropic/v1/messages）；
-  #      若你的 Key 是 OpenAI 形态，把 protocol 改成 openai_compat 即可（一行切换）。
+  # 2026-10-21 起默认走 openai_compat（/v1/chat/completions，MiniMax OpenAI 兼容形态）；
+  # 若你的 Key 是 Anthropic 形态，把 protocol 改成 anthropic_compat 即可（一行切换）。
+  # 端点统一收口到 api.minimax.cn（旧域 api.minimaxi.com 已废弃）。
   minimax:
     type: minimax
-    protocol: anthropic_compat   # 可改 openai_compat
-    base_url: https://api.minimaxi.com
+    protocol: openai_compat      # 可改 anthropic_compat（/anthropic/v1/messages）
+    base_url: https://api.minimax.cn
     anthropic_path: /anthropic/v1/messages
     openai_path: /v1/chat/completions
     api_key_env: MINIMAX_API_KEY
-    default_model: MiniMax-Text-01
+    default_model: MiniMax-M2.5
     anthropic_version: 2023-06-01
     extra:
       max_tokens: 4096
+      # MiniMax 余额/额度端点（Token 套餐剩余）。
+      # GET {base_url}{balance_path}，头 Authorization: Bearer <订阅Key>。
+      # 也可在管理后台 /admin 的「余额」区查询。
+      balance_path: /v1/token_plan/remains
 
   # ---- 后端三：任意 OpenAI 兼容端点 ----
   # DeepSeek / 通义 / Kimi / 硅基流动 / 本地 vLLM / LM Studio 都填这里。

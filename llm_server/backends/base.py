@@ -103,6 +103,29 @@ class LLMBackend(ABC):
     async def health(self, timeout_s: float | None = None) -> BackendHealth:
         """探活（不抛异常，失败体现在 ``reachable=False``）。"""
 
+    async def list_models(self, timeout_s: float | None = None) -> list[str]:
+        """可用模型 id 列表（含默认模型兜底），失败退化为 ``conf.models``。"""
+        protocol = getattr(self, '_protocol', None)
+        models: list[str] = []
+        if protocol is not None and hasattr(protocol, 'list_models'):
+            try:
+                models = list(await protocol.list_models(timeout_s=timeout_s or 5.0))
+            except Exception:  # noqa: BLE001 - 远端不可达时退化
+                models = []
+        if not models:
+            models = list(self.conf.models)
+        dm = self.conf.model()
+        if dm and dm not in models:
+            models.append(dm)
+        return models
+
+    async def balance(self) -> dict[str, Any]:
+        """查询余额/额度；默认实现不支持，返回结构化结果（**绝不抛异常**）。
+
+        子类（如 MiniMaxBackend）覆盖为真实实现；其它后端返回 ``unsupported``。
+        """
+        return {'available': False, 'error': 'unsupported', 'raw': None}
+
     def model_id(self, override: str | None = None) -> str:
         """本次请求真正使用的模型 id。"""
         return (override or '').strip() or self.conf.model()

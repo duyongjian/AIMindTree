@@ -11,7 +11,7 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 import core.logging as logging_setup
 from backends import create_backend
@@ -25,6 +25,10 @@ from routers import build_router
 _log = get_logger('config')
 
 VERSION = '0.1.0'
+
+#: 管理后台单页（``static/admin.html``）；``GET /`` 与 ``GET /admin`` 都返回它。
+STATIC_DIR = ROOT / 'static'
+ADMIN_HTML = STATIC_DIR / 'admin.html'
 
 
 class AppState:
@@ -138,6 +142,18 @@ def create_app(
         return JSONResponse(err.to_dict(), status_code=err.http_status)
 
     app.include_router(build_router())
+
+    # ---- 管理后台单页（原生 HTML，无额外依赖）----
+    @app.get('/admin', include_in_schema=False)
+    async def admin_page() -> FileResponse:
+        """管理后台：``GET /admin``。"""
+        return FileResponse(str(ADMIN_HTML))
+
+    @app.get('/', include_in_schema=False)
+    async def index_page() -> FileResponse:
+        """根路径也指向管理后台（``GET /``）。"""
+        return FileResponse(str(ADMIN_HTML))
+
     return app
 
 
