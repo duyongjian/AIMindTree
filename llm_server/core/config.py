@@ -49,7 +49,25 @@ DEFAULTS: dict[str, Any] = {
         'structured_on_bad_json': 1,
     },
     'backends': {},
+    #: App 下发用的展示段（服务显示名 / 后台地址 / 下发超时）。
+    'app': {
+        'service_name': 'AIMindTree AI 服务',
+        'console_url': '',
+        'timeouts': {},
+    },
+    #: 同步（Supabase）下发段。**token 只落盘、永不回显**。
+    'sync': {
+        'base_url': '',
+        'enabled': False,
+        'token': '',
+    },
 }
+
+#: settings.json 里允许被覆盖的 per-backend 键（顺序即校验顺序）。
+BACKEND_OVERRIDE_KEYS = ('base_url', 'protocol', 'default_model', 'models', 'api_key')
+
+#: 合法协议（与 BackendConf.protocol 对齐）。
+VALID_PROTOCOLS = ('openai_compat', 'anthropic_compat')
 
 
 @dataclass(frozen=True)
@@ -98,6 +116,37 @@ def _deep_merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, 
     return out
 
 
+def _split_task_backends(raw: Mapping[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
+    """把 ``task_backends`` 拆成 ``(backend 映射, model 映射)``。
+
+    兼容三种形态（config.yaml 里的字符串形态**继续支持**）：
+
+    - ``'T1': 'minimax'`` → backend=minimax, model=''
+    - ``'T1': {'backend': 'minimax', 'model': 'MiniMax-M2.5'}`` → 分别取
+    - ``'T1': None`` → 两者都 ''（= 跟随全局）
+
+    ``Config.task_backends`` 仍保持 ``{task: str}`` 形态 → ``/health`` 输出逐字
+    不变（C4）；per-task 模型覆盖放在并行的 ``task_models`` 里（D3）。
+    """
+    backends: dict[str, str] = {}
+    models: dict[str, str] = {}
+    for key, value in (raw or {}).items():
+        task = str(key).upper().strip()
+        if not task:
+            continue
+        if value is None:
+            backends[task] = ''
+            models[task] = ''
+            continue
+        if isinstance(value, Mapping):
+            backends[task] = str(value.get('backend') or '').strip()
+            models[task] = str(value.get('model') or '').strip()
+        else:
+            backends[task] = str(value).strip()
+            models[task] = ''
+    return backends, models
+
+
 def _load_env(path: Path) -> dict[str, str]:
     """解析 ``.env``：``KEY=VALUE`` 行，``#`` 开头为注释。失败返回空 dict。"""
     env: dict[str, str] = {}
@@ -124,6 +173,12 @@ class Config:
         self.server: dict[str, Any] = dict(DEFAULTS['server'])
         self.default_backend: str = str(DEFAULTS['default_backend'])
         self.task_backends: dict[str, str] = {}
+        #: per-task **模型**覆盖（'' = 跟随后端默认模型）；与 task_backends 并行。
+        self.task_models: dict[str, str] = {}
+        #: App 下发展示段（服务名 / 后台地址 / 下发超时）。
+        self.app: dict[str, Any] = dict(DEFAULTS['app'])
+        #: 同步下发段（token 只落盘、永不回显）。
+        self.sync: dict[str, Any] = dict(DEFAULTS['sync'])
         self.timeouts: dict[str, Any] = dict(DEFAULTS['timeouts'])
         self.retry: dict[str, Any] = dict(DEFAULTS['retry'])
         self.backends: dict[str, BackendConf] = {}
@@ -160,9 +215,11 @@ class Config:
         merged = _deep_merge(DEFAULTS, raw)
         self.server = dict(merged.get('server') or DEFAULTS['server'])
         self.default_backend = str(merged.get('default_backend') or 'ollama')
-        self.task_backends = {
-            str(k).upper(): str(v) for k, v in (merged.get('task_backends') or {}).items()
-        }
+        self.task_backends, self.task_models = _split_task_backends(
+            merged.get('task_backends') or {}
+        )
+        self.app = _deep_merge(DEFAULTS['app'], merged.get('app') or {})
+        self.sync = _deep_merge(DEFAULTS['sync'], merged.get('sync') or {})
         self.timeouts = _deep_merge(DEFAULTS['timeouts'], merged.get('timeouts') or {})
         self.retry = _deep_merge(DEFAULTS['retry'], merged.get('retry') or {})
 
@@ -268,6 +325,34 @@ class Config:
         except (TypeError, ValueError):
             return default
 
+    def task_route(self, task: str) -> tuple[str | None, str | None]:
+        """取某任务的路由 ``(backend, model)``；``None`` = 跟随全局。
+
+        ``task_backends`` / ``task_models`` 里空串一律视为「未覆盖」。
+        """
+        t = str(task or '').upper().strip()
+        backend = (self.task_backends.get(t) or '').strip() or None
+        model = (self.task_models.get(t) or '').strip() or None
+        return backend, model
+
+    def app_timeouts(self) -> dict[str, int]:
+        """``/v1/app/config`` 下发的超时：``settings.app.timeouts`` 覆盖 ``config.timeouts``。"""
+        merged = _deep_merge(self.timeouts, self.app.get('timeouts') or {})
+        out: dict[str, int] = {}
+        for key in ('structured_s', 'chat_s', 'connect_s'):
+            try:
+                out[key] = int(float(merged.get(key, DEFAULTS['timeouts'][key])))
+            except (TypeError, ValueError):
+                out[key] = int(DEFAULTS['timeouts'][key])
+        return out
+
+    def settings_mtime(self) -> float:
+        """``settings.json`` 的 mtime；不存在 / 不可读返回 ``0.0``。"""
+        try:
+            return self._settings_path.stat().st_mtime if self._settings_path.is_file() else 0.0
+        except OSError:
+            return 0.0
+
     # ---------- 运行时 settings 覆盖层 ----------
 
     def _load_settings(self) -> None:
@@ -287,34 +372,62 @@ class Config:
                 raw = {}
         self._settings = raw
         self._settings_api_keys = {}
+        self.app = _deep_merge(DEFAULTS['app'], raw.get('app') or {})
+        self.sync = _deep_merge(DEFAULTS['sync'], raw.get('sync') or {})
 
-        # 默认后端覆盖（务必在 default_model / protocol 覆盖之前，保证落到正确后端）
+        # ① 默认后端覆盖（必须在 ②③ 之前，保证落到正确后端）
         db = raw.get('default_backend')
         if isinstance(db, str) and db in self.backends:
             self.default_backend = db
 
-        # 默认模型覆盖（落到当前默认后端）
+        # ② per-backend 形态覆盖（base_url / protocol / default_model / models / api_key）
+        bk = raw.get('backends')
+        if isinstance(bk, dict):
+            for name, sub in bk.items():
+                if not isinstance(sub, dict):
+                    continue
+                key = str(name)
+                if isinstance(sub.get('api_key'), str) and sub['api_key']:
+                    self._settings_api_keys[key] = sub['api_key']
+                patch: dict[str, Any] = {}
+                if isinstance(sub.get('base_url'), str) and sub['base_url'].strip():
+                    patch['base_url'] = sub['base_url'].strip()
+                if isinstance(sub.get('protocol'), str) and sub['protocol'] in VALID_PROTOCOLS:
+                    patch['protocol'] = sub['protocol']
+                if isinstance(sub.get('default_model'), str) and sub['default_model'].strip():
+                    patch['default_model'] = sub['default_model'].strip()
+                if isinstance(sub.get('models'), list):
+                    patch['models'] = tuple(
+                        str(m).strip() for m in sub['models'] if str(m).strip()
+                    )
+                if patch and key in self.backends:
+                    # frozen dataclass：replace 重建后写回（D1）
+                    self.backends[key] = replace(self.backends[key], **patch)
+
+        # ②b 旧字段 minimax_protocol 继续支持（向后兼容，不改语义）
+        mp = raw.get('minimax_protocol')
+        if isinstance(mp, str) and mp in VALID_PROTOCOLS and 'minimax' in self.backends:
+            self._apply_backend_protocol(self.backends, 'minimax', mp)
+
+        # ②c 重算顶层默认模型（②可能改了 default_backend 的 default_model）
+        if self.default_backend in self.backends:
+            self.default_model = self.backends[self.default_backend].model()
+        else:
+            self.default_model = ''
+
+        # ③ 顶层 default_model 覆盖（**顶层优先**于 per-backend）
         dm = raw.get('default_model')
         if isinstance(dm, str) and dm:
             self._apply_default_model(dm)
 
-        # 各后端 api_key 覆盖
-        bk = raw.get('backends')
-        if isinstance(bk, dict):
-            for name, sub in bk.items():
-                if isinstance(sub, dict) and isinstance(sub.get('api_key'), str) and sub['api_key']:
-                    self._settings_api_keys[str(name)] = sub['api_key']
+        # ④ task_backends 覆盖（对象形态：{T1: 'minimax' | {backend, model} | null}）
+        tb = raw.get('task_backends')
+        if isinstance(tb, dict):
+            new_backends, new_models = _split_task_backends(tb)
+            self.task_backends.update(new_backends)
+            self.task_models.update(new_models)
 
-        # minimax 协议覆盖
-        mp = raw.get('minimax_protocol')
-        if isinstance(mp, str) and mp in ('openai_compat', 'anthropic_compat'):
-            if 'minimax' in self.backends:
-                self._apply_backend_protocol(self.backends, 'minimax', mp)
-
-        try:
-            self._settings_mtime = path.stat().st_mtime if path.is_file() else 0.0
-        except OSError:  # pragma: no cover
-            self._settings_mtime = 0.0
+        self._settings_mtime = self.settings_mtime()
 
     def _apply_default_model(self, model: str) -> None:
         """把默认模型写到「当前默认后端」的配置里（保持 ``conf.model()`` 一致）。"""
@@ -337,8 +450,12 @@ class Config:
         Args:
             data: 规范化后的覆盖层，允许字段：
                 ``default_backend`` / ``default_model`` / ``minimax_protocol`` /
-                ``backends: {name: {api_key}}``。
+                ``backends: {name: {base_url, protocol, default_model, models, api_key}}`` /
+                ``app`` / ``sync`` / ``task_backends``。
                 只持久化这些字段，且与已有 settings.json **合并**（不整体覆盖）。
+
+                per-backend 键语义（写死）：键不存在 = 不改；``null`` = 删除覆盖
+                回落 config.yaml；``api_key`` 空串 = 不改；``base_url`` 空串 = 删除。
 
         Returns:
             合并后写入磁盘的 settings 字典。
@@ -364,19 +481,50 @@ class Config:
         if isinstance(data.get('backends'), dict):
             merged_backends: dict[str, Any] = dict(out.get('backends') or {})
             for name, sub in data['backends'].items():
-                if isinstance(sub, dict) and 'api_key' in sub:
-                    cur = dict(merged_backends.get(str(name)) or {})
-                    cur['api_key'] = sub['api_key']
-                    merged_backends[str(name)] = cur
+                if not isinstance(sub, dict):
+                    continue
+                cur: dict[str, Any] = dict(merged_backends.get(str(name)) or {})
+                for key in BACKEND_OVERRIDE_KEYS:
+                    if key not in sub:  # 键不存在 = 不改
+                        continue
+                    value = sub[key]
+                    if value is None:  # null = 删除覆盖（回落 config.yaml）
+                        cur.pop(key, None)
+                        continue
+                    if key == 'api_key':
+                        if not str(value).strip():  # 空串 = 不改（表单友好）
+                            continue
+                    elif key == 'base_url':
+                        if not str(value).strip():  # 空串 = 删除覆盖
+                            cur.pop(key, None)
+                            continue
+                    elif key == 'protocol':
+                        if value not in VALID_PROTOCOLS:
+                            continue
+                    elif key == 'models':
+                        if not isinstance(value, list):
+                            continue
+                        value = [str(m).strip() for m in value if str(m).strip()]
+                    cur[key] = value
+                merged_backends[str(name)] = cur
             out['backends'] = merged_backends
+
+        if isinstance(data.get('app'), dict):
+            out['app'] = _deep_merge(out.get('app') or {}, data['app'])
+        if isinstance(data.get('sync'), dict):
+            out['sync'] = _deep_merge(out.get('sync') or {}, data['sync'])
+        if isinstance(data.get('task_backends'), dict):
+            out['task_backends'] = data['task_backends']
 
         self._settings_path.write_text(
             json.dumps(out, ensure_ascii=False, indent=2) + '\n', encoding='utf-8'
         )
         _log.info(
-            '已写入 settings.json（默认后端=%s，默认模型=%s）',
+            '已写入 settings.json（默认后端=%s，默认模型=%s，app=%s，sync_token_set=%s）',
             out.get('default_backend'),
             out.get('default_model'),
+            bool((out.get('app') or {}).get('service_name')),
+            bool(str((out.get('sync') or {}).get('token') or '').strip()),
         )
         return out
 

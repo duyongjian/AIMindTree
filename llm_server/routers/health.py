@@ -14,6 +14,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from backends.base import BackendHealth
+from core.app_config import SERVER_VERSION
 from core.logging import get_logger
 
 router = APIRouter(tags=['health'])
@@ -22,7 +23,8 @@ _log = get_logger('backend')
 #: 进程启动时刻（用于 uptime_s）
 _START = time.time()
 
-VERSION = '0.1.0'
+#: 与 ``server.VERSION`` / ``core.app_config.SERVER_VERSION`` 三处同源。
+VERSION = SERVER_VERSION
 
 
 @router.get('/health')

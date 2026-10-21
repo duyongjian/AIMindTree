@@ -12,9 +12,11 @@ from typing import AsyncIterator
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 import core.logging as logging_setup
 from backends import create_backend
+from core.app_config import SERVER_VERSION
 from core.config import ROOT, Config
 from core.errors import LlmError, internal
 from core.logging import get_logger
@@ -24,11 +26,13 @@ from routers import build_router
 
 _log = get_logger('config')
 
-VERSION = '0.1.0'
+#: 与 ``core.app_config.SERVER_VERSION`` / ``routers/health.VERSION`` 三处同源。
+VERSION = SERVER_VERSION
 
-#: 管理后台单页（``static/admin.html``）；``GET /`` 与 ``GET /admin`` 都返回它。
+#: 静态资源目录（``static/app.css`` / ``static/*.js`` 经 ``/static/*`` 提供）。
 STATIC_DIR = ROOT / 'static'
-ADMIN_HTML = STATIC_DIR / 'admin.html'
+#: 管理后台单页骨架；``GET /`` 与 ``GET /admin`` 都返回它。
+INDEX_HTML = STATIC_DIR / 'index.html'
 
 
 class AppState:
@@ -143,16 +147,20 @@ def create_app(
 
     app.include_router(build_router())
 
-    # ---- 管理后台单页（原生 HTML，无额外依赖）----
+    # ---- 静态资源（css / js；fastapi.staticfiles 自带，不新增依赖，C2 ✔）----
+    if STATIC_DIR.is_dir():
+        app.mount('/static', StaticFiles(directory=str(STATIC_DIR)), name='static')
+
+    # ---- 管理后台单页骨架（原生 HTML，无额外依赖）----
     @app.get('/admin', include_in_schema=False)
     async def admin_page() -> FileResponse:
         """管理后台：``GET /admin``。"""
-        return FileResponse(str(ADMIN_HTML))
+        return FileResponse(str(INDEX_HTML), headers={'Cache-Control': 'no-store'})
 
     @app.get('/', include_in_schema=False)
     async def index_page() -> FileResponse:
         """根路径也指向管理后台（``GET /``）。"""
-        return FileResponse(str(ADMIN_HTML))
+        return FileResponse(str(INDEX_HTML), headers={'Cache-Control': 'no-store'})
 
     return app
 

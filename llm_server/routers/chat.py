@@ -20,6 +20,7 @@ from backends.base import Message
 from core.errors import LlmError, invalid_request
 from core.json_repair import repair
 from core.logging import dump, get_logger
+from core.stats import record as stats_record
 
 router = APIRouter(tags=['chat'])
 _log = get_logger('chat')
@@ -101,6 +102,9 @@ async def chat(request: Request) -> JSONResponse | StreamingResponse:
     stream = bool(body.get('stream', True))
     timeout_s = float(body.get('timeout_s') or config.timeout('chat_s', 120.0))
     model_override = (body.get('model') or '').strip() or None
+    if model_override is None and task_code:
+        # AC-06：per-task 模型覆盖（只在请求未显式带 model 时生效，D2）
+        model_override = state.registry.resolve_model(task_code)
     conversation_id = (body.get('conversation_id') or '').strip() or _new_conversation_id()
     user = str(body.get('user') or 'aimindtree-app')
 
@@ -139,6 +143,7 @@ async def chat(request: Request) -> JSONResponse | StreamingResponse:
             conversation_id=conversation_id,
             backend_name=backend_conf.name,
             task_code=task_code,
+            input_chars=len(query),
         )
 
     return StreamingResponse(
@@ -154,6 +159,7 @@ async def chat(request: Request) -> JSONResponse | StreamingResponse:
             backend_name=backend_conf.name,
             task_code=task_code,
             variant=variant_used,
+            input_chars=len(query),
         ),
         media_type='text/event-stream',
         headers={
@@ -165,7 +171,8 @@ async def chat(request: Request) -> JSONResponse | StreamingResponse:
 
 
 async def _blocking(backend, messages, *, temperature, max_tokens, timeout_s, model,
-                    need_json, conversation_id, backend_name, task_code) -> JSONResponse:
+                    need_json, conversation_id, backend_name, task_code,
+                    input_chars=0) -> JSONResponse:
     """``stream:false``：一次性返回。"""
     started = time.time()
     completion = await backend.complete(
@@ -183,6 +190,18 @@ async def _blocking(backend, messages, *, temperature, max_tokens, timeout_s, mo
     latency_ms = int((time.time() - started) * 1000)
     dump(_log, f'{task_code or "CHAT"} response', content)
     _log.info('%s chat（blocking）完成：%dms', task_code or 'CHAT', latency_ms)
+    stats_record(
+        kind='chat',
+        task=task_code or 'CHAT',
+        backend=backend_name,
+        model=completion.model_id or '',
+        latency_ms=latency_ms,
+        ok=True,
+        error_code=None,
+        attempts=1,
+        input_chars=input_chars,
+        output_chars=len(content),
+    )
     return JSONResponse(
         {
             'content': content,
@@ -197,7 +216,8 @@ async def _blocking(backend, messages, *, temperature, max_tokens, timeout_s, mo
 
 
 async def _sse(backend, messages, *, temperature, max_tokens, timeout_s, model,
-               need_json, conversation_id, backend_name, task_code, variant):
+               need_json, conversation_id, backend_name, task_code, variant,
+               input_chars=0):
     """SSE 生成器：逐条 ``data: {...}\\n\\n``。"""
     started = time.time()
     buffer: list[str] = []
@@ -238,6 +258,19 @@ async def _sse(backend, messages, *, temperature, max_tokens, timeout_s, model,
                 'latency_ms': latency_ms,
             }
         )
+        stats_record(
+            kind='chat',
+            task=task_code or 'CHAT',
+            variant=variant,
+            backend=backend_name,
+            model=backend.model_id(model) or '',
+            latency_ms=latency_ms,
+            ok=True,
+            error_code=None,
+            attempts=1,
+            input_chars=input_chars,
+            output_chars=len(content),
+        )
     except Exception as exc:  # noqa: BLE001 - 流中途出错也要给客户端一个终态
         from core.errors import LlmError
 
@@ -251,6 +284,20 @@ async def _sse(backend, messages, *, temperature, max_tokens, timeout_s, model,
                 'retryable': False,
             }
         _log.error('chat 流中断：%s', payload.get('message'))
+        stats_record(
+            kind='chat',
+            task=task_code or 'CHAT',
+            variant=variant,
+            backend=backend_name,
+            model=model or '',
+            latency_ms=int((time.time() - started) * 1000),
+            ok=False,
+            error_code=payload.get('code'),
+            attempts=1,
+            input_chars=input_chars,
+            output_chars=len(''.join(buffer)),
+            message=str(payload.get('message') or '')[:200],
+        )
         yield _line({'done': True, 'error': payload, 'conversation_id': conversation_id})
 
 

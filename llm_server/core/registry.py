@@ -90,3 +90,13 @@ class TaskRegistry:
         except LlmError:
             pass
         return conf
+
+    def resolve_model(self, task: str) -> str | None:
+        """某任务的模型覆盖；``None`` = 跟随后端默认模型（AC-06）。
+
+        只在**请求未显式带 model** 时被调用（router 层，D2），因此不会覆盖
+        调用方显式指定的模型。任意字符串都被接受（模型列表可能随时变，
+        不做存在性校验），由后端在请求时报错。
+        """
+        _, model = self.config.task_route(str(task or '').upper())
+        return model

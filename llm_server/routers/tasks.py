@@ -6,6 +6,7 @@ App 侧 ``LlmServerClient.runTask`` 打这个端点（T1/T2/T3/T4/T9/T12/T13）�
 
 from __future__ import annotations
 
+import json
 import time
 
 from fastapi import APIRouter, Request
@@ -15,6 +16,7 @@ from backends.base import Message
 from core.errors import LlmError, bad_json, invalid_request
 from core.json_repair import repair
 from core.logging import dump, get_logger
+from core.stats import record as stats_record
 
 router = APIRouter(tags=['tasks'])
 _log = get_logger('task')
@@ -39,7 +41,38 @@ async def _read_body(request: Request) -> dict:
 
 @router.post('/v1/task/{task_code}')
 async def run_task(task_code: str, request: Request) -> JSONResponse:
-    """执行一次结构化任务。"""
+    """执行一次结构化任务（薄壳：只负责失败埋点，业务体在 :func:`_run_task_impl`）。
+
+    成功埋点写在 ``_run_task_impl`` 里（那里才拿得到 backend / model / attempts）；
+    ``bad_json`` 走 ``raise``，会被这里的 ``except LlmError`` 捕获并记一条
+    ``ok=False`` —— 符合 AC-07「成功与 LlmError 都记录」。
+    """
+    started0 = time.time()
+    try:
+        return await _run_task_impl(task_code, request)
+    except LlmError as exc:
+        stats_record(
+            kind='task',
+            task=str(task_code or '').upper(),
+            ok=False,
+            error_code=exc.code,
+            backend=getattr(exc, 'backend', None),
+            latency_ms=int((time.time() - started0) * 1000),
+        )
+        raise
+    except Exception:
+        stats_record(
+            kind='task',
+            task=str(task_code or '').upper(),
+            ok=False,
+            error_code='internal',
+            latency_ms=int((time.time() - started0) * 1000),
+        )
+        raise
+
+
+async def _run_task_impl(task_code: str, request: Request) -> JSONResponse:
+    """执行一次结构化任务（原 ``run_task`` 函数体，逐行不变 + 成功埋点）。"""
     state = request.app.state
     config = state.config
     registry = state.registry
@@ -60,6 +93,9 @@ async def run_task(task_code: str, request: Request) -> JSONResponse:
     # 3) 后端 / 模型 / 超时
     backend_conf = registry.resolve_backend(meta.task, body.get('backend'))
     model_override = (body.get('model') or '').strip() or None
+    if model_override is None:
+        # AC-06：per-task 模型覆盖（只在请求未显式带 model 时生效，D2）
+        model_override = registry.resolve_model(meta.task)
     temperature = float(body.get('temperature') or meta.temperature)
     timeout_s = float(body.get('timeout_s') or config.timeout('structured_s', 120.0))
     max_attempts = 1 + max(0, int(config.retry.get('structured_on_bad_json', 1)))
@@ -122,6 +158,21 @@ async def run_task(task_code: str, request: Request) -> JSONResponse:
         attempts,
         latency_ms,
         'yes' if parsed is not None else 'no',
+    )
+
+    # 成功埋点（AC-07）：record() 永不抛，不影响业务返回。
+    stats_record(
+        kind='task',
+        task=meta.task,
+        variant=meta.variant,
+        backend=backend_conf.name,
+        model=model_id or '',
+        latency_ms=latency_ms,
+        ok=True,
+        error_code=None,
+        attempts=attempts,
+        input_chars=len(json.dumps(values, ensure_ascii=False)),
+        output_chars=len(content),
     )
 
     return JSONResponse(
