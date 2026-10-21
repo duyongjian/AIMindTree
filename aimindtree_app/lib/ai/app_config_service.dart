@@ -375,6 +375,17 @@ class AppConfigService {
       }
       target ??= llm.isEmpty ? null : llm.first;
 
+      // 降级守卫（架构师裁定 R-降级）：来源不是「服务端下发」时（服务不可达 /
+      // 旧版服务 404 / 整体异常），绝不用降级快照改写已存在的真实下发行 ——
+      // 否则首次成功下发（可能是局域网地址）后服务临时挂掉，该行会被写成
+      // `127.0.0.1` 且服务恢复前改不回来。只有表里**没有** llm_server 行时
+      // 才允许 seed 一次。
+      if (lastSource != AppConfigSource.pushed && target != null) {
+        _log.i('source=$lastSource 已有 llm_server 行（id=${target.id}），'
+            '降级快照不落库，保留下发行');
+        return;
+      }
+
       final backend = backendOf(snap.backend); // 唯一的白名单容错（C8）
       final model = snap.model.trim();
       final name = snap.serviceName.trim().isEmpty

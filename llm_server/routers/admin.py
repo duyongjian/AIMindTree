@@ -333,7 +333,7 @@ def _validate_task_backends(body: dict, config: Any) -> dict:
         if model is not None and not isinstance(model, str):
             raise invalid_request(f'task_backends.{code}.model 必须是字符串或 null')
         out[code] = {'backend': name, 'model': (model or '').strip()}
-    return {'task_backends': out} if out else {}
+    return {'task_backends': out}
 
 
 # ---------------------------------------------------------------- 任务路由
@@ -398,7 +398,13 @@ async def put_admin_routes(request: Request) -> JSONResponse:
 
     canonical = _validate_task_backends(body, config)
     if not canonical:
-        raise invalid_request('缺少 task_backends（形如 {"T1": {"backend": "...", "model": "..."}}）')
+        # 顶层没有 task_backends 键 → 视为漏传，报错要求显式给出；
+        # 显式传 null → 「不修改」，直接返回当前路由（与数组元素里 null=跟随全局 不冲突）。
+        if 'task_backends' not in body:
+            raise invalid_request(
+                '缺少 task_backends（形如 {"T1": {"backend": "...", "model": "..."}}）'
+            )
+        return JSONResponse(_routes_payload(request))
 
     config.save_settings(canonical)
     config.load()

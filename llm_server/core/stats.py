@@ -144,6 +144,10 @@ def snapshot(window_s: float = 3600.0) -> dict[str, Any]:
     with _lock:
         entries = [e for e in _buf if float(e.get('ts') or 0.0) >= now - window]
         total_since_startup = _SEQ
+        # 环形缓冲**当前占用**（必须在锁内读）；MAX_ENTRIES 是上限常量，
+        # 不开字段 —— 三个条数字段要各是一个语义：total=窗口内 / buffer_size=当前占用 /
+        # since_startup=累计。
+        buffer_len = len(_buf)
 
     total = len(entries)
     ok_list = [e for e in entries if e.get('ok')]
@@ -218,7 +222,7 @@ def snapshot(window_s: float = 3600.0) -> dict[str, Any]:
         'by_backend': by_backend,
         'last_error': last_error,
         'slowest': slowest,
-        'buffer_size': MAX_ENTRIES,
+        'buffer_size': int(buffer_len),
         'since_startup': int(total_since_startup),
     }
 
