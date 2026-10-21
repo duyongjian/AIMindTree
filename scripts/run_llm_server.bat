@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 REM ============================================================
 REM  AIMindTree 服务端一键启动 —— Ollama + LLM Server
 REM

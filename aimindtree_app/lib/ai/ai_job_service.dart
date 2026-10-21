@@ -217,6 +217,12 @@ class AiJobService {
   /// 修订号：任何 job 状态变化 +1（托盘 / 页面内联进度订阅它）。
   final ValueNotifier<int> revision = ValueNotifier<int>(0);
 
+  /// 通知合流锁：把修订号 +1 延后到微任务，避免在 build 阶段（如
+  /// ``TeacherPage.initState`` 调 ``holdInteractive``）同步 ``setState`` 触发
+  /// 「setState during build」断言（P0-1 黑屏根因）。托盘内容读 ``_jobs``
+  /// 映射而非 ``revision.value``，所以延后一帧无语义损失。
+  bool _notifyScheduled = false;
+
   /// 终态广播（托盘据此弹 SnackBar）。
   final StreamController<AiJob> _terminal =
       StreamController<AiJob>.broadcast();
@@ -509,7 +515,14 @@ class AiJobService {
   }
 
   void _notify() {
-    revision.value++;
+    if (_notifyScheduled) return;
+    _notifyScheduled = true;
+    scheduleMicrotask(() {
+      _notifyScheduled = false;
+      // ValueNotifier.value 的 setter 在值变化时才通知监听者；无监听者时
+      // 仅改一个 int，零开销。合流（_notifyScheduled）已避免每帧多次 +1。
+      revision.value++;
+    });
   }
 
   AiJob? _findRecent(String jobId) {

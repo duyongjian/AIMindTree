@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 REM AIMindTree Windows 桌面应用 —— 快速启动（日常用这个）。
 REM
 REM 与 scripts\run_windows.bat 的区别：**跳过** flutter pub get 与项目门禁

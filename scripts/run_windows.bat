@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 REM 一键启动 AIMindTree Windows 桌面应用。
 REM
 REM 踩过的坑（都实际发生过，别删注释）：
