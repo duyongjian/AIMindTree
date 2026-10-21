@@ -464,33 +464,82 @@ class KnowledgeRepository {
     }
   }
 
-  // ============ 查询 ============
-
-  Future<List<KnowledgePoint>> allKnowledgePoints() async {
-    final rows = await _db.select(_db.knowledgePoints).get();
-    return rows.map(_kpFromRow).toList();
+  /// 软删除单个知识点（墓碑语义）。
+  ///
+  /// 与 [deleteNote] 的 `deletePoints=true`（硬删、不可恢复）不同，这里只给
+  /// KP 打 `deletedAt` 墓碑，并级联**硬删**其前置边、掌握记录、知识树成员关系
+  /// （这些从属数据无需独立墓碑，KP 墓碑足以驱动 LWW 同步判定为删除）。
+  ///
+  /// 选用软删的原因（PRD §4.1 删除语义矩阵）：让另一端同步时能识别「删除」
+  /// 而非「本地没有这条数据」，且误删可在库内翻回 `deletedAt=null` 恢复。
+  ///
+  /// 返回受影响的知识点数量（1 或 0）。
+  Future<Result<int>> softDeleteKnowledgePoint(String kpId) async {
+    try {
+      final row = await (_db.select(_db.knowledgePoints)
+            ..where((t) => t.id.equals(kpId)))
+          .getSingleOrNull();
+      if (row == null) return const Success<int>(0);
+      // 级联：清从属数据（硬删）。
+      await (_db.delete(_db.prerequisiteEdges)
+            ..where((t) => t.fromKpId.equals(kpId) | t.toKpId.equals(kpId)))
+          .go();
+      await (_db.delete(_db.masteryRecords)..where((t) => t.kpId.equals(kpId)))
+          .go();
+      await (_db.delete(_db.canvasNodes)
+            ..where((t) => t.targetType.equals('kp') & t.targetId.equals(kpId)))
+          .go();
+      // KP 本体软删（墓碑；version 递增配合 LWW）。
+      await (_db.update(_db.knowledgePoints)..where((t) => t.id.equals(kpId)))
+          .write(KnowledgePointsCompanion(
+        deletedAt: Value(DateTime.now().toUtc()),
+        updatedAt: Value(DateTime.now().toUtc()),
+        version: Value(row.version + 1),
+      ));
+      _log.i('软删知识点 $kpId（墓碑 + 级联清边/掌握/树成员）');
+      return const Success<int>(1);
+    } on Object catch (e, s) {
+      _log.e('软删知识点失败', error: e, stackTrace: s);
+      return Failure(e, s);
+    }
   }
 
+  // ============ 查询 ============
+
+  /// 全部**未删除**知识点（按更新时间倒序）。
+  ///
+  /// 软删铁律：KP 一旦软删（`deletedAt` 非 null）即视为墓碑，必须过滤，
+  /// 否则会泄漏到「本地库累计」、知识树、AI 助手工具等所有读路径
+  ///（用户报「知识点删了本地库还看得到」的根因之一）。
+  Future<List<KnowledgePoint>> allKnowledgePoints() async {
+    final rows = await (_db.select(_db.knowledgePoints)
+          ..where((t) => t.deletedAt.isNull()))
+        .get();
+    return rows.map(_kpFromRow).toList()
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+  }
+
+  /// 某篇笔记产生的**未删除**知识点。
   Future<List<KnowledgePoint>> pointsForNote(String noteId) async {
     final rows = await (_db.select(_db.knowledgePoints)
-          ..where((t) => t.sourceNoteId.equals(noteId)))
+          ..where((t) => t.sourceNoteId.equals(noteId) & t.deletedAt.isNull()))
         .get();
     return rows.map(_kpFromRow).toList();
   }
 
-  /// 某篇笔记产生的知识点 id（删除笔记时用于算影响面）。
+  /// 某篇笔记产生的知识点 id（删除笔记时用于算影响面；只算未删的）。
   Future<List<String>> pointIdsOfNote(String noteId) async {
     final rows = await (_db.select(_db.knowledgePoints)
-          ..where((t) => t.sourceNoteId.equals(noteId)))
+          ..where((t) => t.sourceNoteId.equals(noteId) & t.deletedAt.isNull()))
         .get();
     return rows.map((r) => r.id).toList();
   }
 
-  /// 按 id 批量取知识点（知识树的成员可能来自多篇笔记，不能按 sourceNote 查）。
+  /// 按 id 批量取**未删除**知识点（知识树的成员可能来自多篇笔记，不能按 sourceNote 查）。
   Future<List<KnowledgePoint>> pointsByIds(List<String> ids) async {
     if (ids.isEmpty) return const <KnowledgePoint>[];
     final rows = await (_db.select(_db.knowledgePoints)
-          ..where((t) => t.id.isIn(ids)))
+          ..where((t) => t.id.isIn(ids) & t.deletedAt.isNull()))
         .get();
     return rows.map(_kpFromRow).toList();
   }

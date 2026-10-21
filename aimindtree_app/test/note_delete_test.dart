@@ -166,4 +166,40 @@ void main() {
       expect(await repo.pointsByIds(others), hasLength(3));
     });
   });
+
+  group('软删知识点（P0-3：删了本地库不再看得到）', () {
+    test('软删后 allKnowledgePoints / pointsByIds / pointsForNote 不再返回',
+        () async {
+      final kpIds = await seedNote('n1');
+      expect(await repo.allKnowledgePoints(), hasLength(3));
+      expect(await repo.pointsByIds(kpIds), hasLength(3));
+
+      final res = await repo.softDeleteKnowledgePoint(kpIds.first);
+      expect((res as Success<int>).value, 1);
+
+      // 已软删的不再出现在任何读路径（修复「删了本地库还看得到」）
+      expect(await repo.pointsByIds(kpIds), hasLength(2));
+      expect(await repo.pointsForNote('n1'), hasLength(2));
+      expect(await repo.allKnowledgePoints(), hasLength(2));
+    });
+
+    test('软删级联清掉前置边 / 掌握记录 / 树成员关系', () async {
+      final kpIds = await seedNote('n1');
+      await trees.createTree('A', fixedId: 'treeA');
+      await trees.addPoints('treeA', kpIds);
+      await repo.addManualPrerequisiteEdge(kpIds[0], kpIds[1]);
+      await repo.setMastery(kpIds[0], MasteryStatus.mastered);
+
+      await repo.softDeleteKnowledgePoint(kpIds[0]);
+
+      expect(await db.select(db.prerequisiteEdges).get(), isEmpty);
+      expect(await db.select(db.masteryRecords).get(), isEmpty);
+      expect(await trees.memberPointIds('treeA'), hasLength(2));
+    });
+
+    test('软删不存在的 id 返回 0', () async {
+      final res = await repo.softDeleteKnowledgePoint('nope');
+      expect((res as Success<int>).value, 0);
+    });
+  });
 }
