@@ -295,26 +295,46 @@ class SettingsRepository {
         ? baseUrl.substring(0, baseUrl.length - 1)
         : baseUrl;
     try {
-      final client = HttpClient()..connectionTimeout = timeout;
+      final client = HttpClient()
+        ..connectionTimeout = timeout
+        // 127.0.0.1 / 本机探活绝不经系统代理（对齐服务端 trust_env=false）：
+        // 本机有 HTTP_PROXY 时 Dart 默认也会把 loopback 请求发往代理而「假连不上」。
+        ..findProxy = (Uri uri) => 'DIRECT';
       final req = await client.getUrl(Uri.parse('$base/health'));
       final resp = await req.close().timeout(timeout);
       final body = await resp.transform(utf8.decoder).join();
       client.close(force: true);
       if (resp.statusCode != 200) return 'HTTP ${resp.statusCode}';
-      // 服务活着但后端全挂 → 也要告诉用户，否则「测试成功」后一跑就失败。
+
+      // 服务活着但后端不可达 → 只有「默认后端」不可达才算真失败：
+      // App 实际只走 default_backend（记忆：default_backend 决定全局），
+      // 非默认后端（如未订阅的 MiniMax）挂了不影响使用，不应误报「未连接」。
       final decoded = jsonDecode(body);
       if (decoded is Map && decoded['backends'] is List) {
+        final backends = decoded['backends'] as List;
+        final defaultName = decoded['default_backend'];
         final down = <String>[];
-        for (final b in decoded['backends'] as List) {
-          if (b is Map && b['reachable'] != true) {
-            down.add('${b['name'] ?? '?'}');
+        String? defaultDown;
+        for (final b in backends) {
+          if (b is! Map) continue;
+          final name = b['name'];
+          final reachable = b['reachable'] == true;
+          if (!reachable) {
+            if (name is String) down.add(name);
+            if (name is String && name == defaultName) defaultDown = name;
           }
         }
-        final total = (decoded['backends'] as List).length;
+        // 全部不可达（兜底，避免 default_backend 缺失时漏报）。
+        if (down.length == backends.length) {
+          return '服务已启动，但全部后端不可达：${down.join('、')}（请在管理后台检查）。';
+        }
+        // 仅默认后端不可达 → 真失败（App 实际走它）。
+        if (defaultDown != null) {
+          return '服务已启动，但默认后端「$defaultDown」不可达（请在管理后台检查）。';
+        }
+        // 仅非默认后端不可达 → 连通，记日志即可，不阻断状态。
         if (down.isNotEmpty) {
-          return '服务已启动，但后端不可用：${down.join('、')}'
-              '（$total 个中 ${down.length} 个不可达）。'
-              '默认后端之外的后端不可达不影响使用。';
+          _log.i('AI 服务连通，非默认后端不可用：${down.join('、')}（不影响使用）');
         }
       }
       return null;

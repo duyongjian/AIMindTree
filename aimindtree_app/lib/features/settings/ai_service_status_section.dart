@@ -219,6 +219,14 @@ class AiServiceStatusSectionState extends State<AiServiceStatusSection> {
                   ? '尚未检查'
                   : '${_probe!.ok ? '连通' : '失败'} · ${_probe!.ms}ms',
             ),
+            if (_probe != null && !_probe!.ok && _probe!.error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  '原因：${_probe!.error}',
+                  style: const TextStyle(color: Colors.red, fontSize: 12),
+                ),
+              ),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.only(top: 6),

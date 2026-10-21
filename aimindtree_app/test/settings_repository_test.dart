@@ -4,6 +4,9 @@
 /// 跑前会抛 MissingPluginException 或 502，故加 `skip` 在真机启用。
 library;
 
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:aimindtree_app/ai/ai_task.dart';
 import 'package:aimindtree_app/ai/extraction_service.dart';
 import 'package:aimindtree_app/core/secret_store.dart';
@@ -272,6 +275,120 @@ void main() {
         final enabled = await repo.enabledProviders();
         expect(enabled.length, 1);
         expect(enabled.first.name, 'B');
+      });
+    },
+  );
+
+  // P0-4：探活只应因「默认后端」不可达而失败；非默认后端（如未订阅的 MiniMax）
+  // 挂了不该误报「未连接」。用本地 HttpServer 模拟 /health。
+  group(
+    'testLlmServer 探活（P0-4：非默认后端挂了不算未连接）',
+    skip: shouldSkip,
+    () {
+      late AppDatabase db;
+      late SettingsRepository repo;
+      late InMemorySecretStore store;
+      HttpServer? server;
+
+      setUp(() {
+        db = AppDatabase(NativeDatabase.memory());
+        store = InMemorySecretStore();
+        repo = SettingsRepository(db, secretStore: store);
+      });
+
+      tearDown(() async {
+        await server?.close(force: true);
+        server = null;
+        await db.close();
+      });
+
+      Future<String> _startHealth(Map<String, Object?> healthJson) async {
+        server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        server!.listen((req) async {
+          if (req.uri.path == '/health') {
+            req.response
+              ..statusCode = 200
+              ..headers.contentType = ContentType.json
+              ..write(jsonEncode(healthJson));
+          } else {
+            req.response.statusCode = 404;
+          }
+          await req.response.close();
+        });
+        return 'http://127.0.0.1:${server!.port}';
+      }
+
+      test('默认后端可达、非默认后端挂 → 探活成功', () async {
+        final base = await _startHealth(<String, Object?>{
+          'default_backend': 'ollama',
+          'backends': <Map<String, Object?>>[
+            <String, Object?>{
+              'name': 'ollama',
+              'reachable': true,
+              'base_url': 'x',
+              'models': <Object>[],
+              'error': null,
+            },
+            <String, Object?>{
+              'name': 'minimax',
+              'reachable': false,
+              'base_url': 'y',
+              'models': <Object>[],
+              'error': 'no subscription',
+            },
+          ],
+        });
+        final err = await repo.testLlmServer(base);
+        expect(err, isNull, reason: '非默认后端挂了不应误报未连接');
+      });
+
+      test('默认后端挂 → 探活失败并点名默认后端', () async {
+        final base = await _startHealth(<String, Object?>{
+          'default_backend': 'ollama',
+          'backends': <Map<String, Object?>>[
+            <String, Object?>{
+              'name': 'ollama',
+              'reachable': false,
+              'base_url': 'x',
+              'models': <Object>[],
+              'error': 'down',
+            },
+            <String, Object?>{
+              'name': 'minimax',
+              'reachable': true,
+              'base_url': 'y',
+              'models': <Object>[],
+              'error': null,
+            },
+          ],
+        });
+        final err = await repo.testLlmServer(base);
+        expect(err, isNotNull);
+        expect(err, contains('默认后端'));
+      });
+
+      test('全部后端挂 → 探活失败', () async {
+        final base = await _startHealth(<String, Object?>{
+          'default_backend': 'ollama',
+          'backends': <Map<String, Object?>>[
+            <String, Object?>{
+              'name': 'ollama',
+              'reachable': false,
+              'base_url': 'x',
+              'models': <Object>[],
+              'error': 'down',
+            },
+            <String, Object?>{
+              'name': 'minimax',
+              'reachable': false,
+              'base_url': 'y',
+              'models': <Object>[],
+              'error': 'down',
+            },
+          ],
+        });
+        final err = await repo.testLlmServer(base);
+        expect(err, isNotNull);
       });
     },
   );
