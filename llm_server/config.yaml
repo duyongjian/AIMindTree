@@ -17,8 +17,9 @@ server:
     - http://localhost
 
 # 默认后端（D11：不做按任务强制，统一走这里；task_backends 留空）
-# 2026-10-21 起默认改为 minimax（云端 Coding Plan Key）；本地 Ollama 作为可选后端保留。
-default_backend: minimax
+# 2026-10-21：切回本地 Ollama（零成本、无限额）。MiniMax 云端保留为可选后端，
+# 其账户当前无有效 Token 套餐（/v1/admin/balance 会报 available:false），需要时再切。
+default_backend: ollama
 
 # 按任务覆盖（可选；未列出的任务走 default_backend）
 # 例：把 T1 单独切到云端：
@@ -36,19 +37,22 @@ retry:
   structured_on_bad_json: 1   # 六层容错失败后原地重跑次数（S-13）
 
 backends:
-  # ---- 后端一：Ollama（本地，可选）----
-  # 前置两步（本机默认没起、也没拉模型，见 README「使用本地 Ollama」）：
-  #   ollama serve
-  #   ollama pull llama3
-  # 没起 Ollama 也不影响服务启动，只是 /health 里 reachable=false（Q-I）。
-  # ⚠️ 没拉模型时，/health 仍 200，但首次请求会报「模型不存在」——先 pull 再调。
+  # ---- 后端一：Ollama（本地，当前默认）----
+  # 前置：ollama serve 已在跑，且 pull 过下面列出的模型。
+  # 本机实测（2026-10-21，i7-13650HX + 独显，`ollama ps` 确认 100% GPU）：
+  #   qwen3:8b-8k     5.2 GB   ≈ 46 tok/s  ← 默认：由 ollama/Modelfile.qwen3-8k 派生
+  #   qwen3:8b        5.2 GB   ≈ 0.3 tok/s ← 原厂默认 num_ctx=40960 → 撑爆显存 → 46%/54% CPU/GPU
+  #   qwen2.5:0.5b    397 MB   ≈ 111 tok/s ← 极快，但能力太弱（只回抄 schema，T1 抽不出可用锚点）
+  # 经验：Ollama 的 /v1/chat/completions 不接受 num_ctx，只能靠派生模型固定上下文。
+  # 没起 Ollama 不影响服务启动，只是 /health 里 reachable=false（Q-I）。
+  # ⚠️ 模型名必须与 `ollama list` 完全一致（含 tag），否则首次请求报「模型不存在」。
   ollama:
     type: ollama
     protocol: openai_compat
     base_url: http://127.0.0.1:11434
-    api_key_env: ""            # 本地无需密钥
-    default_model: llama3      # ← 占位值，换成你 pull 过的模型（一行改）
-    models: [llama3]
+    api_key_env: ""                    # 本地无需密钥
+    default_model: qwen3:8b-8k         # ← 派生模型（num_ctx=8192），与 ollama list 一致
+    models: [qwen3:8b-8k, qwen3:8b, qwen2.5:0.5b]
     extra:
       num_ctx: 8192
       json_mode_field: format   # P0 可选：Ollama 的 format=json

@@ -1,0 +1,20 @@
+# 派生模型：给 qwen3:8b 收窄上下文，避免显存被 40960 默认 num_ctx 撑爆。
+#
+# 为什么需要它：
+#   qwen3:8b 出厂默认 num_ctx=40960，加载后占 11 GB，超出本机显存 →
+#   Ollama 退化成 46% CPU / 54% GPU 混合推理，实测只有 0.3 tok/s（交互不可用）。
+#   本文件把它固定成 8192，模型全量上 GPU，实测 45+ tok/s（约 150 倍）。
+#
+# 用法（一次性）：
+#   ollama create qwen3:8b-8k -f llm_server/ollama/Modelfile.qwen3-8k
+#   ollama list                      # 应出现 qwen3:8b-8k (~5.2 GB，共享原 blob，不额外占盘)
+# 之后 llm_server/config.yaml 里默认模型写 qwen3:8b-8k 即可。
+#
+# 还原：ollama rm qwen3:8b-8k
+#
+# 注意：Ollama 的 OpenAI 兼容端点（/v1/chat/completions）**不接受** num_ctx 参数，
+# 所以只能在模型层面固定，不能用请求参数覆盖 —— 这就是本派生模型存在的唯一原因。
+
+FROM qwen3:8b
+
+PARAMETER num_ctx 8192

@@ -84,27 +84,23 @@ llm_server/
     └── t*.md               14 个提示词（含 t5_ask__detect.md 变体）
 ```
 
-## 3.5 使用本地 Ollama（两步，缺一不可）
-
-Ollama 是**默认后端**，但本机默认「程序已装、服务没起、也没拉模型」，
-必须手动做这两步（各开一个终端）：
+## 3.5 使用本地 Ollama（当前默认后端）
 
 ```bat
 REM ① 起服务（默认监听 http://127.0.0.1:11434，这个窗口别关）
 ollama serve
 
-REM ② 拉模型（首次约几分钟，GB 级下载）
-ollama pull llama3
-REM    或换你自己的模型：ollama pull qwen2.5:7b
+REM ② 确认模型（没拉过就 pull）
+ollama list
 ```
 
-然后把 `llm_server/config.yaml` 里的模型位对齐你拉的那个（默认给了占位值 `llama3`）：
+然后把 `llm_server/config.yaml` 的模型位对齐你 `ollama list` 看到的名字：
 
 ```yaml
 backends:
   ollama:
-    default_model: llama3      # ← 一行改成你 pull 过的模型名
-    models: [llama3]
+    default_model: qwen3:8b-8k                 # ← 必须是 ollama list 里的完整 NAME（含 tag）
+    models: [qwen3:8b-8k, qwen3:8b, qwen2.5:0.5b]
 ```
 
 自检：
@@ -113,6 +109,37 @@ backends:
 curl --noproxy '*' http://127.0.0.1:11434/api/tags     REM Ollama 自己活着 + 有模型
 curl --noproxy '*' http://127.0.0.1:8787/health        REM ollama: reachable=true
 ```
+
+### ⚠️ 关键坑：`num_ctx` 撑爆显存 → 慢 150 倍
+
+Ollama 的 OpenAI 兼容端点（`/v1/chat/completions`）**不接受 `num_ctx` 参数**，
+上下文只能吃模型自带默认值。`qwen3:8b` 出厂默认 `num_ctx=40960`，加载后占 11 GB，
+超出显存 → Ollama 退化成 CPU/GPU 混合推理。
+
+本机实测（i7-13650HX + 独显，`ollama ps` 核对）：
+
+| 模型 | 上下文 | 设备 | 实测速度 |
+|---|---|---|---|
+| `qwen3:8b`（原厂） | 40960 | 46% CPU / 54% GPU | **0.3 tok/s**（51 token 花 176 s，不可用） |
+| `qwen3:8b-8k`（派生） | 8192 | **100% GPU** | **≈ 46 tok/s** |
+| `qwen2.5:0.5b` | 32768 | 100% GPU | ≈ 111 tok/s（能力太弱，见下） |
+
+解决办法 = 用派生模型把上下文固定住（不改一行代码）：
+
+```bat
+ollama create qwen3:8b-8k -f llm_server/ollama/Modelfile.qwen3-8k
+ollama rm qwen3:8b-8k        REM 还原
+```
+
+### 模型选型实测（T1 知识点抽取，同一段「梯度下降」笔记）
+
+| 模型 | 耗时 | 结果 | 可用性 |
+|---|---|---|---|
+| `qwen3:8b-8k` | 18–22 s | 3 条；`type` 合法、`source_quote` **100% 命中原文** | ✅ 默认 |
+| `qwen2.5:0.5b` | 0.5–1.7 s | 1 条；`type` 原样回抄 `概念\|公式\|…`、`source_quote` 恒空 | ❌ 只适合冒烟 |
+
+> 0.5B 会把 JSON schema 当模板抄回来，**过不了 PRD 锚点铁律**
+> （`source_quote` 空 = 幻觉，客户端直接丢弃），别拿它做真实抽取。
 
 > ⚠️ **只 `serve` 不 `pull`**：`/health` 仍然 200（`reachable=true`），
 > 但首次真实请求会报「模型不存在」。**先 pull 再调**。
