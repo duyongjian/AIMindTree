@@ -98,7 +98,18 @@ class _AgentPageState extends State<AgentPage> {
   Future<void> _loadTrees() async {
     final trees = await widget.service.trees.listTrees();
     if (!mounted) return;
-    setState(() => _trees = trees);
+    setState(() {
+      _trees = trees;
+      // 选中项要换成新列表里的实例（DropdownButton 用 identical 比较）：
+      // KnowledgeTree 未重写 ==，listTrees 每次查库都是新对象，沿用旧实例会
+      // 匹配不上任何菜单项，DropdownButton 直接断言崩溃。树被别处删掉时同步
+      // 降为 null，避免留下指向已删树的陈旧选中态。
+      final prevId = _activeTree?.id;
+      if (prevId != null) {
+        final idx = trees.indexWhere((t) => t.id == prevId);
+        _activeTree = idx == -1 ? null : trees[idx];
+      }
+    });
   }
 
   @override
@@ -389,7 +400,11 @@ class _AgentPageState extends State<AgentPage> {
     }
     await _loadTrees();
     if (!mounted) return created;
-    setState(() => _activeTree = created);
+    // 选中项必须取新列表里的同 id 实例：createTree 返回的对象与 listTrees
+    // 重新查出来的不是同一个（KnowledgeTree 未重写 ==，identical 比较下
+    // 匹配不上任何菜单项，DropdownButton 会断言崩溃）。
+    final idx = _trees.indexWhere((t) => t.id == created.id);
+    setState(() => _activeTree = idx == -1 ? created : _trees[idx]);
     return created;
   }
 
