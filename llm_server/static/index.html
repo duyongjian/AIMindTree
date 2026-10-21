@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIMindTree · AI 服务管理后台</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <aside id="nav">
+    <div class="brand">
+      <span class="brand-name">AIMindTree</span>
+      <span class="brand-sub">AI 服务管理后台</span>
+    </div>
+    <nav>
+      <a class="nav-item" href="#/m1" data-page="m1">概览</a>
+      <a class="nav-item" href="#/m2" data-page="m2">LLM Provider</a>
+      <a class="nav-item" href="#/m3" data-page="m3">App 下发配置</a>
+      <a class="nav-item" href="#/m4" data-page="m4">任务路由</a>
+      <a class="nav-item" href="#/m5" data-page="m5">提示词管理</a>
+      <a class="nav-item" href="#/m6" data-page="m6">任务调试台</a>
+      <a class="nav-item" href="#/m7" data-page="m7">运行日志</a>
+      <a class="nav-item" href="#/m8" data-page="m8">同步（Supabase）</a>
+      <a class="nav-item" href="#/m9" data-page="m9">备份与系统信息</a>
+    </nav>
+    <div class="nav-foot">
+      <span id="navVersion">—</span>
+    </div>
+  </aside>
+
+  <div id="main">
+    <header id="topbar">
+      <div>
+        <h1 id="pageTitle">概览</h1>
+        <p id="pageHint"></p>
+      </div>
+      <div class="top-actions">
+        <button id="btnReloadConfig" class="btn ghost" type="button">重载配置</button>
+        <button id="btnReloadPrompts" class="btn ghost" type="button">重载提示词</button>
+        <button id="btnRefresh" class="btn" type="button">刷新</button>
+      </div>
+    </header>
+
+    <main id="view">
+      <section class="page" data-page="m1" hidden></section>
+      <section class="page" data-page="m2" hidden></section>
+      <section class="page" data-page="m3" hidden></section>
+      <section class="page" data-page="m4" hidden></section>
+      <section class="page" data-page="m5" hidden></section>
+      <section class="page" data-page="m6" hidden></section>
+      <section class="page" data-page="m7" hidden></section>
+      <section class="page" data-page="m8" hidden></section>
+      <section class="page" data-page="m9" hidden></section>
+    </main>
+  </div>
+
+  <script src="/static/api.js"></script>
+  <script src="/static/views-a.js"></script>
+  <script src="/static/views-b.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
