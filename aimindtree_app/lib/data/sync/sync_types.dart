@@ -8,6 +8,7 @@
 library;
 
 import '../../core/logger.dart';
+import 'sync_json.dart';
 
 /// 单条变更的传输语义。
 enum SyncOp {
@@ -85,7 +86,9 @@ class SyncEnvelope {
         'entity_table': entityTable,
         'entity_id': entityId,
         'op': op.name,
-        'payload': payload,
+        // payload 里可能有 DateTime（updated_at / deleted_at）→ 转成 ISO 8601
+        // 字符串，否则 jsonEncode 会抛 JsonUnsupportedObjectError。
+        'payload': payload == null ? null : toJsonSafe(payload),
         'base_version': baseVersion,
         'updated_at': updatedAt.toUtc().toIso8601String(),
         'deleted_at': deletedAt?.toUtc().toIso8601String(),
@@ -99,11 +102,21 @@ class SyncEnvelope {
       op: SyncOp.parse(json['op'] as String),
       payload: (json['payload'] as Map<String, dynamic>?),
       baseVersion: (json['base_version'] as num?)?.toInt() ?? 0,
-      updatedAt: DateTime.parse(json['updated_at'] as String),
+      updatedAt: _parseDateTime(json['updated_at']),
       deletedAt: json['deleted_at'] == null
           ? null
-          : DateTime.parse(json['deleted_at'] as String),
+          : _parseDateTime(json['deleted_at']),
     );
+  }
+
+  /// 宽容解析时间字段：接受 DateTime / ISO 8601 字符串 / null。
+  static DateTime _parseDateTime(Object? v) {
+    if (v is DateTime) return v;
+    if (v is String) {
+      return DateTime.tryParse(v) ??
+          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+    }
+    return DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
   }
 
   SyncEnvelope copyWith({

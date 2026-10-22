@@ -319,6 +319,10 @@ class ExtractionService {
 
     // === Sync（T03）===
     final outbox = SyncOutboxRepo(database, deviceId: did);
+    // 全局接线点：仓储层（KnowledgeRepository / TreeRepository /
+    // AiSessionRepository）写完本地库后就用它入队，实现「本地 → 服务端」
+    // 上行同步。测试里默认为 null → 仓储不入队、也不崩。
+    SyncOutboxRepo.current = outbox;
     // prefs 已在上面取过（bootstrap 前置的下发拉取也用它存 sha1），此处复用。
     final statusStore = SyncStatusStore(prefs);
     final syncConfig = SyncConfig(prefs: prefs, secretStore: store);

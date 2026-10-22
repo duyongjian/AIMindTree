@@ -8,11 +8,10 @@
 /// 注意：outbox 行**不参与自身同步**（sync_outbox 不在 SyncMeta 表清单）。
 library;
 
-import 'dart:convert';
-
 import 'package:drift/drift.dart';
 
 import '../db/drift_database.dart';
+import 'sync_json.dart';
 import 'sync_types.dart';
 
 class SyncOutboxRepo {
@@ -20,13 +19,35 @@ class SyncOutboxRepo {
   final AppDatabase _db;
   final String deviceId;
 
+  /// 本 outbox 所属的数据库实例（接线一致性校验用）。
+  AppDatabase get db => _db;
+
+  /// **全局接线点**：生产环境在 `ExtractionService.bootstrap` 里赋值，
+  /// 仓储层（`KnowledgeRepository` / `TreeRepository` / `AiSessionRepository`）
+  /// 写完本地库后就用它入队，实现「本地 → 服务端」上行同步。
+  ///
+  /// - 生产：`bootstrap` 里 `SyncOutboxRepo.current = outbox;`（本对象与
+  ///   仓储共用同一个 [AppDatabase]）。
+  /// - 测试：默认 `null` → 仓储层不入队、也不崩（不入队 = 不影响断言）。
+  ///
+  /// 之所以用静态字段而不是往仓储构造函数里注入：仓储在 UI 各页被直接
+  /// `KnowledgeRepository(db)` 构造（测试也大量这么用），改签名会破坏既有调用。
+  static SyncOutboxRepo? current;
+
   // ============ 写入 ============
 
   /// 入队一行变更。
   ///
-  /// [baseVersion] 是该行变更前的本地 version（push 时服务端用作乐观锁，
-  /// P0 暂不强制）。[payload] 是行最终态（已序列化为 Map）；op=delete 时
-  /// 可传空 Map（保留壳位）。
+  /// [baseVersion] 是该行**变更后**的 version（新插入通常 1，更新为 version+1）；
+  /// 服务端把它当作该行的目标 version（LWW 判定 + pull 落地都用它），
+  /// 所以必须填「写完之后那行的新 version」，不是变更前的旧值。
+  ///
+  /// [payload] 是行最终态（键 = 表的 snake_case 列名，见 `sync_row_map.dart`）。
+  /// `op=delete` 时 payload 至少要带 `deleted_at`（墓碑时间）——传输层
+  /// `SyncEnvelope.deletedAt` 就是从 payload 里取的。
+  ///
+  /// [deletedAt] 形参以前是死参（insert 时没写入任何列），现在会补写进
+  /// payload 的 `deleted_at` 键（payload 已自带该键时以 payload 为准）。
   Future<int> enqueue({
     required String entityTable,
     required String entityId,
@@ -35,11 +56,16 @@ class SyncOutboxRepo {
     required int baseVersion,
     DateTime? deletedAt,
   }) async {
+    final body = <String, dynamic>{...?payload};
+    if (deletedAt != null) {
+      body.putIfAbsent('deleted_at', () => deletedAt);
+    }
     return _db.into(_db.syncOutbox).insert(SyncOutboxCompanion(
           entityTable: Value(entityTable),
           entityId: Value(entityId),
           op: Value(op.name),
-          payloadJson: Value(jsonEncode(payload ?? const <String, dynamic>{})),
+          // DateTime 会被转成 ISO 8601 字符串（jsonEncode 默认不支持 DateTime）。
+          payloadJson: Value(encodeSyncJson(body)),
           deviceId: Value(deviceId),
           baseVersion: Value(baseVersion),
           status: Value(OutboxStatus.pending.name),

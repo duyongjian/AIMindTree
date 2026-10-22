@@ -27,6 +27,7 @@ import '../../core/logger.dart';
 import '../db/drift_database.dart';
 import 'sync_api.dart';
 import 'sync_outbox.dart';
+import 'sync_row_map.dart';
 import 'sync_types.dart';
 
 /// 推送结果。
@@ -207,7 +208,7 @@ SyncEngine({
     if (row == null) return null;
     return _LocalVer(
       version: (row['version'] as num?)?.toInt() ?? 0,
-      updatedAt: row['updated_at'] as DateTime,
+      updatedAt: _dt(row['updated_at']) ?? _epoch,
     );
   }
 
@@ -215,37 +216,37 @@ SyncEngine({
     switch (table) {
       case 'notebooks':
         final r = await (_db.select(_db.notebooks)..where((t) => t.id.equals(id))).getSingleOrNull();
-        return r == null ? null : _notebookToMap(r);
+        return r == null ? null : notebookRowToMap(r);
       case 'notes':
         final r = await (_db.select(_db.notes)..where((t) => t.id.equals(id))).getSingleOrNull();
-        return r == null ? null : _noteToMap(r);
+        return r == null ? null : noteRowToMap(r);
       case 'knowledge_points':
         final r = await (_db.select(_db.knowledgePoints)..where((t) => t.id.equals(id))).getSingleOrNull();
-        return r == null ? null : _kpToMap(r);
+        return r == null ? null : knowledgePointRowToMap(r);
       case 'prerequisite_edges':
         final r = await (_db.select(_db.prerequisiteEdges)..where((t) => t.id.equals(id))).getSingleOrNull();
-        return r == null ? null : _edgeToMap(r);
+        return r == null ? null : prerequisiteEdgeRowToMap(r);
       case 'mastery_records':
         final r = await (_db.select(_db.masteryRecords)..where((t) => t.id.equals(id))).getSingleOrNull();
-        return r == null ? null : _masteryToMap(r);
+        return r == null ? null : masteryRecordRowToMap(r);
       case 'cards':
         final r = await (_db.select(_db.cards)..where((t) => t.id.equals(id))).getSingleOrNull();
-        return r == null ? null : _cardToMap(r);
+        return r == null ? null : cardRowToMap(r);
       case 'canvases':
         final r = await (_db.select(_db.canvases)..where((t) => t.id.equals(id))).getSingleOrNull();
-        return r == null ? null : _canvasToMap(r);
+        return r == null ? null : canvasRowToMap(r);
       case 'canvas_nodes':
         final r = await (_db.select(_db.canvasNodes)..where((t) => t.id.equals(id))).getSingleOrNull();
-        return r == null ? null : _canvasNodeToMap(r);
+        return r == null ? null : canvasNodeRowToMap(r);
       case 'canvas_edges':
         final r = await (_db.select(_db.canvasEdges)..where((t) => t.id.equals(id))).getSingleOrNull();
-        return r == null ? null : _canvasEdgeToMap(r);
+        return r == null ? null : canvasEdgeRowToMap(r);
       case 'ai_sessions':
         final r = await (_db.select(_db.aiSessions)..where((t) => t.id.equals(id))).getSingleOrNull();
-        return r == null ? null : _aiSessionToMap(r);
+        return r == null ? null : aiSessionRowToMap(r);
       case 'ai_messages':
         final r = await (_db.select(_db.aiMessages)..where((t) => t.id.equals(id))).getSingleOrNull();
-        return r == null ? null : _aiMessageToMap(r);
+        return r == null ? null : aiMessageRowToMap(r);
       default:
         _log.w('未知表 $table，跳过读 local');
         return null;
@@ -364,68 +365,32 @@ SyncEngine({
   }
 
   // ============ Row ↔ Map 适配 ============
-
-  Map<String, dynamic> _notebookToMap(NotebookRow r) => {
-        'id': r.id,
-        'name': r.name,
-        'parent_id': r.parentId,
-        'sort_order': r.sortOrder,
-        'updated_at': r.updatedAt,
-        'version': r.version,
-        'device_id': r.deviceId,
-        'deleted_at': r.deletedAt,
-      };
+  //
+  // 行 → Map 的映射在 `sync_row_map.dart`（与仓储层 enqueue 共用同一份真相源，
+  // 保证「上行 payload 的键」与「下行 fromMap 读的键」永远一致）。
+  // 下面只保留 Map → 行的方向。
 
   NotebooksCompanion _notebookFromMap(Map<String, dynamic> p) => NotebooksCompanion(
         id: Value(p['id'] as String),
         name: Value((p['name'] as String?) ?? ''),
         parentId: Value(p['parent_id'] as String?),
         sortOrder: Value((p['sort_order'] as num?)?.toInt() ?? 0),
-        updatedAt: Value(p['updated_at'] as DateTime),
+        updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),
-        deletedAt: Value(p['deleted_at'] as DateTime?),
+        deletedAt: Value(_dt(p['deleted_at'])),
       );
-
-  Map<String, dynamic> _noteToMap(NoteRow r) => {
-        'id': r.id,
-        'notebook_id': r.notebookId,
-        'title': r.title,
-        'content_md': r.contentMd,
-        'updated_at': r.updatedAt,
-        'version': r.version,
-        'device_id': r.deviceId,
-        'deleted_at': r.deletedAt,
-      };
 
   NotesCompanion _noteFromMap(Map<String, dynamic> p) => NotesCompanion(
         id: Value(p['id'] as String),
         notebookId: Value(p['notebook_id'] as String?),
         title: Value((p['title'] as String?) ?? ''),
         contentMd: Value((p['content_md'] as String?) ?? ''),
-        updatedAt: Value(p['updated_at'] as DateTime),
+        updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),
-        deletedAt: Value(p['deleted_at'] as DateTime?),
+        deletedAt: Value(_dt(p['deleted_at'])),
       );
-
-  Map<String, dynamic> _kpToMap(KnowledgePointRow r) => {
-        'id': r.id,
-        'notebook_id': r.notebookId,
-        'name': r.name,
-        'type': r.type,
-        'definition': r.definition,
-        'source_note_id': r.sourceNoteId,
-        'source_start': r.sourceStart,
-        'source_end': r.sourceEnd,
-        'source_quote': r.sourceQuote,
-        'origin': r.origin,
-        'confidence': r.confidence,
-        'updated_at': r.updatedAt,
-        'version': r.version,
-        'device_id': r.deviceId,
-        'deleted_at': r.deletedAt,
-      };
 
   KnowledgePointsCompanion _kpFromMap(Map<String, dynamic> p) =>
       KnowledgePointsCompanion(
@@ -440,24 +405,11 @@ SyncEngine({
         sourceQuote: Value((p['source_quote'] as String?) ?? ''),
         origin: Value((p['origin'] as String?) ?? 'ai_extract'),
         confidence: Value((p['confidence'] as num?)?.toDouble() ?? 0),
-        updatedAt: Value(p['updated_at'] as DateTime),
+        updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),
-        deletedAt: Value(p['deleted_at'] as DateTime?),
+        deletedAt: Value(_dt(p['deleted_at'])),
       );
-
-  Map<String, dynamic> _edgeToMap(PrerequisiteEdgeRow r) => {
-        'id': r.id,
-        'from_kp_id': r.fromKpId,
-        'to_kp_id': r.toKpId,
-        'reason': r.reason,
-        'origin': r.origin,
-        'confidence': r.confidence,
-        'updated_at': r.updatedAt,
-        'version': r.version,
-        'device_id': r.deviceId,
-        'deleted_at': r.deletedAt,
-      };
 
   PrerequisiteEdgesCompanion _edgeFromMap(Map<String, dynamic> p) =>
       PrerequisiteEdgesCompanion(
@@ -467,22 +419,11 @@ SyncEngine({
         reason: Value((p['reason'] as String?) ?? ''),
         origin: Value((p['origin'] as String?) ?? 'ai'),
         confidence: Value((p['confidence'] as num?)?.toDouble() ?? 0),
-        updatedAt: Value(p['updated_at'] as DateTime),
+        updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),
-        deletedAt: Value(p['deleted_at'] as DateTime?),
+        deletedAt: Value(_dt(p['deleted_at'])),
       );
-
-  Map<String, dynamic> _masteryToMap(MasteryRecordRow r) => {
-        'id': r.id,
-        'kp_id': r.kpId,
-        'status': r.status,
-        'source': r.source,
-        'updated_at': r.updatedAt,
-        'version': r.version,
-        'device_id': r.deviceId,
-        'deleted_at': r.deletedAt,
-      };
 
   MasteryRecordsCompanion _masteryFromMap(Map<String, dynamic> p) =>
       MasteryRecordsCompanion(
@@ -490,13 +431,29 @@ SyncEngine({
         kpId: Value(p['kp_id'] as String),
         status: Value((p['status'] as String?) ?? 'unknown'),
         source: Value((p['source'] as String?) ?? 'self'),
-        updatedAt: Value(p['updated_at'] as DateTime),
+        updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),
-        deletedAt: Value(p['deleted_at'] as DateTime?),
+        deletedAt: Value(_dt(p['deleted_at'])),
       );
 
   // ============ helpers ============
+
+  /// 宽容地把 payload 里的时间值解析成 [DateTime]。
+  ///
+  /// payload 经 outbox 的 JSON 往返后，DateTime 会变成 ISO 8601 **字符串**
+  /// （Dart 的 `jsonEncode` 不支持 DateTime）。旧代码直接 `as DateTime` 会抛
+  /// TypeError——「一旦 payload 变成真实数据就会暴露」的根因。
+  ///
+  /// 三种输入都要能吃下：
+  /// - `DateTime`：本地直传（未经 JSON）；
+  /// - `String`：JSON 往返后的 ISO 8601;
+  /// - 其他（null / 数字 / 乱码）：返回 null，由调用方决定兜底。
+  DateTime? _dt(dynamic v) {
+    if (v is DateTime) return v;
+    if (v is String) return DateTime.tryParse(v);
+    return null;
+  }
 
   Map<String, dynamic>? _decodePayload(String json) {
     try {
@@ -510,26 +467,12 @@ SyncEngine({
     // payload 的 deleted_at 在 _decodePayload 里就有，但 SyncEnvelope.deletedAt
     // 是 transport-level 字段。本实现把它直接从 payload 取（与 outbox row
     // 重叠字段），保持简单。
+    // ⚠️ JSON 往返后它是 ISO 字符串，必须用 _dt 解析（不能 `as DateTime?`）。
     final p = _decodePayload(json);
-    return p?['deleted_at'] as DateTime?;
+    return _dt(p?['deleted_at']);
   }
 
   // ============ Cards ============
-
-  Map<String, dynamic> _cardToMap(CardRow r) => {
-        'id': r.id,
-        'type': r.type,
-        'source_ref': r.sourceRef,
-        'parent_card_id': r.parentCardId,
-        'regenerated_from_id': r.regeneratedFromId,
-        'content_md': r.contentMd,
-        'session_id': r.sessionId,
-        'model_id': r.modelId,
-        'updated_at': r.updatedAt,
-        'version': r.version,
-        'device_id': r.deviceId,
-        'deleted_at': r.deletedAt,
-      };
 
   CardsCompanion _cardFromMap(Map<String, dynamic> p) => CardsCompanion(
         id: Value(p['id'] as String),
@@ -540,54 +483,26 @@ SyncEngine({
         contentMd: Value((p['content_md'] as String?) ?? ''),
         sessionId: Value(p['session_id'] as String?),
         modelId: Value(p['model_id'] as String?),
-        updatedAt: Value(p['updated_at'] as DateTime),
+        updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),
-        deletedAt: Value(p['deleted_at'] as DateTime?),
+        deletedAt: Value(_dt(p['deleted_at'])),
       );
 
   // ============ Canvases ============
-
-  Map<String, dynamic> _canvasToMap(CanvasRow r) => {
-        'id': r.id,
-        'notebook_id': r.notebookId,
-        'name': r.name,
-        'viewport': r.viewport,
-        'updated_at': r.updatedAt,
-        'version': r.version,
-        'device_id': r.deviceId,
-        'deleted_at': r.deletedAt,
-      };
 
   CanvasesCompanion _canvasFromMap(Map<String, dynamic> p) => CanvasesCompanion(
         id: Value(p['id'] as String),
         notebookId: Value(p['notebook_id'] as String?),
         name: Value((p['name'] as String?) ?? ''),
         viewport: Value((p['viewport'] as String?) ?? '{"x":0,"y":0,"zoom":1}'),
-        updatedAt: Value(p['updated_at'] as DateTime),
+        updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),
-        deletedAt: Value(p['deleted_at'] as DateTime?),
+        deletedAt: Value(_dt(p['deleted_at'])),
       );
 
   // ============ CanvasNodes ============
-
-  Map<String, dynamic> _canvasNodeToMap(CanvasNodeRow r) => {
-        'id': r.id,
-        'canvas_id': r.canvasId,
-        'target_type': r.targetType,
-        'target_id': r.targetId,
-        'x': r.x,
-        'y': r.y,
-        'w': r.w,
-        'h': r.h,
-        'z': r.z,
-        'collapsed': r.collapsed,
-        'updated_at': r.updatedAt,
-        'version': r.version,
-        'device_id': r.deviceId,
-        'deleted_at': r.deletedAt,
-      };
 
   CanvasNodesCompanion _canvasNodeFromMap(Map<String, dynamic> p) =>
       CanvasNodesCompanion(
@@ -601,26 +516,13 @@ SyncEngine({
         h: Value((p['h'] as num?)?.toDouble() ?? 120),
         z: Value((p['z'] as num?)?.toInt() ?? 0),
         collapsed: Value((p['collapsed'] as bool?) ?? false),
-        updatedAt: Value(p['updated_at'] as DateTime),
+        updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),
-        deletedAt: Value(p['deleted_at'] as DateTime?),
+        deletedAt: Value(_dt(p['deleted_at'])),
       );
 
   // ============ CanvasEdges ============
-
-  Map<String, dynamic> _canvasEdgeToMap(CanvasEdgeRow r) => {
-        'id': r.id,
-        'canvas_id': r.canvasId,
-        'from_node_id': r.fromNodeId,
-        'to_node_id': r.toNodeId,
-        'edge_type': r.edgeType,
-        'prereq_edge_id': r.prereqEdgeId,
-        'updated_at': r.updatedAt,
-        'version': r.version,
-        'device_id': r.deviceId,
-        'deleted_at': r.deletedAt,
-      };
 
   CanvasEdgesCompanion _canvasEdgeFromMap(Map<String, dynamic> p) =>
       CanvasEdgesCompanion(
@@ -630,25 +532,13 @@ SyncEngine({
         toNodeId: Value((p['to_node_id'] as String?) ?? ''),
         edgeType: Value((p['edge_type'] as String?) ?? 'manual'),
         prereqEdgeId: Value(p['prereq_edge_id'] as String?),
-        updatedAt: Value(p['updated_at'] as DateTime),
+        updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),
-        deletedAt: Value(p['deleted_at'] as DateTime?),
+        deletedAt: Value(_dt(p['deleted_at'])),
       );
 
   // ============ AiSessions ============
-
-  Map<String, dynamic> _aiSessionToMap(AiSessionRow r) => {
-        'id': r.id,
-        'type': r.type,
-        'target_ref': r.targetRef,
-        'title': r.title,
-        'kp_id': r.kpId,
-        'updated_at': r.updatedAt,
-        'version': r.version,
-        'device_id': r.deviceId,
-        'deleted_at': r.deletedAt,
-      };
 
   AiSessionsCompanion _aiSessionFromMap(Map<String, dynamic> p) => AiSessionsCompanion(
         id: Value(p['id'] as String),
@@ -656,27 +546,13 @@ SyncEngine({
         targetRef: Value((p['target_ref'] as String?) ?? ''),
         title: Value((p['title'] as String?) ?? ''),
         kpId: Value(p['kp_id'] as String?),
-        updatedAt: Value(p['updated_at'] as DateTime),
+        updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),
-        deletedAt: Value(p['deleted_at'] as DateTime?),
+        deletedAt: Value(_dt(p['deleted_at'])),
       );
 
   // ============ AiMessages ============
-
-  Map<String, dynamic> _aiMessageToMap(AiMessageRow r) => {
-        'id': r.id,
-        'session_id': r.sessionId,
-        'role': r.role,
-        'content_md': r.contentMd,
-        'tokens': r.tokens,
-        'latency_ms': r.latencyMs,
-        'model_id': r.modelId,
-        'updated_at': r.updatedAt,
-        'version': r.version,
-        'device_id': r.deviceId,
-        'deleted_at': r.deletedAt,
-      };
 
   AiMessagesCompanion _aiMessageFromMap(Map<String, dynamic> p) => AiMessagesCompanion(
         id: Value(p['id'] as String),
@@ -686,10 +562,10 @@ SyncEngine({
         tokens: Value((p['tokens'] as num?)?.toInt()),
         latencyMs: Value((p['latency_ms'] as num?)?.toInt()),
         modelId: Value(p['model_id'] as String?),
-        updatedAt: Value(p['updated_at'] as DateTime),
+        updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),
-        deletedAt: Value(p['deleted_at'] as DateTime?),
+        deletedAt: Value(_dt(p['deleted_at'])),
       );
 
   static final DateTime _epoch = DateTime.fromMillisecondsSinceEpoch(0);

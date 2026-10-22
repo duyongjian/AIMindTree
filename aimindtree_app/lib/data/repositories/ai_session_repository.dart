@@ -13,6 +13,7 @@ import 'package:drift/drift.dart';
 import '../../ai/ai_task.dart';
 import '../../core/id.dart';
 import '../db/drift_database.dart';
+import '../sync/sync_outbox_writer.dart';
 
 class ChatMessage {
   const ChatMessage({
@@ -32,6 +33,9 @@ class ChatMessage {
 class AiSessionRepository {
   AiSessionRepository(this._db);
   final AppDatabase _db;
+
+  /// 上行同步写入器（把本地写登记进 outbox；未接线时自动跳过）。
+  late final SyncOutboxWriter _sync = SyncOutboxWriter(_db);
 
   /// 获取或创建该 KP 的会话（每个 KP 一个 session）。
   Future<AiSessionRow> getOrCreateForKp({
@@ -58,6 +62,7 @@ class AiSessionRepository {
           version: const Value(1),
           deviceId: const Value('local-dev'),
         ));
+    await _sync.upsertAiSession(id);
     return AiSessionRow(
       id: id,
       type: type,
@@ -81,8 +86,9 @@ class AiSessionRepository {
     String? modelId,
   }) async {
     final now = DateTime.now().toUtc();
+    final id = newUlid();
     await _db.into(_db.aiMessages).insert(AiMessagesCompanion(
-          id: Value(newUlid()),
+          id: Value(id),
           sessionId: Value(sessionId),
           role: Value(role),
           contentMd: Value(content),
@@ -91,6 +97,7 @@ class AiSessionRepository {
           version: const Value(1),
           deviceId: const Value('local-dev'),
         ));
+    await _sync.upsertAiMessage(id);
   }
 
   /// 列出某 session 的全部消息（按时间序）。

@@ -16,6 +16,7 @@ import '../../core/logger.dart';
 import '../../core/result.dart';
 import '../db/drift_database.dart';
 import '../models/knowledge_point.dart';
+import '../sync/sync_outbox_writer.dart';
 
 /// AI 提取出的原始知识点（未校验锚点，来自 Dify/LLM 输出）。
 class RawKnowledgePoint {
@@ -84,6 +85,9 @@ class KnowledgeRepository {
 
   static final AppLog _log = AppLog('knowledge_repo');
 
+  /// 上行同步写入器（把本地写登记进 outbox；未接线时自动跳过）。
+  late final SyncOutboxWriter _sync = SyncOutboxWriter(_db);
+
   // ============ 写入 ============
 
   /// 保存（upsert）一条笔记。
@@ -102,6 +106,7 @@ class KnowledgeRepository {
             deviceId: Value(note.deviceId),
             deletedAt: Value(note.deletedAt),
           ));
+      await _sync.upsertNote(note.id);
       return Success(note);
     } on Object catch (e, s) {
       _log.e('保存笔记失败', error: e, stackTrace: s);
@@ -171,6 +176,7 @@ class KnowledgeRepository {
               deletedAt: Value(kp.deletedAt),
             ));
         saved.add(kp);
+        await _sync.upsertKnowledgePoint(kp.id);
       } on Object catch (e, s) {
         _log.e('知识点入库失败：${kp.name}', error: e, stackTrace: s);
         rejected.add(RejectedPoint(raw, '入库异常：$e'));
@@ -203,6 +209,7 @@ class KnowledgeRepository {
               deviceId: Value(deviceId),
             ));
         count++;
+        await _sync.upsertPrerequisiteEdge(e.id);
       }
       return Success(count);
     } on Object catch (e, s) {
@@ -292,8 +299,15 @@ class KnowledgeRepository {
   /// 删除一条前置关系（画布上删连线）。
   Future<Result<void>> deletePrerequisiteEdge(String id) async {
     try {
+      // 先读出行（硬删后行就没了，version / id 要在删除前留档）。
+      final row = await (_db.select(_db.prerequisiteEdges)
+            ..where((t) => t.id.equals(id)))
+          .getSingleOrNull();
       await (_db.delete(_db.prerequisiteEdges)..where((t) => t.id.equals(id)))
           .go();
+      if (row != null) {
+        await _sync.hardDeletePrerequisiteEdges(<PrerequisiteEdgeRow>[row]);
+      }
       return const Success<void>(null);
     } on Object catch (e, s) {
       _log.e('删除前置关系失败', error: e, stackTrace: s);
@@ -349,6 +363,7 @@ class KnowledgeRepository {
             version: Value((existing?.version ?? 0) + 1),
             deviceId: Value(deviceId),
           ));
+      await _sync.upsertCanvasNode(nodeId);
       return const Success<void>(null);
     } on Object catch (e, s) {
       _log.e('保存节点位置失败', error: e, stackTrace: s);
@@ -411,6 +426,43 @@ class KnowledgeRepository {
       var deleted = 0;
       var trees = 0;
 
+      // 级联硬删的行要在删之前留档（删完就没法取 id / version 了）。
+      // 只在「彻底删除」分支需要留档 —— 「只解除树关系」分支不删这些行。
+      final cascadeEdges = (kpIds.isEmpty || !deletePoints)
+          ? <PrerequisiteEdgeRow>[]
+          : await (_db.select(_db.prerequisiteEdges)
+                ..where((t) =>
+                    t.fromKpId.isIn(kpIds) | t.toKpId.isIn(kpIds)))
+              .get();
+      final cascadeMastery = (kpIds.isEmpty || !deletePoints)
+          ? <MasteryRecordRow>[]
+          : await (_db.select(_db.masteryRecords)
+                ..where((t) => t.kpId.isIn(kpIds)))
+              .get();
+      final cascadeNodes = (kpIds.isEmpty || !deletePoints)
+          ? <CanvasNodeRow>[]
+          : await (_db.select(_db.canvasNodes)
+                ..where((t) =>
+                    t.targetType.equals('kp') & t.targetId.isIn(kpIds)))
+              .get();
+      final cascadeKps = (kpIds.isEmpty || !deletePoints)
+          ? <KnowledgePointRow>[]
+          : await (_db.select(_db.knowledgePoints)..where((t) => t.id.isIn(kpIds)))
+              .get();
+      final cascadeCanvas = deletePoints
+          ? await (_db.select(_db.canvases)..where((t) => t.id.equals(noteId)))
+              .getSingleOrNull()
+          : null;
+      // 「只解除树关系」分支里被摘下的节点（必须在删除前留档）。
+      final detachedNodes = (kpIds.isEmpty || removeFromTrees.isEmpty)
+          ? <CanvasNodeRow>[]
+          : await (_db.select(_db.canvasNodes)
+                ..where((t) =>
+                    t.canvasId.isIn(removeFromTrees) &
+                    t.targetType.equals('kp') &
+                    t.targetId.isIn(kpIds)))
+              .get();
+
       if (kpIds.isNotEmpty && deletePoints) {
         // 彻底删除：清掉所有树里的成员关系 + 边 + 掌握记录 + 知识点本身。
         await (_db.delete(_db.canvasNodes)
@@ -452,6 +504,21 @@ class KnowledgeRepository {
         ),
       );
 
+      // 上行同步：笔记本体走墓碑；被硬删的级联行逐个入队，让远端跟着删。
+      await _sync.tombstoneNote(noteId);
+      if (deletePoints) {
+        await _sync.hardDeleteCanvasNodes(cascadeNodes);
+        await _sync.hardDeletePrerequisiteEdges(cascadeEdges);
+        await _sync.hardDeleteMasteryRecords(cascadeMastery);
+        await _sync.hardDeleteKnowledgePoints(cascadeKps);
+        if (cascadeCanvas != null) {
+          await _sync.hardDeleteCanvases(<CanvasRow>[cascadeCanvas]);
+        }
+      } else {
+        // 只解除树关系：被摘下的 canvas_nodes 需要通知远端删除。
+        await _sync.hardDeleteCanvasNodes(detachedNodes);
+      }
+
       _log.i('删除笔记 $noteId：知识点删除 $deleted / 解除关系 $detached / 树 $trees');
       return Success(NoteDeleteSummary(
         pointsDeleted: deleted,
@@ -480,6 +547,16 @@ class KnowledgeRepository {
             ..where((t) => t.id.equals(kpId)))
           .getSingleOrNull();
       if (row == null) return const Success<int>(0);
+      // 级联：清从属数据（硬删）。先留档（删完就没法取 id / version 了）。
+      final cascadeEdges = await (_db.select(_db.prerequisiteEdges)
+            ..where((t) => t.fromKpId.equals(kpId) | t.toKpId.equals(kpId)))
+          .get();
+      final cascadeMastery = await (_db.select(_db.masteryRecords)
+            ..where((t) => t.kpId.equals(kpId)))
+          .get();
+      final cascadeNodes = await (_db.select(_db.canvasNodes)
+            ..where((t) => t.targetType.equals('kp') & t.targetId.equals(kpId)))
+          .get();
       // 级联：清从属数据（硬删）。
       await (_db.delete(_db.prerequisiteEdges)
             ..where((t) => t.fromKpId.equals(kpId) | t.toKpId.equals(kpId)))
@@ -496,6 +573,11 @@ class KnowledgeRepository {
         updatedAt: Value(DateTime.now().toUtc()),
         version: Value(row.version + 1),
       ));
+      // 上行同步：KP 本体走墓碑，级联硬删的行逐个入队让远端跟着删。
+      await _sync.tombstoneKnowledgePoint(kpId);
+      await _sync.hardDeletePrerequisiteEdges(cascadeEdges);
+      await _sync.hardDeleteMasteryRecords(cascadeMastery);
+      await _sync.hardDeleteCanvasNodes(cascadeNodes);
       _log.i('软删知识点 $kpId（墓碑 + 级联清边/掌握/树成员）');
       return const Success<int>(1);
     } on Object catch (e, s) {
@@ -547,6 +629,7 @@ class KnowledgeRepository {
             version: Value(kp.version),
             deviceId: Value(kp.deviceId),
           ));
+      await _sync.upsertKnowledgePoint(kp.id);
       _log.i('手动新建知识点 ${kp.name}（origin=user_manual）');
       return Success(kp);
     } on Object catch (e, s) {
@@ -573,6 +656,7 @@ class KnowledgeRepository {
         updatedAt: Value(DateTime.now().toUtc()),
         version: Value(row.version + 1),
       ));
+      await _sync.upsertKnowledgePoint(kp.id);
       _log.i('编辑知识点 ${kp.name}');
       return Success(kp);
     } on Object catch (e, s) {
@@ -732,6 +816,7 @@ class KnowledgeRepository {
               version: Value(existing.version + 1),
               deviceId: Value(deviceId),
             ));
+        await _sync.upsertCanvasNode(id);
       }
       return const Success<void>(null);
     } on Object catch (e, s) {
@@ -767,8 +852,9 @@ class KnowledgeRepository {
     MasterySource source,
   ) async {
     final nextVersion = await _nextMasteryVersion(kpId);
+    final id = newUlid();
     await _db.into(_db.masteryRecords).insert(MasteryRecordsCompanion(
-          id: Value(newUlid()),
+          id: Value(id),
           kpId: Value(kpId),
           status: Value(status.name),
           source: Value(source.name),
@@ -776,6 +862,8 @@ class KnowledgeRepository {
           version: Value(nextVersion),
           deviceId: Value(deviceId),
         ));
+    // 上行同步：mastery_records 是 append-only，每次写入都是一条新行。
+    await _sync.upsertMasteryRecord(id);
   }
 
   /// 计算 [kpId] 下一次写入的 version（max+1；无则 1）。
