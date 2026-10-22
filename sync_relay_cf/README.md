@@ -18,6 +18,8 @@
 
 | 方法 | 路径 | 请求体 | 响应 |
 |------|------|--------|------|
+| POST | `/auth/register` | `{username, password}` | `{user_id, token}`（重名 409 / 弱密码 400） |
+| POST | `/auth/login`    | `{username, password}` | `{user_id, token}`（错误密码 401） |
 | POST | `/sync/push` | `{device_id, envelopes:[...]}` | `{received, server_time}` |
 | POST | `/sync/pull` | `{device_id, since\|null}` | `{envelopes:[...], server_time}` |
 | GET  | `/sync/manifest` | — | `{count}` |
@@ -26,9 +28,12 @@ envelope 字段（与 App `SyncEnvelope` 对齐）：
 `device_id / entity_table / entity_id / op / payload / base_version /
 updated_at / deleted_at`。
 
-D1 表只存每个 `(entity_table, entity_id)` 的**最新态**——LWW 已在 App 端完成，
+D1 表只存每个 `(owner_id, entity_table, entity_id)` 的**最新态**——LWW 已在 App 端完成，
 服务端只保存最新态 + `server_time` 供增量拉取（`pull` 按 `server_time > since`
-过滤，`since` 为空 = 全量）。
+过滤，`since` 为空 = 全量）。`owner_id` 来自登录令牌，保证不同用户数据互不串访。
+
+密码以 PBKDF2-SHA256（随机盐 + 10 万次迭代）哈希存储，明文不落库。
+`sync/*` 路由均须带 `Authorization: Bearer <token>`，否则 401。
 
 ## 本地自测（无需 wrangler / D1）
 
@@ -50,28 +55,26 @@ INSERT OR REPLACE 覆盖同 key / since 增量过滤 / 404。
    wrangler d1 create aimindtree_sync
    ```
 4. 把 `wrangler.toml` 里的 `database_id` 改成上一步的值。
-5. 建表：
+5. 建表（含账号表 + 每用户命名空间）：
    ```bash
    wrangler d1 execute aimindtree_sync --file=./schema.sql
    ```
-6. （可选但强烈建议）设置同步令牌（部署公网时必做，否则任何人可写）：
-   ```bash
-   wrangler secret put SYNC_TOKEN
-   ```
-   然后删掉 `wrangler.toml` 里的 `[vars] SYNC_TOKEN = ""` 那行。
-7. 部署：
+6. 部署：
    ```bash
    wrangler deploy
    ```
    部署成功后拿到 `https://<subdomain>.workers.dev`（或自定义域）。
+
+> 本方案为「账号登录多租户」：**无需设置任何 secret / 共享 token**。
+> 普通用户用 App 端用户名+密码自助注册/登录，登录后拿到的每用户令牌即同步凭证。
 
 ## App 端配置
 
 设置页 → 「Cloudflare 目标（方案 B）」：
 
 - **CF Worker URL**：填上面拿到的 `https://<subdomain>.workers.dev`；
-- **CF Token**：填你设的 `SYNC_TOKEN`（开发期若留空放行则也可不填）；
-- 点「保存 CF 配置」后，用「上传到 CF / 从 CF 拉取」按钮即可。
+- **账号**：在「Cloudflare 账号」卡片用用户名+密码「注册」或「登录」（无需填任何共享 token）；
+- 登录成功后，用「上传到 CF / 从 CF 拉取」按钮即可；每用户数据按账号隔离。
 
 > 同一份本地 outbox 数据若想同时传两个后端，注意：上传会消费本地 outbox
 > （标记 done）。开发期两个后端共用一个 `lastPulledAt` 游标，已通过每次拉取前

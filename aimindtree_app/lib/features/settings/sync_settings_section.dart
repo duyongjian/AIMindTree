@@ -17,6 +17,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/secret_store.dart';
 import '../../data/sync/sync_api.dart';
+import '../../data/sync/sync_account.dart';
 import '../../data/sync/sync_config.dart';
 import '../../data/sync/sync_outbox.dart';
 import '../../data/sync/sync_scheduler.dart';
@@ -45,7 +46,8 @@ class SyncSettingsSection extends StatefulWidget {
 class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   late final TextEditingController _url;
   late final TextEditingController _cfUrl;
-  late final TextEditingController _cfToken;
+  late final TextEditingController _cfUser;
+  late final TextEditingController _cfPass;
   int _pending = 0;
   int _failed = 0;
   String _status = 'idle';
@@ -55,7 +57,8 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     super.initState();
     _url = TextEditingController(text: widget.config.baseUrl ?? '');
     _cfUrl = TextEditingController(text: widget.config.cfUrl ?? '');
-    _cfToken = TextEditingController(text: widget.config.cfToken ?? '');
+    _cfUser = TextEditingController(text: widget.config.cfUsername ?? '');
+    _cfPass = TextEditingController();
     _status = widget.statusStore.status;
     _refreshCounters();
   }
@@ -64,7 +67,8 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   void dispose() {
     _url.dispose();
     _cfUrl.dispose();
-    _cfToken.dispose();
+    _cfUser.dispose();
+    _cfPass.dispose();
     super.dispose();
   }
 
@@ -92,11 +96,65 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
 
   Future<void> _saveCf() async {
     await widget.config.setCfUrl(_cfUrl.text.trim());
-    final t = _cfToken.text.trim();
-    await widget.config.setCfToken(t.isEmpty ? null : t);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('CF 同步配置已保存（重启 App 后生效）。')),
+    );
+  }
+
+  /// 登录/注册 CF 账号（方案 B 多租户）：成功后保存每用户令牌，普通用户无需填共享 token。
+  Future<void> _account({required bool register}) async {
+    final url = widget.config.cfUrl?.trim();
+    if (url == null || url.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请先填写 CF Worker URL。')),
+      );
+      return;
+    }
+    final username = _cfUser.text.trim();
+    final password = _cfPass.text;
+    if (username.isEmpty || password.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请输入用户名和密码。')),
+      );
+      return;
+    }
+    final api = SyncAccountApi(baseUrl: url);
+    try {
+      final session =
+          register ? await api.register(username, password) : await api.login(username, password);
+      await widget.config.setCfUsername(username);
+      await widget.config.setCfUserToken(session.token);
+      _cfPass.clear();
+      if (!mounted) return;
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(register ? '注册并登录成功：$username' : '登录成功：$username'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } on SyncAccountApiException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${register ? '注册' : '登录'}失败：${e.message}'), backgroundColor: Colors.red),
+      );
+    } finally {
+      api.close();
+    }
+  }
+
+  /// 退出 CF 账号：清本地用户名与每用户令牌。
+  Future<void> _logoutCf() async {
+    await widget.config.setCfUserToken(null);
+    await widget.config.setCfUsername(null);
+    _cfUser.clear();
+    if (!mounted) return;
+    setState(() {});
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('已退出 CF 账号。')),
     );
   }
 
@@ -117,9 +175,16 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     }
     String? token;
     if (toCf) {
-      // CF token 可为空：官方/个人开放部署（Worker 未设 SYNC_TOKEN）直接放行；
-      // 若服务端设了令牌而本地未填，会返回 401，此时在设置页填 Token 即可。
-      token = await widget.config.resolveCfToken();
+      // CF 走账号登录（多租户）：取每用户令牌；未登录则提示先登录/注册。
+      final userToken = await widget.config.resolveCfUserToken();
+      if (userToken == null || userToken.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请先在 Cloudflare 账号卡片登录/注册。')),
+        );
+        return;
+      }
+      token = userToken;
     } else {
       token = await widget.config.resolveToken(); // 可能为空（relay 开发期免 token）
     }
@@ -172,6 +237,65 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
         ),
       );
     }
+  }
+
+  /// Cloudflare 账号卡片：已登录显示只读状态 + 退出；未登录显示用户名/密码 + 登录/注册。
+  Widget _cfAccountCard() {
+    final username = widget.config.cfUsername;
+    final loggedIn = username != null && username.isNotEmpty;
+    if (loggedIn) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _ReadOnlyField(
+            label: 'Cloudflare 账号',
+            value: username,
+            note: '已登录（每用户令牌本机 SecretStore 保存）',
+          ),
+          const SizedBox(height: 8),
+          FilledButton.tonal(
+            onPressed: _logoutCf,
+            child: const Text('退出登录'),
+          ),
+        ],
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TextField(
+          controller: _cfUser,
+          decoration: const InputDecoration(labelText: '用户名'),
+        ),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _cfPass,
+          obscureText: true,
+          decoration: const InputDecoration(
+            labelText: '密码',
+            helperText: '自助注册：用户名≥3、密码≥8',
+          ),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: FilledButton(
+                onPressed: () => _account(register: false),
+                child: const Text('登录'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton(
+                onPressed: () => _account(register: true),
+                child: const Text('注册'),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
   }
 
   Future<void> _testConnection() async {
@@ -287,14 +411,9 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
                 ),
               ),
               const SizedBox(height: 8),
-              TextField(
-                controller: _cfToken,
-                obscureText: true,
-                decoration: const InputDecoration(
-                  labelText: 'CF Token（开发期直存本机）',
-                  helperText: '也可由管理后台下发 token_ref 经 SecretStore 保存',
-                ),
-              ),
+              // ---- Cloudflare 账号（方案 B 多租户）----
+              // 普通用户自助注册/登录，无需填写任何共享 token；登录后令牌本机保存。
+              _cfAccountCard(),
               const SizedBox(height: 8),
               FilledButton.tonal(
                 onPressed: _saveCf,
@@ -353,8 +472,9 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
               ),
               const SizedBox(height: 8),
               Text(
-                '• 默认指向本机 llm_server（127.0.0.1:8787）；CF 需先填 URL + Token；\n'
-                '• Token 仅本机保存，不入 DB；\n'
+                '• 默认指向本机 llm_server（127.0.0.1:8787）；CF 需先填 URL 并登录/注册账号；\n'
+                '• 普通用户用用户名+密码自助注册，无需填写任何共享 token；\n'
+                '• 每用户令牌仅本机 SecretStore 保存，按账号隔离数据，不入 DB；\n'
                 '• 同步为手动：上传 = 本地 → 目标，拉取 = 目标 → 本地；\n'
                 '• 跨设备冲突用 LWW（version 大者赢），自回声自动过滤；\n'
                 '• 上传会消费本地 outbox（标记 done）；同一份数据传两个后端请先清空 outbox 或换库。',

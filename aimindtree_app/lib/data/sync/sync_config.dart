@@ -75,6 +75,32 @@ class SyncConfig {
     }
   }
 
+  // ---- Cloudflare 账号（方案 B，自助注册/登录，多租户隔离）----
+  // 普通用户用用户名+密码登录即可，无需填写任何共享 token。
+  // 用户名明文落 prefs；每用户令牌经 SecretStore 保存（本机，不随 DB 上传）。
+  static const _kCfUsername = 'aimindtree.sync.cf_username';
+  static const _kCfUserToken = 'aimindtree.sync.cf_user_token';
+
+  String? get cfUsername => prefs.getString(_kCfUsername);
+  Future<void> setCfUsername(String? v) async =>
+      v == null ? prefs.remove(_kCfUsername) : prefs.setString(_kCfUsername, v);
+
+  /// 取出 CF 每用户令牌（登录/注册后由 [setCfUserToken] 写入 SecretStore）。
+  Future<String?> resolveCfUserToken() async => secretStore.get(_kCfUserToken);
+
+  /// 登录/注册成功后保存每用户令牌；[token] 为 null 表示登出（清本地令牌）。
+  Future<void> setCfUserToken(String? token) async {
+    if (token == null) {
+      await secretStore.delete(_kCfUserToken);
+    } else {
+      await secretStore.set(_kCfUserToken, token);
+    }
+  }
+
+  /// CF 是否处于已登录状态（用户名非空且本地存有令牌）。
+  Future<bool> isCfLoggedIn() async =>
+      (cfUsername?.isNotEmpty ?? false) && (await resolveCfUserToken()) != null;
+
   /// llm 目标 URL：用户未单独配时默认本机 llm_server（开发期免 token）。
   String get llmUrl =>
       (baseUrl?.isNotEmpty ?? false) ? baseUrl! : kSyncLlmServerDefaultBaseUrl;

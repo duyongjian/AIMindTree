@@ -87,6 +87,23 @@ void main() {
       expect(await config.resolveCfToken(), '');
     });
 
+    test('CF 账号字段：用户名 + 每用户令牌（SecretStore）+ 登录态', () async {
+      expect(config.cfUsername, isNull);
+      expect(await config.resolveCfUserToken(), isNull);
+      expect(await config.isCfLoggedIn(), isFalse);
+
+      await config.setCfUsername('alice');
+      await config.setCfUserToken('per-user-token');
+      expect(config.cfUsername, 'alice');
+      expect(await config.resolveCfUserToken(), 'per-user-token');
+      expect(await config.isCfLoggedIn(), isTrue);
+
+      // 登出：清令牌后视为未登录（用户名保留也无所谓，令牌才是凭证）
+      await config.setCfUserToken(null);
+      expect(await config.resolveCfUserToken(), isNull);
+      expect(await config.isCfLoggedIn(), isFalse);
+    });
+
     test('clear 复位全部字段（含 cf）', () async {
       await config.setBaseUrl('https://x.com');
       await config.setTokenRef('ref-a');
