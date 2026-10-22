@@ -24,11 +24,71 @@ import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// 一条「旧时代」的知识点更新时间（远早于 createdAt，用来证明回填取自它）。
+/// 第一行历史知识点的更新时间。
 final DateTime kLegacyUpdatedAt = DateTime.utc(2024, 1, 2, 3, 4, 5);
 
-/// 与之无关的另一个时间点（若回填逻辑写错成了「保留原 createdAt」，会命中它）。
+/// 第二行历史知识点的更新时间（必须与第一行不同，用来验证「逐行回填」）。
+final DateTime kLegacyUpdatedAtSecond = DateTime.utc(2022, 8, 9, 10, 11, 12);
+
+/// 迁移前故意塞进去的 created_at；若回填没生效，断言会命中这个值而失败。
 final DateTime kLegacyCreatedAt = DateTime.utc(2023, 5, 5, 6, 7, 8);
+
+/// 造「历史数据」用的种子：id + 该行各自的更新时间。
+class _LegacySeed {
+  const _LegacySeed(this.id, this.updatedAt);
+  final String id;
+  final DateTime updatedAt;
+}
+
+/// 两行历史数据，updated_at **互不相同** —— 这样「回填取自各自的 updated_at」
+/// 才有区分度（如果灌的是同一个时间戳或建库时间，断言会立刻炸）。
+final List<_LegacySeed> kLegacySeeds = <_LegacySeed>[
+  _LegacySeed('kp-legacy-a', kLegacyUpdatedAt),
+  _LegacySeed('kp-legacy-b', kLegacyUpdatedAtSecond),
+];
+
+/// 把一个 v5 库打回 **v4 形态**的步骤（v4 的 knowledge_points 没有
+/// pinned / created_at，且当时还没有 note_assets 表）。
+///
+/// 最后一步把 `PRAGMA user_version` 退回 4 —— 这就是 drift 的 schemaVersion
+/// 落点，也是唯一可靠的「让 AppDatabase 真跑 onUpgrade」的入口
+/// （内存库永远是全新库，只走 onCreate，测不到迁移）。
+const List<String> kV4DowngradeSql = <String>[
+  'DROP TABLE IF EXISTS note_assets',
+  '''
+CREATE TABLE knowledge_points_v4 (
+  id TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  updated_at INTEGER NOT NULL,
+  device_id TEXT NOT NULL,
+  deleted_at INTEGER NULL,
+  notebook_id TEXT NULL,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,
+  definition TEXT NOT NULL,
+  source_note_id TEXT NOT NULL,
+  source_start INTEGER NOT NULL,
+  source_end INTEGER NOT NULL,
+  source_quote TEXT NOT NULL,
+  origin TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  PRIMARY KEY (id)
+)''',
+  '''
+INSERT INTO knowledge_points_v4 (
+  id, version, updated_at, device_id, deleted_at, notebook_id, name, type,
+  definition, source_note_id, source_start, source_end, source_quote,
+  origin, confidence
+)
+SELECT
+  id, version, updated_at, device_id, deleted_at, notebook_id, name, type,
+  definition, source_note_id, source_start, source_end, source_quote,
+  origin, confidence
+FROM knowledge_points''',
+  'DROP TABLE knowledge_points',
+  'ALTER TABLE knowledge_points_v4 RENAME TO knowledge_points',
+  'PRAGMA user_version = 4',
+];
 
 /// 取时刻（毫秒）。
 ///
@@ -136,107 +196,84 @@ void main() {
       tmp?.deleteSync(recursive: true);
     });
 
-    test('历史行 created_at 回填为 updated_at、pinned 落 false、新建 note_assets',
+    test('历史行 created_at 回填为各自的 updated_at、pinned 落 false、新建 note_assets',
         () async {
       final file = File('${tmp!.path}${Platform.pathSeparator}legacy.sqlite');
 
-      // ① 先用当前（v5）代码建一个库并落一条历史数据：updated_at 故意是
-      //    2024-01-02，created_at 故意是 2023-05-05（二者不同，便于判定回填来源）。
+      // ① 先用当前（v5）代码建一个库，落**两行**历史数据（updated_at 互不相同，
+      //    这样能证明回填是「逐行取自己的 updated_at」，而不是灌同一个时间戳）。
+      //    同时 created_at 故意先塞一个别的值，用来识别「根本没回填」的情况。
       final v5 = AppDatabase(NativeDatabase(file));
-      await v5.into(v5.knowledgePoints).insert(
-            KnowledgePointsCompanion.insert(
-              id: 'kp-legacy',
-              name: '历史知识点',
-              type: 'concept',
-              sourceNoteId: 'note-legacy',
-              sourceStart: 0,
-              sourceEnd: 2,
-              sourceQuote: '历史',
-              deviceId: 'legacy-device',
-              version: const Value(7),
-              updatedAt: kLegacyUpdatedAt,
-              createdAt: Value(kLegacyCreatedAt),
-            ),
-          );
-      await v5.close();
+      for (final seed in kLegacySeeds) {
+        await v5.into(v5.knowledgePoints).insert(
+              KnowledgePointsCompanion.insert(
+                id: seed.id,
+                name: '历史知识点 ${seed.id}',
+                type: 'concept',
+                sourceNoteId: 'note-legacy',
+                sourceStart: 0,
+                sourceEnd: 2,
+                sourceQuote: '历史',
+                deviceId: 'legacy-device',
+                version: const Value(7),
+                updatedAt: seed.updatedAt,
+                createdAt: Value(kLegacyCreatedAt),
+              ),
+            );
+      }
 
-      // ② 把它手工降回 **v4 形态**：抽掉 pinned / created_at 两列、删掉
-      //    note_assets 表、PRAGMA user_version 退回 4。
-      //    （SQLite 老版本不支持 DROP COLUMN，用「建新表 → 拷数据 → 改名」这一套，
-      //     任何 3.25+ 都能跑。）
-      final surgery = AppDatabase(NativeDatabase(file));
-      await surgery.customStatement('DROP TABLE IF EXISTS note_assets');
-      await surgery.customStatement('''
-CREATE TABLE knowledge_points_v4 (
-  id TEXT NOT NULL,
-  version INTEGER NOT NULL DEFAULT 1,
-  updated_at INTEGER NOT NULL,
-  device_id TEXT NOT NULL,
-  deleted_at INTEGER NULL,
-  notebook_id TEXT NULL,
-  name TEXT NOT NULL,
-  type TEXT NOT NULL,
-  definition TEXT NOT NULL,
-  source_note_id TEXT NOT NULL,
-  source_start INTEGER NOT NULL,
-  source_end INTEGER NOT NULL,
-  source_quote TEXT NOT NULL,
-  origin TEXT NOT NULL,
-  confidence REAL NOT NULL,
-  PRIMARY KEY (id)
-)''');
-      await surgery.customStatement('''
-INSERT INTO knowledge_points_v4 (
-  id, version, updated_at, device_id, deleted_at, notebook_id, name, type,
-  definition, source_note_id, source_start, source_end, source_quote,
-  origin, confidence
-)
-SELECT
-  id, version, updated_at, device_id, deleted_at, notebook_id, name, type,
-  definition, source_note_id, source_start, source_end, source_quote,
-  origin, confidence
-FROM knowledge_points''');
-      await surgery.customStatement('DROP TABLE knowledge_points');
-      await surgery
-          .customStatement('ALTER TABLE knowledge_points_v4 RENAME TO knowledge_points');
-      await surgery.customStatement('PRAGMA user_version = 4');
-      // 自检：降版后确实只剩 v4 的 15 列，且 note_assets 已不存在。
-      expect(
-        await surgery
-            .customSelect('PRAGMA table_info(knowledge_points)')
-            .get()
-            .then((rows) => rows.length),
-        15,
-        reason: '回退后 knowledge_points 应是 v4 的 15 列',
-      );
-      await surgery.close();
+      // ② **同一个会话里**把它手工降回 v4 形态：抽掉 pinned / created_at 两列、
+      //    删掉 note_assets 表、PRAGMA user_version 退回 4。
+      //    - SQLite 老版本不支持 DROP COLUMN，所以走「建新表 → 拷数据 → 改名」，
+      //      任何 3.25+ 都能跑；
+      //    - 不重新开关一次数据库：Windows 上 sqlite 文件句柄释放有延迟，
+      //      开合次数越少越不容易在 CI 上抖。
+      for (final sql in kV4DowngradeSql) {
+        await v5.customStatement(sql);
+      }
+      // 自检：降版后 knowledge_points 确实只剩 v4 的 15 列。
+      final cols = await v5
+          .customSelect('PRAGMA table_info(knowledge_points)')
+          .get()
+          .then((rows) => rows.length);
+      expect(cols, 15, reason: '回退后 knowledge_points 应是 v4 的 15 列');
+      await v5.close();
 
       // ③ 重新打开：drift 发现 user_version=4 < schemaVersion=5 → 真正执行
       //    onUpgrade 的 `from < 5` 分支（不是 onCreate）。
       final migrated = AppDatabase(NativeDatabase(file));
       addTearDown(migrated.close);
 
-      final rows = await migrated.select(migrated.knowledgePoints).get();
-      expect(rows, hasLength(1), reason: '历史数据不能丢');
+      final rows = await migrated.select(migrated.knowledgePoints).get()
+        ..sort((a, b) => a.id.compareTo(b.id));
+      expect(rows, hasLength(kLegacySeeds.length), reason: '历史数据不能丢');
 
-      final legacy = rows.single;
-      expect(legacy.id, 'kp-legacy');
-      expect(legacy.version, 7, reason: '迁移不能动既有版本值');
-      // 注意：sqlite 里日期是 INTEGER 秒，回读成本地时区的 DateTime，
-      // 而 Dart 的 `DateTime ==` 还要求 isUtc 一致，所以这里比时刻不比对象。
-      expect(_instant(legacy.updatedAt), _instant(kLegacyUpdatedAt),
-          reason: '迁移不能动 updated_at');
+      // ★ 迁移的核心断言：每一行的创建时间都用**它自己的** updated_at 近似回填
+      //   （不是同一个时间戳、不是建库时间、不是 1970）。
+      //   注意：sqlite 里日期是 INTEGER 秒，回读成本地时区的 DateTime，
+      //   而 Dart 的 `DateTime ==` 还要求 isUtc 一致，所以这里比时刻不比对象。
+      for (var i = 0; i < rows.length; i++) {
+        final legacy = rows[i];
+        final seed = kLegacySeeds[i];
+        expect(legacy.id, seed.id);
+        expect(legacy.version, 7, reason: '迁移不能动既有版本值');
+        expect(_instant(legacy.updatedAt), _instant(seed.updatedAt),
+            reason: '迁移不能动 updated_at');
+        expect(legacy.createdAt, isNotNull, reason: 'created_at 必须被回填，不能留空');
+        expect(_instant(legacy.createdAt!), _instant(seed.updatedAt),
+            reason: '${seed.id} 的 created_at 应等于它自己的 updated_at');
+        expect(_instant(legacy.createdAt!) == _instant(kLegacyCreatedAt), isFalse,
+            reason: '必须是回填出来的新值，不是迁移前塞的旧值');
+        // ★ 非空布尔新列的回填：历史行落 false（不置顶）。
+        expect(legacy.pinned, isFalse);
+      }
 
-      // ★ 迁移的核心断言：历史行的创建时间用「当时已知的更新时间」近似回填。
-      expect(legacy.createdAt, isNotNull, reason: 'created_at 必须被回填，不能留空');
-      expect(_instant(legacy.createdAt!), _instant(kLegacyUpdatedAt),
-          reason: 'created_at 应取自 updated_at（2024-01-02），而不是原值 2023-05-05');
-      expect(_instant(legacy.createdAt!) == _instant(kLegacyCreatedAt), isFalse,
-          reason: '必须是回填出来的新值，不是原来的 2023-05-05');
-      expect(legacy.createdAt, legacy.updatedAt);
-
-      // ★ 非空布尔新列的回填：历史行落 false（不置顶）。
-      expect(legacy.pinned, isFalse);
+      // 逐行独立：两行的 updated_at 本就不同，回填结果也必须不同。
+      expect(
+        rows.map((r) => _instant(r.createdAt!)).toSet().length,
+        rows.length,
+        reason: '回填必须逐行取自各自的 updated_at，不能是同一个时间戳',
+      );
 
       // ★ note_assets 表由迁移建出来。
       await migrated.into(migrated.noteAssets).insert(
