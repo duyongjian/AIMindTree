@@ -49,6 +49,10 @@ Map<String, dynamic> knowledgePointRowToMap(KnowledgePointRow r) => {
       'source_quote': r.sourceQuote,
       'origin': r.origin,
       'confidence': r.confidence,
+      // v5 新增两列（置顶 / 创建时间）：不写进 payload 的话，对端 pull 时
+      // 读不到键 → 静默回落默认值 → 置顶与创建时间在其他设备上无声丢失。
+      'pinned': r.pinned,
+      'created_at': r.createdAt,
       'updated_at': r.updatedAt,
       'version': r.version,
       'device_id': r.deviceId,
@@ -163,6 +167,44 @@ Map<String, dynamic> aiMessageRowToMap(AiMessageRow r) => {
       'tokens': r.tokens,
       'latency_ms': r.latencyMs,
       'model_id': r.modelId,
+      'updated_at': r.updatedAt,
+      'version': r.version,
+      'device_id': r.deviceId,
+      'deleted_at': r.deletedAt,
+    };
+
+/// kp_groups 行 → payload。
+///
+/// ⚠️ `members_json` 是**整段成员 JSON 字符串**（`[{"kpId":"...","level":1}]`），
+/// 同步层只搬运不解析——分组成员的编解码属于 `GroupRepository` 的职责。
+Map<String, dynamic> kpGroupRowToMap(KpGroupRow r) => {
+      'id': r.id,
+      'canvas_id': r.canvasId,
+      'name': r.name,
+      'order_index': r.orderIndex,
+      'foundational_level': r.foundationalLevel,
+      'members_json': r.membersJson,
+      'updated_at': r.updatedAt,
+      'version': r.version,
+      'device_id': r.deviceId,
+      'deleted_at': r.deletedAt,
+    };
+
+/// note_assets 行 → payload。
+///
+/// ⚠️ 三个易踩的拼写点（拼错 = 对端静默回落默认值、且不报错）：
+/// - `dataBase64` 的列名是 `data_base64`（**不是** `dataBase64`）；
+/// - `bytes` 就是 `bytes`，类型 `int`；
+/// - 一条附件的 `data_base64` 可达数 MB，push 侧有字节预算切批（见
+///   `sync_engine.dart` 的 `_kPushBatchBudgetBytes`）。
+Map<String, dynamic> noteAssetRowToMap(NoteAssetRow r) => {
+      'id': r.id,
+      'note_id': r.noteId,
+      'name': r.name,
+      'mime': r.mime,
+      'sha1': r.sha1,
+      'bytes': r.bytes,
+      'data_base64': r.dataBase64,
       'updated_at': r.updatedAt,
       'version': r.version,
       'device_id': r.deviceId,

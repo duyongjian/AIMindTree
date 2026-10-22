@@ -3,13 +3,15 @@
 /// 推送：读 outbox pending → 批量走 SyncApi → markPushed / markFailed
 /// 拉取：走 SyncApi.pullSince → 自回声过滤 → 逐行 LWW merge → 更新 last_pulled_at
 ///
-/// 表覆盖范围（P1 已完成 11 张带 SyncMeta 的表）：
+/// 表覆盖范围（13 张带 SyncMeta 的表，见 [kSyncTableAllowlist]）：
 /// notebooks / notes / knowledge_points / prerequisite_edges / mastery_records /
-/// cards / canvases / canvas_nodes / canvas_edges / ai_sessions / ai_messages。
+/// cards / canvases / canvas_nodes / canvas_edges / ai_sessions / ai_messages /
+/// kp_groups / note_assets（后两张为 v5 新增）。
 ///
-/// 故意不同步 2 张：`ai_providers`（密钥引用本地化，跨设备命名空间不一致）、
-/// `ai_task_routes`（依赖 ai_providers，单独同步无意义）。
-/// 将来要同步它们需先加 SyncMeta mixin + schemaVersion=2 迁移。
+/// 故意不同步 4 张：`ai_providers`（密钥引用本地化，跨设备命名空间不一致）、
+/// `ai_task_routes`（依赖 ai_providers，单独同步无意义）、
+/// `homeworks`（一次性草稿，无跨设备价值）、`sync_outbox`（发件箱自身）。
+/// 将来要同步它们需先加 SyncMeta mixin + schemaVersion 迁移。
 ///
 /// LWW 规则（MEMORY.md "Append-only 排序陷阱" 同源）：
 /// - `remote.baseVersion > local.version` → apply remote；
@@ -29,6 +31,45 @@ import 'sync_api.dart';
 import 'sync_outbox.dart';
 import 'sync_row_map.dart';
 import 'sync_types.dart';
+
+/// 参与同步的表名白名单（**一行可回退的开关**）。
+///
+/// ⚠️ 远端是 Supabase Edge Function（源码不在本仓库、无法验证），若它有
+/// 表名白名单校验，新增表名会让**整批** push 失败 → outbox 全标 failed。
+///
+/// 真机跨设备同步报 4xx 时，把下面 `'kp_groups'` / `'note_assets'` 两行
+/// 注释掉即可秒回退：这两张表不再上行，其余 11 张表与本地功能不受影响。
+///
+/// 白名单只作用于 **push**（上行）：不上行 ≠ 不下行，远端若仍有这些表的
+/// 历史数据，pull 下来照样能被本地 `_upsertLocal` 消费。
+const Set<String> kSyncTableAllowlist = <String>{
+  'notebooks',
+  'notes',
+  'knowledge_points',
+  'prerequisite_edges',
+  'mastery_records',
+  'cards',
+  'canvases',
+  'canvas_nodes',
+  'canvas_edges',
+  'ai_sessions',
+  'ai_messages',
+  'kp_groups',
+  'note_assets',
+};
+
+/// 单批 push 的**字节预算**（4MB）。
+///
+/// 一条图片附件的 `data_base64` 可达 2.7MB，若和别的行挤在同一批里，
+/// 整批会逼近甚至超过 Edge Function 的请求体上限 → 全批失败。
+/// 预算式切批让「大 envelope 单独成批」，小 envelope 则照旧一次带走。
+const int kPushBatchBudgetBytes = 4 * 1024 * 1024;
+
+/// 单条 envelope 的**硬上限**（6MB）。
+///
+/// 超过它的 envelope 不会被切批逻辑无限重试：直接 `markFailed` + 一条
+/// warning 日志，避免一条畸形巨包把整个 outbox 队列永久堵住。
+const int kMaxEnvelopeBytes = 6 * 1024 * 1024;
 
 /// 推送结果。
 class PushReport {
@@ -81,7 +122,16 @@ SyncEngine({
 
   /// 推送 outbox pending → 成功 done / 失败 failed。
   ///
-  /// [limit] 单批上限；[includeFailed] 是否同时拉 failed 重试。
+  /// [limit] 单批上限（**条数**上限；真正的成批边界还受
+  /// [kPushBatchBudgetBytes] 字节预算约束）；[includeFailed] 是否同时拉
+  /// failed 重试。
+  ///
+  /// 流程：
+  /// 1. 出队 pending + failed → 逐条构造 envelope；
+  /// 2. 表名不在 [kSyncTableAllowlist] 里的行**原地跳过**（保持 pending，
+  ///    不入队失败）—— 这是远端表名白名单不兼容时的回退通道；
+  /// 3. 单条 > [kMaxEnvelopeBytes] → `markFailed` + warning，不参与切批；
+  /// 4. 其余按 [kPushBatchBudgetBytes] 贪心切批 → 逐批 push。
   Future<PushReport> push({
     int limit = 100,
     bool includeFailed = true,
@@ -95,14 +145,17 @@ SyncEngine({
       return PushReport(pushed: 0, failed: 0, serverTime: _epoch);
     }
 
-    final ids = rows.map((r) => r.id).toList();
-    await _outbox.markSending(ids);
+    // ---- 1. 构造 envelope + 过滤 ----
+    final entries = <_PushEntry>[];
+    final oversized = <int>[];
+    final blockedTables = <String>{};
 
-    final envelopes = <SyncEnvelope>[];
-    final idToRow = <int, SyncOutboxRow>{};
     for (final r in rows) {
-      idToRow[r.id] = r;
-      envelopes.add(SyncEnvelope(
+      if (!kSyncTableAllowlist.contains(r.entityTable)) {
+        blockedTables.add(r.entityTable);
+        continue;
+      }
+      final env = SyncEnvelope(
         deviceId: r.deviceId,
         entityTable: r.entityTable,
         entityId: r.entityId,
@@ -111,23 +164,105 @@ SyncEngine({
         baseVersion: r.baseVersion,
         updatedAt: r.createdAt, // 简化：用 outbox 创建时间（行真正 updatedAt 在 payload 里）
         deletedAt: _extractDeletedAt(r.entityTable, r.payloadJson),
-      ));
+      );
+      final bytes = _envelopeBytes(env, r.payloadJson);
+      if (bytes > kMaxEnvelopeBytes) {
+        // 单条就超硬上限：切批也救不了，标记 failed 让它别堵住队列。
+        oversized.add(r.id);
+        continue;
+      }
+      entries.add(_PushEntry(row: r, envelope: env, bytes: bytes));
     }
 
-    try {
-      final result = await _api.pushBatch(envelopes);
-      await _outbox.markPushed(ids);
-      _log.i('push 成功 ${result.accepted} 条；server_time=${result.serverTime}');
-      return PushReport(
-        pushed: result.accepted,
-        failed: 0,
-        serverTime: result.serverTime,
+    if (blockedTables.isNotEmpty) {
+      _log.w(
+        '表 ${blockedTables.join(', ')} 不在 kSyncTableAllowlist 内，'
+        '${blockedTables.length} 张表的 outbox 行本轮跳过（保持 pending）',
       );
-    } on Object catch (e) {
-      _log.w('push 失败：$e；${ids.length} 条回到 failed');
-      await _outbox.markFailed(ids);
-      return PushReport(pushed: 0, failed: ids.length, serverTime: DateTime.now().toUtc());
     }
+    if (oversized.isNotEmpty) {
+      _log.w(
+        '${oversized.length} 条 envelope 超过 ${kMaxEnvelopeBytes ~/ (1024 * 1024)}MB '
+        '硬上限，标记 failed 跳过（否则会永久堵住队列）',
+      );
+      await _outbox.markFailed(oversized);
+    }
+    if (entries.isEmpty) {
+      return PushReport(
+        pushed: 0,
+        failed: oversized.length,
+        serverTime: DateTime.now().toUtc(),
+      );
+    }
+
+    // ---- 2. 按字节预算切批 ----
+    final batches = _splitBatches(entries);
+    if (batches.length > 1) {
+      _log.i('push 切成 ${batches.length} 批（字节预算 ${kPushBatchBudgetBytes ~/ (1024 * 1024)}MB）');
+    }
+
+    // ---- 3. 逐批 push ----
+    var pushed = 0;
+    var failedCount = oversized.length;
+    var serverTime = DateTime.now().toUtc();
+
+    for (final batch in batches) {
+      final ids = <int>[for (final e in batch) e.row.id];
+      await _outbox.markSending(ids);
+      try {
+        final result =
+            await _api.pushBatch(<SyncEnvelope>[for (final e in batch) e.envelope]);
+        await _outbox.markPushed(ids);
+        pushed += result.accepted;
+        serverTime = result.serverTime;
+        _log.i('push 成功 ${result.accepted} 条；server_time=${result.serverTime}');
+      } on Object catch (e) {
+        _log.w('push 失败：$e；${ids.length} 条回到 failed');
+        await _outbox.markFailed(ids);
+        failedCount += ids.length;
+      }
+    }
+
+    return PushReport(
+      pushed: pushed,
+      failed: failedCount,
+      serverTime: serverTime,
+    );
+  }
+
+  /// 估算一条 envelope 序列化后的字节数（UTF-8）。
+  ///
+  /// [rawPayloadJson] 是 outbox 里存的原始 JSON 串，只在 `jsonEncode` 抛出
+  /// （payload 里混入了 jsonEncode 不支持的对象）时用作退化估算，
+  /// 保证切批逻辑不会因为一条坏包而整体崩掉。
+  int _envelopeBytes(SyncEnvelope env, String rawPayloadJson) {
+    try {
+      return utf8.encode(jsonEncode(env.toJson())).length;
+    } on Object {
+      // base64 正文基本是纯 ASCII，1.2 倍系数足够保守。
+      return (rawPayloadJson.length * 1.2).ceil();
+    }
+  }
+
+  /// 贪心切批：按 [entries] 原顺序累加，超出预算就断开当前批。
+  ///
+  /// 效果是「一条 2.7MB 的 asset envelope 单独成批」——它既不会被拆开
+  /// （envelope 是原子的），也不会把后面的小 envelope 一起拖下水。
+  static List<List<_PushEntry>> _splitBatches(List<_PushEntry> entries) {
+    final batches = <List<_PushEntry>>[];
+    var current = <_PushEntry>[];
+    var currentBytes = 0;
+    for (final e in entries) {
+      if (current.isNotEmpty && currentBytes + e.bytes > kPushBatchBudgetBytes) {
+        batches.add(current);
+        current = <_PushEntry>[];
+        currentBytes = 0;
+      }
+      current.add(e);
+      currentBytes += e.bytes;
+    }
+    if (current.isNotEmpty) batches.add(current);
+    return batches;
   }
 
   // ============ Pull ============
@@ -247,6 +382,28 @@ SyncEngine({
       case 'ai_messages':
         final r = await (_db.select(_db.aiMessages)..where((t) => t.id.equals(id))).getSingleOrNull();
         return r == null ? null : aiMessageRowToMap(r);
+      case 'kp_groups':
+        final r = await (_db.select(_db.kpGroups)..where((t) => t.id.equals(id))).getSingleOrNull();
+        return r == null ? null : kpGroupRowToMap(r);
+      case 'note_assets':
+        // ⚠️ 轻量查询：LWW 只需要 id / version / updated_at 三个字段。
+        // 若 select 整行，每次比较都要为取两个字段把数 MB 的 `data_base64`
+        // 读进内存（一条 2MB 图片的 base64 约 2.7MB）。
+        final r = await (_db.selectOnly(_db.noteAssets)
+              ..addColumns([
+                _db.noteAssets.id,
+                _db.noteAssets.version,
+                _db.noteAssets.updatedAt,
+              ])
+              ..where(_db.noteAssets.id.equals(id)))
+            .getSingleOrNull();
+        return r == null
+            ? null
+            : <String, dynamic>{
+                'id': r.read(_db.noteAssets.id),
+                'version': r.read(_db.noteAssets.version),
+                'updated_at': r.read(_db.noteAssets.updatedAt),
+              };
       default:
         _log.w('未知表 $table，跳过读 local');
         return null;
@@ -319,6 +476,12 @@ SyncEngine({
       case 'ai_messages':
         await _db.into(_db.aiMessages).insert(_aiMessageFromMap(p), mode: InsertMode.insertOrReplace);
         break;
+      case 'kp_groups':
+        await _db.into(_db.kpGroups).insert(_kpGroupFromMap(p), mode: InsertMode.insertOrReplace);
+        break;
+      case 'note_assets':
+        await _db.into(_db.noteAssets).insert(_noteAssetFromMap(p), mode: InsertMode.insertOrReplace);
+        break;
       default:
         _log.w('未知表 $table，跳过 insert');
     }
@@ -358,6 +521,12 @@ SyncEngine({
         break;
       case 'ai_messages':
         await (_db.delete(_db.aiMessages)..where((t) => t.id.equals(id))).go();
+        break;
+      case 'kp_groups':
+        await (_db.delete(_db.kpGroups)..where((t) => t.id.equals(id))).go();
+        break;
+      case 'note_assets':
+        await (_db.delete(_db.noteAssets)..where((t) => t.id.equals(id))).go();
         break;
       default:
         _log.w('未知表 $table，跳过 delete');
@@ -405,6 +574,9 @@ SyncEngine({
         sourceQuote: Value((p['source_quote'] as String?) ?? ''),
         origin: Value((p['origin'] as String?) ?? 'ai_extract'),
         confidence: Value((p['confidence'] as num?)?.toDouble() ?? 0),
+        // v5 新增两列：缺了这两行，对端 pull 时会静默丢掉置顶与创建时间。
+        pinned: Value((p['pinned'] as bool?) ?? false),
+        createdAt: Value(_dt(p['created_at'])),
         updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),
@@ -552,6 +724,44 @@ SyncEngine({
         deletedAt: Value(_dt(p['deleted_at'])),
       );
 
+  // ============ KpGroups ============
+  //
+  // ⚠️ `members_json` 整段搬运，同步层不解析（分组成员语义归 GroupRepository）。
+
+  KpGroupsCompanion _kpGroupFromMap(Map<String, dynamic> p) => KpGroupsCompanion(
+        id: Value(p['id'] as String),
+        canvasId: Value((p['canvas_id'] as String?) ?? ''),
+        name: Value((p['name'] as String?) ?? ''),
+        orderIndex: Value((p['order_index'] as num?)?.toInt() ?? 0),
+        foundationalLevel:
+            Value((p['foundational_level'] as num?)?.toInt() ?? 0),
+        membersJson: Value((p['members_json'] as String?) ?? '[]'),
+        updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
+        version: Value((p['version'] as num?)?.toInt() ?? 1),
+        deviceId: Value((p['device_id'] as String?) ?? deviceId),
+        deletedAt: Value(_dt(p['deleted_at'])),
+      );
+
+  // ============ NoteAssets ============
+  //
+  // ⚠️ 键名来自 drift 生成产物逐列提取：`dataBase64` → **`data_base64`**，
+  // `bytes` 就是 `bytes`（int）。拼错 = 对端静默回落默认值且不报错。
+
+  NoteAssetsCompanion _noteAssetFromMap(Map<String, dynamic> p) =>
+      NoteAssetsCompanion(
+        id: Value(p['id'] as String),
+        noteId: Value((p['note_id'] as String?) ?? ''),
+        name: Value((p['name'] as String?) ?? ''),
+        mime: Value((p['mime'] as String?) ?? 'image/png'),
+        sha1: Value((p['sha1'] as String?) ?? ''),
+        bytes: Value((p['bytes'] as num?)?.toInt() ?? 0),
+        dataBase64: Value((p['data_base64'] as String?) ?? ''),
+        updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
+        version: Value((p['version'] as num?)?.toInt() ?? 1),
+        deviceId: Value((p['device_id'] as String?) ?? deviceId),
+        deletedAt: Value(_dt(p['deleted_at'])),
+      );
+
   // ============ AiMessages ============
 
   AiMessagesCompanion _aiMessageFromMap(Map<String, dynamic> p) => AiMessagesCompanion(
@@ -575,4 +785,19 @@ class _LocalVer {
   const _LocalVer({required this.version, required this.updatedAt});
   final int version;
   final DateTime updatedAt;
+}
+
+/// 一次 push 里「outbox 行 ↔ envelope ↔ 预估字节数」的三元组。
+class _PushEntry {
+  const _PushEntry({
+    required this.row,
+    required this.envelope,
+    required this.bytes,
+  });
+
+  final SyncOutboxRow row;
+  final SyncEnvelope envelope;
+
+  /// 该 envelope 序列化后的 UTF-8 字节数（切批依据）。
+  final int bytes;
 }

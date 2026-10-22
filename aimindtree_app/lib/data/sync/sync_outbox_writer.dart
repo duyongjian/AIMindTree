@@ -115,6 +115,30 @@ class SyncOutboxWriter {
         toMap: aiMessageRowToMap,
       );
 
+  /// 知识点分组 upsert（kp_groups）。
+  ///
+  /// ⚠️ `members_json` 是整段成员 JSON 字符串，同步层原样搬运、不解析。
+  Future<void> upsertKpGroup(String id) => _upsert(
+        table: 'kp_groups',
+        id: id,
+        load: () =>
+            (_db.select(_db.kpGroups)..where((t) => t.id.equals(id)))
+                .getSingleOrNull(),
+        toMap: kpGroupRowToMap,
+      );
+
+  /// 笔记附件 upsert（note_assets）。
+  ///
+  /// payload 里含整段 `data_base64`，可达数 MB；push 侧有字节预算切批，
+  /// 这里不额外做体积限制（入库时的上限校验归仓储层）。
+  Future<void> upsertNoteAsset(String id) => _upsert(
+        table: 'note_assets',
+        id: id,
+        load: () => (_db.select(_db.noteAssets)..where((t) => t.id.equals(id)))
+            .getSingleOrNull(),
+        toMap: noteAssetRowToMap,
+      );
+
   // ============ 软删（墓碑）============
 
   /// 笔记墓碑（软删：行仍在本地，deleted_at 非空）。
@@ -135,6 +159,27 @@ class SyncOutboxWriter {
             (_db.select(_db.knowledgePoints)..where((t) => t.id.equals(id)))
                 .getSingleOrNull(),
         toMap: knowledgePointRowToMap,
+      );
+
+  /// 知识点分组墓碑（软删：行仍在本地，deleted_at 非空）。
+  ///
+  /// ⚠️ 删组**不解散成员**：组内知识点只是回到未分组，绝不能连知识点一起删。
+  Future<void> tombstoneKpGroup(String id) => _tombstone(
+        table: 'kp_groups',
+        id: id,
+        load: () =>
+            (_db.select(_db.kpGroups)..where((t) => t.id.equals(id)))
+                .getSingleOrNull(),
+        toMap: kpGroupRowToMap,
+      );
+
+  /// 笔记附件墓碑（软删：行仍在本地，deleted_at 非空）。
+  Future<void> tombstoneNoteAsset(String id) => _tombstone(
+        table: 'note_assets',
+        id: id,
+        load: () => (_db.select(_db.noteAssets)..where((t) => t.id.equals(id)))
+            .getSingleOrNull(),
+        toMap: noteAssetRowToMap,
       );
 
   // ============ 硬删（行已从本地消失）============
@@ -158,6 +203,10 @@ class SyncOutboxWriter {
   /// 知识点硬删。
   Future<void> hardDeleteKnowledgePoints(Iterable<KnowledgePointRow> rows) =>
       _hardDelete(table: 'knowledge_points', rows: rows, toMap: knowledgePointRowToMap);
+
+  /// 笔记附件硬删（笔记被物理删除时，附件跟着一起走）。
+  Future<void> hardDeleteNoteAssets(Iterable<NoteAssetRow> rows) =>
+      _hardDelete(table: 'note_assets', rows: rows, toMap: noteAssetRowToMap);
 
   // ============ 内部实现 ============
 
