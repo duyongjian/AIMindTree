@@ -4,6 +4,8 @@
 /// 点条目 → 进入该知识点的老师模式页（讲解 + 追问，复用 [TeacherPage]）。
 /// 顶部「+」手动新建（名称必填；类型、定义、可选关联笔记）。
 /// 条目菜单：编辑 / 加入知识树 / 追问 / 删除（影响面预览）。
+/// 多选批量删除：AppBar 图标或长按条目进入多选态，全选 +「删除(N)」批量
+/// 软删（墓碑，进回收站可恢复）。
 ///
 /// 数据铁律：列表只读 `allKnowledgePoints()`（已过滤软删）；删除走
 /// [KnowledgeRepository.softDeleteKnowledgePoint]（墓碑，见 PRD §4.1）。
@@ -52,6 +54,11 @@ class _KnowledgeManagePageState extends State<KnowledgeManagePage> {
   KnowledgePointType? _typeFilter; // null = 全部
   String _originFilter = 'all'; // all | ai | manual | no_note
   MasteryStatus? _masteryFilter; // null = 全部
+
+  // ============ 多选批量删除 ============
+  /// 多选态：进入后每条显示 Checkbox，AppBar 显示 关闭 / 全选 /「删除(N)」。
+  bool _selectionMode = false;
+  Set<String> _selected = <String>{};
 
   List<KnowledgePoint> get _filtered {
     final q = _query.trim().toLowerCase();
@@ -376,6 +383,94 @@ class _KnowledgeManagePageState extends State<KnowledgeManagePage> {
     await _reload();
   }
 
+  // ============ 多选批量删除（软删进回收站） ============
+
+  /// 进入多选态并预选 [id]（长按条目入口）。
+  void _enterSelection(String id) => setState(() {
+        _selectionMode = true;
+        _selected = <String>{id};
+      });
+
+  /// 进入多选态但不预选任何条目（AppBar 图标入口）。
+  void _enterSelectionMode() => setState(() {
+        _selectionMode = true;
+        _selected = <String>{};
+      });
+
+  /// 勾选 / 取消勾选；全部取消时自动退出多选（与笔记列表行为一致）。
+  void _toggleSelection(String id) => setState(() {
+        if (_selected.contains(id)) {
+          _selected.remove(id);
+        } else {
+          _selected.add(id);
+        }
+        if (_selected.isEmpty) _selectionMode = false;
+      });
+
+  /// 退出多选态（AppBar 关闭按钮）。
+  void _exitSelection() => setState(() {
+        _selectionMode = false;
+        _selected.clear();
+      });
+
+  /// 全选当前**可见**（筛选后）的知识点。
+  void _selectAll() =>
+      setState(() => _selected = <String>{for (final kp in _filtered) kp.id});
+
+  /// 批量删除：确认弹窗（说明将移入回收站、可恢复；汇总前置边影响面）
+  /// → 对每个选中 KP 走 [KnowledgeRepository.softDeleteKnowledgePoint]（墓碑）
+  /// → toast 回执 → 退出多选并刷新列表。
+  Future<void> _confirmBatchDelete() async {
+    final ids = _selected.toList();
+    if (ids.isEmpty) return;
+    // 影响面汇总：涉及前置边总数 + 所在知识树（删前统计，删后边已被级联清掉）。
+    var edgeCount = 0;
+    for (final id in ids) {
+      edgeCount += await _repo.countPrerequisiteEdges(id);
+    }
+    final impacts = await _trees.treesContaining(ids);
+    if (!mounted) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('批量删除知识点'),
+        content: Text(
+          '确定删除选中的 ${ids.length} 个知识点？\n\n'
+          '影响面：所在 ${impacts.length} 棵知识树、涉及 $edgeCount 条前置关系。\n'
+          '删除后它们将移入回收站，可恢复。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text(
+              '移入回收站',
+              style: TextStyle(color: Colors.red),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    // 逐个软删（墓碑 → 回收站，可恢复）；单条失败不阻断其余。
+    var deleted = 0;
+    for (final id in ids) {
+      final res = await _repo.softDeleteKnowledgePoint(id);
+      if (res is Success<int>) {
+        deleted += res.value;
+      } else if (res is Failure<int>) {
+        _toast('删除失败：${res.message}');
+      }
+    }
+    if (!mounted) return;
+    _toast('已将 $deleted 个知识点移入回收站');
+    _exitSelection();
+    await _reload();
+  }
+
   Future<String?> _askName(String title, String label, String initial) async {
     final ctrl = TextEditingController(text: initial);
     return showDialog<String>(
@@ -417,23 +512,52 @@ class _KnowledgeManagePageState extends State<KnowledgeManagePage> {
     final list = _filtered;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('知识点'),
+        title: _selectionMode
+            ? Text('已选 ${_selected.length} 个')
+            : const Text('知识点'),
+        leading: _selectionMode
+            ? IconButton(
+                onPressed: _exitSelection,
+                icon: const Icon(Icons.close),
+                tooltip: '退出多选',
+              )
+            : null,
         actions: [
-          IconButton(
-            onPressed: _openRecycleBin,
-            icon: const Icon(Icons.delete_outline),
-            tooltip: '回收站',
-          ),
-          IconButton(
-            onPressed: () => _showEditDialog(null),
-            icon: const Icon(Icons.add),
-            tooltip: '新建知识点',
-          ),
-          IconButton(
-            onPressed: _reload,
-            icon: const Icon(Icons.refresh),
-            tooltip: '刷新',
-          ),
+          if (_selectionMode) ...[
+            IconButton(
+              onPressed: _selectAll,
+              icon: const Icon(Icons.select_all),
+              tooltip: '全选',
+            ),
+            TextButton(
+              onPressed: _selected.isEmpty ? null : _confirmBatchDelete,
+              child: Text(
+                '删除(${_selected.length})',
+                style: const TextStyle(color: Colors.red),
+              ),
+            ),
+          ] else ...[
+            IconButton(
+              onPressed: _openRecycleBin,
+              icon: const Icon(Icons.delete_outline),
+              tooltip: '回收站',
+            ),
+            IconButton(
+              onPressed: _enterSelectionMode,
+              icon: const Icon(Icons.checklist),
+              tooltip: '批量删除',
+            ),
+            IconButton(
+              onPressed: () => _showEditDialog(null),
+              icon: const Icon(Icons.add),
+              tooltip: '新建知识点',
+            ),
+            IconButton(
+              onPressed: _reload,
+              icon: const Icon(Icons.refresh),
+              tooltip: '刷新',
+            ),
+          ],
         ],
       ),
       body: Column(
@@ -534,17 +658,23 @@ class _KnowledgeManagePageState extends State<KnowledgeManagePage> {
                       final kp = list[i];
                       final m = _mastery[kp.id] ?? MasteryStatus.unknown;
                       return ListTile(
-                        leading: CircleAvatar(
-                          radius: 14,
-                          backgroundColor: _masteryColor(m).withOpacity(0.15),
-                          child: Text(
-                            kp.type.label[0],
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: _masteryColor(m),
-                            ),
-                          ),
-                        ),
+                        leading: _selectionMode
+                            ? Checkbox(
+                                value: _selected.contains(kp.id),
+                                onChanged: (_) => _toggleSelection(kp.id),
+                              )
+                            : CircleAvatar(
+                                radius: 14,
+                                backgroundColor:
+                                    _masteryColor(m).withOpacity(0.15),
+                                child: Text(
+                                  kp.type.label[0],
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: _masteryColor(m),
+                                  ),
+                                ),
+                              ),
                         title: Text(kp.name),
                         subtitle: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -620,7 +750,11 @@ class _KnowledgeManagePageState extends State<KnowledgeManagePage> {
                             ),
                           ],
                         ),
-                        onTap: () => _onTap(kp),
+                        onTap: _selectionMode
+                            ? () => _toggleSelection(kp.id)
+                            : () => _onTap(kp),
+                        onLongPress:
+                            _selectionMode ? null : () => _enterSelection(kp.id),
                       );
                     },
                   ),

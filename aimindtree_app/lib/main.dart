@@ -382,6 +382,11 @@ class NotesListPageState extends State<NotesListPage> {
         _selected = <String>{id};
       });
 
+  /// AppBar 图标入口：进入多选删除（不预选任何一篇；全部取消勾选时自动退出）。
+  ///
+  /// 原多选只能长按进入，可发现性差（任务 E：只提入口，删除语义不变）。
+  void _enterSelectionMode() => setState(() => _selectionMode = true);
+
   void _toggle(String id) => setState(() {
         if (_selected.contains(id)) {
           _selected.remove(id);
@@ -497,12 +502,20 @@ class NotesListPageState extends State<NotesListPage> {
               icon: const Icon(Icons.delete),
               tooltip: '删除所选',
             ),
-          ] else
+          ] else ...[
+            // 批量删除入口（任务 E）：多选原本只能长按进入，这里补一个
+            // 常驻可见的图标，删除语义与单篇删除均不变。
+            IconButton(
+              onPressed: _enterSelectionMode,
+              icon: const Icon(Icons.checklist),
+              tooltip: '批量删除',
+            ),
             IconButton(
               onPressed: () => _openEditor(),
               icon: const Icon(Icons.add),
               tooltip: '新笔记',
             ),
+          ],
         ],
       ),
       body: _notes.isEmpty
