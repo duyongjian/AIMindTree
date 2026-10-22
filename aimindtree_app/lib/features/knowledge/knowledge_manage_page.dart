@@ -55,6 +55,10 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
   String _originFilter = 'all'; // all | ai | manual | no_note
   MasteryStatus? _masteryFilter; // null = 全部
 
+  // 排序：按更新时间。默认降序（最近改动在上）；用户可切升序。
+  // （knowledge_points 表暂无 created_at 列，创建时间排序待 schema 拍板后再加。）
+  bool _updatedAtAsc = false;
+
   // ============ 多选批量删除 ============
   /// 多选态：进入后每条显示 Checkbox，AppBar 显示 关闭 / 全选 /「删除(N)」。
   bool _selectionMode = false;
@@ -73,7 +77,10 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
         return false;
       }
       return true;
-    }).toList();
+    }).toList()
+      ..sort((a, b) => _updatedAtAsc
+          ? a.updatedAt.compareTo(b.updatedAt)
+          : b.updatedAt.compareTo(a.updatedAt));
   }
 
   @override
@@ -639,6 +646,27 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
                   ),
               ],
             ),
+          ),
+          // 排序：更新时间 升/降序切换（创建时间排序待 schema 拍板后补充）。
+          Row(
+            children: [
+              const SizedBox(width: 12),
+              IconButton(
+                onPressed: () => setState(() => _updatedAtAsc = !_updatedAtAsc),
+                icon: Icon(
+                  _updatedAtAsc ? Icons.arrow_upward : Icons.arrow_downward,
+                  size: 18,
+                ),
+                visualDensity: VisualDensity.compact,
+                tooltip: _updatedAtAsc
+                    ? '更新时间升序（最早改动在上）'
+                    : '更新时间降序（最近改动在上）',
+              ),
+              Text(
+                _updatedAtAsc ? '更新最早在上' : '最近改动在上',
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ],
           ),
           const Divider(height: 1),
           Expanded(

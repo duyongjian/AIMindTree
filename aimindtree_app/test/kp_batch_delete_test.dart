@@ -24,6 +24,7 @@ import 'package:aimindtree_app/data/repositories/knowledge_repository.dart';
 import 'package:aimindtree_app/data/repositories/tree_repository.dart';
 import 'package:aimindtree_app/features/knowledge/knowledge_manage_page.dart';
 import 'package:aimindtree_app/main.dart';
+import 'package:drift/drift.dart' hide isNotNull;
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -120,6 +121,43 @@ void main() {
       ));
       await tester.pumpAndSettle();
     }
+
+    /// 建知识点并强制写入指定 updatedAt（制造可控的排序顺序）。
+    Future<String> makeKpAt(String name, DateTime updatedAt) async {
+      final kp = await makeKp(name);
+      await (db.update(db.knowledgePoints)..where((t) => t.id.equals(kp.id)))
+          .write(KnowledgePointsCompanion(updatedAt: Value(updatedAt)));
+      return kp.id;
+    }
+
+    /// 读取当前列表可见条目的名称顺序（按展示自上而下）。
+    List<String> _visibleNames(WidgetTester tester) {
+      final tiles = tester.widgetList<ListTile>(find.byType(ListTile));
+      return tiles.map((t) {
+        final title = t.title;
+        return title is Text ? (title.data ?? '') : '';
+      }).toList();
+    }
+
+    testWidgets('更新时间排序：默认降序，可切换升序', (tester) async {
+      await makeKpAt('旧点', DateTime.utc(2024, 1, 1));
+      await makeKpAt('中点', DateTime.utc(2024, 3, 15));
+      await makeKpAt('新点', DateTime.utc(2024, 6, 30));
+      await pumpPage(tester);
+
+      // 默认降序：最近改动在上。
+      expect(_visibleNames(tester), <String>['新点', '中点', '旧点']);
+
+      // 点排序图标 → 切换为升序。
+      await tester.tap(find.byTooltip('更新时间降序（最近改动在上）'));
+      await tester.pumpAndSettle();
+      expect(_visibleNames(tester), <String>['旧点', '中点', '新点']);
+
+      // 再点 → 切回降序。
+      await tester.tap(find.byTooltip('更新时间升序（最早改动在上）'));
+      await tester.pumpAndSettle();
+      expect(_visibleNames(tester), <String>['新点', '中点', '旧点']);
+    });
 
     testWidgets('AppBar 有多选入口图标，点击进入多选态', (tester) async {
       await makeKp('入口点');
