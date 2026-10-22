@@ -8,5 +8,8 @@
     "test": "node test_worker.mjs",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "wrangler": "^4.152.0"
   }
 }

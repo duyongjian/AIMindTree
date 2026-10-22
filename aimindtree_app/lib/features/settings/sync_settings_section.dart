@@ -117,14 +117,9 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     }
     String? token;
     if (toCf) {
+      // CF token 可为空：官方/个人开放部署（Worker 未设 SYNC_TOKEN）直接放行；
+      // 若服务端设了令牌而本地未填，会返回 401，此时在设置页填 Token 即可。
       token = await widget.config.resolveCfToken();
-      if (token == null || token.isEmpty) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('CF 同步需要先配置 token。')),
-        );
-        return;
-      }
     } else {
       token = await widget.config.resolveToken(); // 可能为空（relay 开发期免 token）
     }

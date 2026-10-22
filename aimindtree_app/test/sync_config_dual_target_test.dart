@@ -80,10 +80,11 @@ void main() {
       await store.set('cf-ref', '');
       expect(await config.resolveCfToken(), 'direct-token');
 
-      // 两者皆无 → null
+      // 两者皆无 → 空串（开放部署：Worker 未设 SYNC_TOKEN 时直接放行，
+      // 普通用户因此无需填写 token 也能与官方/个人开放中继互通）
       await config.setCfTokenRef(null);
       await config.setCfToken(null);
-      expect(await config.resolveCfToken(), isNull);
+      expect(await config.resolveCfToken(), '');
     });
 
     test('clear 复位全部字段（含 cf）', () async {

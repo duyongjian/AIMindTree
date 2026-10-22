@@ -8,9 +8,10 @@ compatibility_date = "2024-09-23"
 [[d1_databases]]
 binding = "DB"
 database_name = "aimindtree_sync"
-database_id = "REPLACE_WITH_YOUR_D1_ID"
+database_id = "14844c5f-d825-4bce-8404-324560b7bc7f"
 
-# 开发期留空 = 免 token 放行；部署公网请删除此行并用：
-#   wrangler secret put SYNC_TOKEN
-[vars]
-SYNC_TOKEN = ""
+# 传输层鉴权令牌（可选）：通过 `wrangler secret put SYNC_TOKEN` 注入（不写进本文件）。
+# 设为空 = 开放部署（不校验共享 token）。
+# 注意：开放部署下所有数据落入同一张全局表、pull 不做按用户隔离，仅适合个人/单机使用。
+# 若要给普通用户做多租户隔离，请走「账号登录」方案（见仓库 sync_relay_cf/README.md 的
+# 多租户设计），此时无需设置 SYNC_TOKEN——每个用户用各自的账号令牌访问自己的命名空间。

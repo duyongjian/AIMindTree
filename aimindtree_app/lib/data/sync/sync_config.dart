@@ -91,6 +91,8 @@ class SyncConfig {
       ((cfTokenRef?.isNotEmpty ?? false) || (cfToken?.isNotEmpty ?? false));
 
   /// 取出 CF token：优先 token_ref（SecretStore），回退开发期直存 token。
+  /// 两端都未设置时返回空串——对应 Worker 的「开放部署」（SYNC_TOKEN 留空放行），
+  /// 因此普通用户无需填写 token 也能与官方/个人开放中继互通。
   Future<String?> resolveCfToken() async {
     final ref = cfTokenRef;
     if (ref != null) {
@@ -98,7 +100,8 @@ class SyncConfig {
       if (fromStore != null && fromStore.isNotEmpty) return fromStore;
     }
     final direct = cfToken;
-    return (direct?.isNotEmpty ?? false) ? direct : null;
+    if (direct != null && direct.isNotEmpty) return direct;
+    return '';
   }
 
   Future<void> clear() async {
