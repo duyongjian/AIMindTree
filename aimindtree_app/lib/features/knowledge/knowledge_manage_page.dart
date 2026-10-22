@@ -18,6 +18,7 @@ import '../../data/models/knowledge_point.dart';
 import '../../data/models/knowledge_tree.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
+import 'knowledge_recycle_bin_page.dart';
 
 class KnowledgeManagePage extends StatefulWidget {
   const KnowledgeManagePage({
@@ -123,6 +124,18 @@ class _KnowledgeManagePageState extends State<KnowledgeManagePage> {
     await _reload();
   }
 
+  /// 打开回收站（已删除的知识点只在这里可见，可恢复 / 彻底删除）。
+  ///
+  /// 从回收站返回后要刷新本页列表：恢复成功的知识点会重新出现在常规列表里
+  /// （本页在 AppShell 的 IndexedStack 中常驻，返回时不会自动重建）。
+  Future<void> _openRecycleBin() async {
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => KnowledgeRecycleBinPage(repo: _repo),
+    ));
+    if (!mounted) return;
+    await _reload();
+  }
+
   /// 手动新建 / 编辑弹窗。
   Future<void> _showEditDialog(KnowledgePoint? existing) async {
     final nameCtrl =
@@ -133,6 +146,14 @@ class _KnowledgeManagePageState extends State<KnowledgeManagePage> {
     var sourceNoteId = existing?.sourceNoteId ?? '';
     final notes = await _repo.listNotes();
     if (!mounted) return;
+    // 下拉的初始值必须命中列表里的**某一项**（DropdownButtonFormField 断言
+    // 「有且仅有一个匹配项」，0 匹配直接崩）。notes 是查库后的新列表，
+    // 而 sourceNoteId 可能指向一篇已被软删的笔记（listNotes 只返回未删笔记）
+    // → 按 id 从新列表取不到实例。此时补一个「笔记已删除」占位项，
+    // 既不崩，也能如实展示当前关联（保存时仍写回原 id，不静默改锚点）。
+    final noteIds = <String>[for (final n in notes) n.id];
+    final sourceNoteMissing =
+        sourceNoteId.isNotEmpty && !noteIds.contains(sourceNoteId);
 
     await showDialog<KnowledgePoint?>(
       context: context,
@@ -189,6 +210,16 @@ class _KnowledgeManagePageState extends State<KnowledgeManagePage> {
                         value: '',
                         child: Text('不关联（无来源笔记）'),
                       ),
+                      // 原关联的笔记已被软删 → 补占位项，保证 initialValue
+                      // 有且仅有一个匹配项（否则 DropdownButton 断言崩溃）。
+                      if (sourceNoteMissing)
+                        DropdownMenuItem(
+                          value: sourceNoteId,
+                          child: const Text(
+                            '（来源笔记已删除）',
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                        ),
                       for (final n in notes)
                         DropdownMenuItem(
                           value: n.id,
@@ -388,6 +419,11 @@ class _KnowledgeManagePageState extends State<KnowledgeManagePage> {
       appBar: AppBar(
         title: const Text('知识点'),
         actions: [
+          IconButton(
+            onPressed: _openRecycleBin,
+            icon: const Icon(Icons.delete_outline),
+            tooltip: '回收站',
+          ),
           IconButton(
             onPressed: () => _showEditDialog(null),
             icon: const Icon(Icons.add),

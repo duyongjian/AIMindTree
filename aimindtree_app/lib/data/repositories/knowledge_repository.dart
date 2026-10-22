@@ -586,6 +586,141 @@ class KnowledgeRepository {
     }
   }
 
+  // ============ 回收站（软删墓碑的可见面）============
+
+  /// 回收站列表：**已软删**（墓碑）的知识点，按删除时间倒序。
+  ///
+  /// 这是软删铁律的**唯一例外入口**：常规读路径（[allKnowledgePoints] /
+  /// [pointsForNote] / [pointsByIds]）一律过滤 `deleted_at IS NULL`，墓碑行
+  /// 在任何常规列表里都不可见；只有这里把墓碑行单独捞出来展示，供用户
+  /// 「恢复」或「彻底删除」。
+  ///
+  /// 注意：这里返回的是**墓碑行本身**（`deletedAt` 非空），调用方不能把它
+  /// 混进任何常规列表。
+  Future<List<KnowledgePoint>> deletedKnowledgePoints() async {
+    final rows = await (_db.select(_db.knowledgePoints)
+          ..where((t) => t.deletedAt.isNotNull())
+          ..orderBy([(t) => OrderingTerm.desc(t.deletedAt)]))
+        .get();
+    return rows.map(_kpFromRow).toList();
+  }
+
+  /// 恢复一个被软删的知识点（回收站 → 常规列表）。
+  ///
+  /// 墓碑行 `deleted_at` 置空、`version++`、`updated_at` 刷新；恢复后它重新
+  /// 出现在 [allKnowledgePoints] 等常规读路径里。
+  ///
+  /// **只恢复知识点本体**：软删时已级联硬删的前置边 / 掌握记录 / 知识树成员
+  /// 关系**不会**被恢复（它们没有墓碑，无法翻回）——恢复后它是一个独立资产，
+  /// 需要的话由用户重新入树。
+  ///
+  /// 上行同步：写库后入队一条 `SyncOp.upsert`（payload = 恢复后该行回读的
+  /// row→Map，baseVersion = 新 version），远端按 LWW 判定「复活」胜出，
+  /// 于是恢复能跨设备传播。
+  Future<Result<KnowledgePoint>> restoreKnowledgePoint(String kpId) async {
+    try {
+      final row = await (_db.select(_db.knowledgePoints)
+            ..where((t) => t.id.equals(kpId)))
+          .getSingleOrNull();
+      if (row == null) {
+        return Failure(StateError('知识点不存在'));
+      }
+      if (row.deletedAt == null) {
+        // 已经在常规列表里：幂等返回，不重复写库、也不重复入队。
+        return Success(_kpFromRow(row));
+      }
+      await (_db.update(_db.knowledgePoints)..where((t) => t.id.equals(kpId)))
+          .write(KnowledgePointsCompanion(
+        deletedAt: const Value<DateTime?>(null),
+        updatedAt: Value(DateTime.now().toUtc()),
+        version: Value(row.version + 1),
+      ));
+      // 上行同步：恢复 = 一条 upsert（payload 是恢复后该行的最终态）。
+      // 远端墓碑行会被这条 upsert 覆盖回活（baseVersion = 新 version，
+      // 大于墓碑时的 version）。
+      await _sync.upsertKnowledgePoint(kpId);
+      final restored = await (_db.select(_db.knowledgePoints)
+            ..where((t) => t.id.equals(kpId)))
+          .getSingleOrNull();
+      if (restored == null) {
+        return Failure(StateError('恢复后读取知识点失败'));
+      }
+      _log.i('恢复知识点 $kpId（墓碑置空，version=${restored.version}）');
+      return Success(_kpFromRow(restored));
+    } on Object catch (e, s) {
+      _log.e('恢复知识点失败', error: e, stackTrace: s);
+      return Failure(e, s);
+    }
+  }
+
+  /// 彻底删除一个知识点（回收站 → 消失，**不可恢复**）。
+  ///
+  /// 与 [softDeleteKnowledgePoint]（墓碑，可恢复）不同，这里把墓碑行**物理
+  /// 删除**，并清掉可能残留的从属行（前置边 / 掌握记录 / 知识树成员关系）。
+  ///
+  /// 上行同步：删除前先给该行留档（含 id / version），入队一条
+  /// `SyncOp.delete`（payload 含 `deleted_at`），让远端也跟着删。
+  Future<Result<void>> purgeKnowledgePoint(String kpId) async {
+    try {
+      final row = await (_db.select(_db.knowledgePoints)
+            ..where((t) => t.id.equals(kpId)))
+          .getSingleOrNull();
+      if (row == null) {
+        // 已经彻底没了：幂等返回。
+        return const Success<void>(null);
+      }
+      // 残留的从属行（软删时通常已级联清空，这里兜底）：先留档再删，
+      // 好让远端也跟着删（不留档就取不到 id / version 了）。
+      final residualEdges = await (_db.select(_db.prerequisiteEdges)
+            ..where((t) => t.fromKpId.equals(kpId) | t.toKpId.equals(kpId)))
+          .get();
+      final residualMastery = await (_db.select(_db.masteryRecords)
+            ..where((t) => t.kpId.equals(kpId)))
+          .get();
+      final residualNodes = await (_db.select(_db.canvasNodes)
+            ..where((t) =>
+                t.targetType.equals('kp') & t.targetId.equals(kpId)))
+          .get();
+      // 彻底删除 = 比墓碑**更新**的一个状态：先把 version 顶上去再删，
+      // 这样入队的 delete op 的 baseVersion 严格大于墓碑那次，远端 LWW
+      // 判定「彻底删除」胜出，不会被同版本墓碑盖掉。
+      final now = DateTime.now().toUtc();
+      await (_db.update(_db.knowledgePoints)..where((t) => t.id.equals(kpId)))
+          .write(KnowledgePointsCompanion(
+        version: Value(row.version + 1),
+        updatedAt: Value(now),
+      ));
+      // 留档（删完就取不到 id / version 了）：重新读一次，拿到带新 version 的行。
+      final archived = await (_db.select(_db.knowledgePoints)
+            ..where((t) => t.id.equals(kpId)))
+          .getSingleOrNull();
+      // 硬删：从属行 + KP 墓碑行本身。
+      await (_db.delete(_db.prerequisiteEdges)
+            ..where((t) => t.fromKpId.equals(kpId) | t.toKpId.equals(kpId)))
+          .go();
+      await (_db.delete(_db.masteryRecords)..where((t) => t.kpId.equals(kpId)))
+          .go();
+      await (_db.delete(_db.canvasNodes)
+            ..where((t) =>
+                t.targetType.equals('kp') & t.targetId.equals(kpId)))
+          .go();
+      await (_db.delete(_db.knowledgePoints)..where((t) => t.id.equals(kpId)))
+          .go();
+      // 上行同步：KP 本体走 delete（远端也删，不可恢复），残留从属行同样删。
+      await _sync.hardDeleteKnowledgePoints(
+        archived == null ? const <KnowledgePointRow>[] : <KnowledgePointRow>[archived],
+      );
+      await _sync.hardDeletePrerequisiteEdges(residualEdges);
+      await _sync.hardDeleteMasteryRecords(residualMastery);
+      await _sync.hardDeleteCanvasNodes(residualNodes);
+      _log.i('彻底删除知识点 $kpId（物理删除，不可恢复）');
+      return const Success<void>(null);
+    } on Object catch (e, s) {
+      _log.e('彻底删除知识点失败', error: e, stackTrace: s);
+      return Failure<void>(e, s);
+    }
+  }
+
   // ============ 查询 ============
 
   /// 手动新建知识点（origin = 'user_manual'，锚点四件套豁免，见 PRD §4.2）。
