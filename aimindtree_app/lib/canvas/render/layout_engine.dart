@@ -3,11 +3,15 @@
 /// **约束**：纯函数、零 Flutter 依赖，便于单测；不存任何状态。
 /// 输入：知识点 + 前置关系边，输出：每个 KP 的 (x, y) 屏幕坐标。
 ///
-/// 策略：拓扑分层 DAG 布局——
-/// - level(kp) = max(level(prereq) + 1)，无前置的 KP 为 0；
-/// - **每一层各占一行**（y = 层号 × 行高），层内节点横向铺开、**不设每行上限**；
-/// - 层内顺序按「知识领域相近度」聚类：先按来源笔记分域，同域内按知识点类型归拢，
-///   最后按名称稳定排序（见 [_sortWithinLevel]）。
+/// 策略：两区布局（拓扑分层 + 无连线区）——
+/// - **有连线区**：展示子图内至少有一条边的 KP，走拓扑分层 DAG 布局：
+///   level(kp) = max(level(prereq) + 1)，无前置的 KP 为 0；
+///   **每一层各占一行**（y = 行序号 × 行高），层内节点横向铺开、**不设每行上限**；
+///   层内顺序按「知识领域相近度」聚类（见 [_sortWithinLevel]）；
+/// - **无连线区**：展示子图内没有任何边的 KP（如「补前置」批量新增的点），
+///   用同一套口径排序后，统一铺在**所有有连线行的下方**，每行
+///   [LayoutConfig.isolatedPerRow]（默认 10）个，不再挤成一条超长行；
+///   其 level 恒记 0（不参与拓扑分层，仅供测试/调试读取）。
 /// - 边由 [Edge.id] 给出，调用方在 CustomPaint 里画。
 library;
 
@@ -68,6 +72,10 @@ class LayoutConfig {
     // 是否绘制可见网格底纹。吸附（[gridSize]）与此**独立**：可隐藏线条但仍保留松手对齐。
     // 默认 false（不画线，空白画布外观）；true = 显示格子线。
     this.showGrid = false,
+    // 无连线区（展示子图内没有任何边的 KP）每行摆放个数，默认 10。
+    // 「补前置」等场景会一次性产生大量无边 KP；不按行切分会挤成一条超长行。
+    // ≤0 视为「不切分」（全部一行）。
+    this.isolatedPerRow = 10,
   });
 
   final double nodeWidth;
@@ -77,6 +85,8 @@ class LayoutConfig {
   final double gridSize;
   /// 是否绘制可见网格底纹（与吸附无关，仅控制线条是否画出）。
   final bool showGrid;
+  /// 无连线区每行摆放个数（默认 10；≤0 = 不切分，全部一行）。
+  final int isolatedPerRow;
 }
 
 /// 把 [value] 吸附到最近的网格交点；[grid] ≤ 0 时原样返回（关闭网格）。
@@ -170,12 +180,26 @@ LayoutResult layoutForest(
     }
   }
 
-  // 拓扑分层（带环保护：入度变 0 仍残留的置 0）
-  final inDegree = {for (final p in points) p.id: prereqsOf[p.id]!.length};
+  // 分区：「有连线」= 展示子图内至少一条边（邻接表非空）；「无连线」= 其余。
+  // 无连线点（如「补前置」批量新增）不参与拓扑分层，稍后统一铺到所有
+  // 有连线行的下方，每行 [LayoutConfig.isolatedPerRow] 个。
+  final connectedIds = <String>[];
+  final isolatedIds = <String>[];
+  for (final p in points) {
+    if (prereqsOf[p.id]!.isNotEmpty || dependentsOf[p.id]!.isNotEmpty) {
+      connectedIds.add(p.id);
+    } else {
+      isolatedIds.add(p.id);
+    }
+  }
+
+  // 拓扑分层（带环保护：入度变 0 仍残留的置 0）——只针对有连线区；
+  // 无连线点没有边，混进 BFS 只会被 putIfAbsent 归到 level 0，故在此分流。
+  final inDegree = {for (final id in connectedIds) id: prereqsOf[id]!.length};
   final level = <String, int>{};
   var frontier = <String>[
-    for (final p in points)
-      if (inDegree[p.id] == 0) p.id
+    for (final id in connectedIds)
+      if (inDegree[id] == 0) id
   ];
   for (final id in frontier) {
     level[id] = 0;
@@ -200,14 +224,14 @@ LayoutResult layoutForest(
     }
     frontier = next;
   }
-  // 处理环或孤立点（relaxed 后无 level 的）：全置 0
-  for (final p in points) {
-    level.putIfAbsent(p.id, () => 0);
+  // 处理环（relaxed 后无 level 的）：全置 0
+  for (final id in connectedIds) {
+    level.putIfAbsent(id, () => 0);
   }
 
   // 同层分组排序：先按「知识领域相近度」聚类，组内再按名称（见 _sortWithinLevel）。
   final byLevel = <int, List<String>>{};
-  for (final id in ids) {
+  for (final id in connectedIds) {
     byLevel.putIfAbsent(level[id]!, () => []).add(id);
   }
   final domainOf = {for (final p in points) p.id: p.sourceNoteId};
@@ -215,6 +239,9 @@ LayoutResult layoutForest(
   for (final l in byLevel.values) {
     _sortWithinLevel(l, nameOf, domainOf, typeOf);
   }
+  // 无连线区：直接复用同一套排序口径（领域 → 类型 → 名称）排一次，
+  // 保证两区的组内顺序口径一致。
+  _sortWithinLevel(isolatedIds, nameOf, domainOf, typeOf);
 
   // 逐层（层号升序，保证 y 单调）放置：**每层各占一行**，同层节点按分组顺序横向
   // 铺开，不再按每行上限换行（用户要求：很多「行」其实是同一层，无需限 3 个/行）。
@@ -228,6 +255,7 @@ LayoutResult layoutForest(
 
   final laid = <LaidOutNode>[];
   var rowIndex = 0;
+  // 有连线区：每层各占一行，行号随层号升序递增（与旧版一致）。
   for (final lv in levels) {
     final idsAtLevel = byLevel[lv]!;
     for (var i = 0; i < idsAtLevel.length; i++) {
@@ -236,6 +264,26 @@ LayoutResult layoutForest(
         x: snapToGrid(i * colWidth, grid),
         y: snapToGrid(rowIndex * rowHeight, grid),
         level: lv,
+      ));
+    }
+    rowIndex += 1;
+  }
+
+  // 无连线区：接续 rowIndex 向下铺，每行 isolatedPerRow（默认 10）个——
+  // 「补前置」等场景下大量无边 KP 不再挤成一条超长行（用户诉求）。
+  // 这些点不参与拓扑分层，level 恒记 0（仅供测试/调试读取）。
+  final perRow = config.isolatedPerRow < 1
+      ? isolatedIds.length
+      : config.isolatedPerRow;
+  for (var start = 0; start < isolatedIds.length; start += perRow) {
+    final end =
+        start + perRow < isolatedIds.length ? start + perRow : isolatedIds.length;
+    for (var i = start; i < end; i++) {
+      laid.add(LaidOutNode(
+        kpId: isolatedIds[i],
+        x: snapToGrid((i - start) * colWidth, grid),
+        y: snapToGrid(rowIndex * rowHeight, grid),
+        level: 0,
       ));
     }
     rowIndex += 1;
