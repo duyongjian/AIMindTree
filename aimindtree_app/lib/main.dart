@@ -13,6 +13,7 @@ import 'data/repositories/settings_repository.dart';
 import 'data/sync/sync_context.dart';
 import 'features/agent/agent_page.dart';
 import 'features/canvas/canvas_page.dart';
+import 'features/knowledge/kp_dedup.dart';
 import 'features/knowledge/knowledge_manage_page.dart';
 import 'features/notes/delete_note_dialog.dart';
 import 'features/notes/note_editor_page.dart';
@@ -55,6 +56,9 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
         title: 'AIMindTree',
+        // 全局导航键：后台任务（如 T14 知识点查重完成）没有页面上下文时，
+        // 靠它弹对话窗（见 features/knowledge/kp_dedup.dart）。
+        navigatorKey: kGlobalNavigatorKey,
         theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.indigo),
         home: AppShell(
           service: service,

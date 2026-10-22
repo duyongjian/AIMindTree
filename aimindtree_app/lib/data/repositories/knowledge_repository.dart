@@ -83,6 +83,15 @@ class KnowledgeRepository {
   final AppDatabase _db;
   final String deviceId;
 
+  /// 底层库句柄（只读暴露，不新增写入入口）。
+  ///
+  /// 存在的理由：查重合并（features/knowledge/kp_dedup.dart）在固定的
+  /// `kpDedupSchedule(repo, jobs)` 契约下还要再包一层 `TreeRepository`
+  /// （树成员 / 位置迁移），而树仓储与本仓储必须共用**同一个** [AppDatabase]
+  /// 实例（否则上行同步的 outbox 身份校验会跳过入队）。设备号取本仓储的
+  /// [deviceId]，保证同步行与其它写路径同源。
+  AppDatabase get db => _db;
+
   static final AppLog _log = AppLog('knowledge_repo');
 
   /// 上行同步写入器（把本地写登记进 outbox；未接线时自动跳过）。

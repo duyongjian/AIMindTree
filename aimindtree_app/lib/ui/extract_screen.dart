@@ -13,6 +13,7 @@ import '../ai/extraction_service.dart';
 import '../core/result.dart';
 import '../data/models/knowledge_point.dart';
 import '../data/repositories/knowledge_repository.dart';
+import '../features/knowledge/kp_dedup.dart';
 
 class ExtractScreen extends StatefulWidget {
   const ExtractScreen({super.key, required this.service});
@@ -135,6 +136,12 @@ class _ExtractScreenState extends State<ExtractScreen> {
     );
     if (!mounted) return;
     if (res is Success<ExtractionSaveResult>) {
+      // 成功落了知识点 → 后台异步跑一轮查重（T14）：与库里有重复簇时
+      // 弹窗让用户选择保留者（fire-and-forget，不挡界面）。
+      kpDedupSchedule(
+        repo: widget.service.repo,
+        jobs: widget.service.jobs,
+      );
       await _reloadStored();
       if (!mounted) return;
       setState(() {

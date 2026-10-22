@@ -29,6 +29,7 @@ import '../../data/models/kp_group.dart';
 import '../../data/repositories/group_repository.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
+import 'kp_dedup.dart';
 import 'kp_group_manage_sheet.dart';
 import 'kp_sort.dart';
 import 'knowledge_recycle_bin_page.dart';
@@ -342,6 +343,11 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
                   _toast('保存失败：${res.message}');
                   return;
                 }
+                // 手动**新建**成功 → 后台异步跑一轮知识点查重（T14）；
+                // 编辑（existing != null）不触发（没产生新知识点）。
+                if (existing == null) {
+                  kpDedupSchedule(repo: _repo, jobs: widget.service.jobs);
+                }
                 Navigator.pop(ctx);
               },
               child: const Text('保存'),
@@ -403,6 +409,21 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
       (e, _) => _toast('加入失败：$e'),
     );
     await _reload();
+  }
+
+  /// 「查重去重」按钮：立即跑一遍与后台触发（[kpDedupSchedule]）相同的
+  /// 管线——在飞中就提示「正在查重中」；无候选提示「未发现重复知识点」；
+  /// T14 判出重复簇后弹对话窗让用户选择保留者。
+  Future<void> _runKpDedup() async {
+    if (kpDedupInFlight) {
+      _toast('正在查重中');
+      return;
+    }
+    await kpDedupRunNow(
+      repo: _repo,
+      jobs: widget.service.jobs,
+      onNoCandidates: () => _toast('未发现重复知识点'),
+    );
   }
 
   /// 删除（影响面预览，PRD §4.1）。
@@ -697,6 +718,11 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
               ),
             ),
           ] else ...[
+            IconButton(
+              onPressed: _runKpDedup,
+              icon: const Icon(Icons.merge_type),
+              tooltip: '知识点查重去重',
+            ),
             IconButton(
               onPressed: _openRecycleBin,
               icon: const Icon(Icons.delete_outline),

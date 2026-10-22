@@ -32,6 +32,7 @@ import '../../data/models/knowledge_tree.dart';
 import '../../data/repositories/ai_session_repository.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
+import '../knowledge/kp_dedup.dart';
 
 /// 工具协议（**客户端透传**，与 ``_runDetection`` 同款模式）：
 /// 工具目录是 Dart 侧动态生成的，放不进服务端提示词文件；服务端主形态
@@ -786,6 +787,11 @@ class AgentPageState extends State<AgentPage> {
     if (result.addedCount == 0 && result.createdIds.isEmpty) {
       _toast('加入失败：${result.failures.join('、')} 创建知识点出错');
       return;
+    }
+    // 检测建议入树 = 一批新建的知识点：后台异步跑一轮查重（T14），
+    // 与库里既有知识点判出重复簇时弹窗让用户选择合并。
+    if (result.createdIds.isNotEmpty) {
+      kpDedupSchedule(repo: widget.service.repo, jobs: widget.service.jobs);
     }
     var msg = '已加入「${tree.name}」：${result.addedCount} 个';
     if (result.failures.isNotEmpty) {
