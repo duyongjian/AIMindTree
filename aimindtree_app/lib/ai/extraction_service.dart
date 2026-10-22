@@ -366,11 +366,6 @@ class ExtractionService {
       api: api,
     );
 
-    // 若配置启用则启动自动同步
-    if (syncConfig.enabled) {
-      scheduler.start();
-    }
-
     // 任务队列：与 llm_server 同一信任域（只走本地 127.0.0.1）。
     final jobs = AiJobService(
       baseUrl: llmServerBaseUrl ?? kLlmServerDefaultBaseUrl,

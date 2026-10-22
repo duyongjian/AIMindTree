@@ -1,19 +1,22 @@
 /// SettingsPage 中的「同步」分区（T03 + 任务 B：系统级字段改管理后台下发）。
 ///
+/// 同步为**手动**模式（自动调度已下线）：提供两个独立按钮——
+/// 「上传本地到管理端（push）」与「拉取管理端到本地（pull）」。
+///
 /// 包含：
 /// - Base URL / Token：**由管理后台统一下发**（任务 B）——
 ///   - Base URL 有值时只读展示（标注「由管理后台配置」）；无下发值时保留
 ///     原手动输入作兜底；
 ///   - Token 不再手输，展示「Token 由管理后台配置（本机 SecretStore 保存）」；
-/// - 启用自动同步 switch（默认值来自后端 enabled，缺省 true）；
-/// - 立即同步按钮（调 SyncScheduler.runOnce）；
+/// - 上传 / 拉取按钮（分别调 SyncEngine.push / SyncEngine.pull）；
 /// - 测试连接按钮；
-/// - 状态显示：上次同步时间 + 待推条数 + 最近错误。
+/// - 状态显示：上次 push/pull 时间 + 待推条数 + 最近错误。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../../core/secret_store.dart';
+import '../../data/sync/sync_api.dart';
 import '../../data/sync/sync_config.dart';
 import '../../data/sync/sync_outbox.dart';
 import '../../data/sync/sync_scheduler.dart';
@@ -81,39 +84,94 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     );
   }
 
-  Future<void> _toggleEnabled(bool v) async {
-    await widget.config.setEnabled(v);
-    if (v) {
-      widget.scheduler.start();
-    } else {
-      widget.scheduler.stop();
-    }
-    if (!mounted) return;
-    setState(() {});
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(v ? '已开启自动同步' : '已停止自动同步')),
-    );
-  }
-
-  Future<void> _syncNow() async {
+  Future<void> _pushNow() async {
     if (!widget.config.isConfigured) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('尚未收到管理后台下发的同步配置。')),
       );
       return;
     }
+    _warnIfStaleApi();
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('正在同步…')),
+      const SnackBar(content: Text('正在上传…')),
     );
-    final err = await widget.scheduler.runOnce();
-    await _refreshCounters();
-    if (!mounted) return;
+    await widget.statusStore.setStatus('syncing');
+    try {
+      final report = await widget.scheduler.engine.push();
+      await widget.statusStore.setLastPushAt(DateTime.now().toUtc());
+      await widget.statusStore.setStatus('ok');
+      await _refreshCounters();
+      if (!mounted) return;
+      final failedNote = report.failed > 0 ? '，失败 ${report.failed} 条' : '';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('上传完成：推送 ${report.pushed} 条$failedNote'),
+          backgroundColor: report.failed > 0 ? Colors.red : Colors.green,
+        ),
+      );
+    } on Object catch (e) {
+      await widget.statusStore.setStatus('error:$e');
+      await _refreshCounters();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('上传失败：$e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _pullNow() async {
+    if (!widget.config.isConfigured) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('尚未收到管理后台下发的同步配置。')),
+      );
+      return;
+    }
+    _warnIfStaleApi();
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(err == null ? '同步完成' : '同步失败：$err'),
-        backgroundColor: err == null ? Colors.green : Colors.red,
-      ),
+      const SnackBar(content: Text('正在拉取…')),
     );
+    await widget.statusStore.setStatus('syncing');
+    try {
+      final report = await widget.scheduler.engine.pull();
+      await widget.statusStore.setLastPulledAt(report.serverTime);
+      await widget.statusStore.setStatus('ok');
+      await _refreshCounters();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('拉取完成：应用 ${report.applied} 条变更'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } on Object catch (e) {
+      await widget.statusStore.setStatus('error:$e');
+      await _refreshCounters();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('拉取失败：$e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  /// stale api 防护：HttpSyncApi 在 bootstrap 一次性构建，管理后台运行时改
+  /// Base URL 不会热更新到已构造实例。比对当前配置与实例地址，不一致时
+  /// 提醒重启 App（不重构 bootstrap）。
+  void _warnIfStaleApi() {
+    final api = widget.scheduler.api;
+    if (api is! HttpSyncApi) return; // MockSyncApi 占位：无真实地址可比
+    final configured = (widget.config.baseUrl ?? '').trim();
+    final actual = api.baseUrl.trim();
+    if (configured.isNotEmpty && configured != actual) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('同步地址已在管理后台变更，重启 App 后生效')),
+      );
+    }
   }
 
   Future<void> _testConnection() async {
@@ -214,22 +272,22 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
                   child: const Text('测试连接'),
                 ),
               const SizedBox(height: 8),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('启用自动同步'),
-                subtitle: Text(
-                  widget.config.enabled ? '每 60 秒后台同步' : '已停止',
-                ),
-                value: widget.config.enabled,
-                onChanged: widget.config.isConfigured ? _toggleEnabled : null,
-              ),
+              // 手动同步（自动调度已下线）：push / pull 各自独立触发。
               Row(
                 children: [
                   Expanded(
                     child: FilledButton.icon(
-                      onPressed: _syncNow,
-                      icon: const Icon(Icons.sync),
-                      label: const Text('立即同步'),
+                      onPressed: _pushNow,
+                      icon: const Icon(Icons.cloud_upload_outlined),
+                      label: const Text('上传本地到管理端'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: _pullNow,
+                      icon: const Icon(Icons.cloud_download_outlined),
+                      label: const Text('拉取管理端到本地'),
                     ),
                   ),
                 ],
@@ -247,7 +305,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
               Text(
                 '• Base URL / Token 由管理后台统一下发，本机不可修改；\n'
                 '• Token 仅本机 SecretStore 保存，不入 DB；\n'
-                '• 推送失败 5 次后告警；连续 3 次失败进入 5 分钟退避；\n'
+                '• 同步为手动：上传 = 本地 → 管理端，拉取 = 管理端 → 本地；\n'
                 '• 跨设备冲突用 LWW（version 大者赢），自回声自动过滤。',
                 style: TextStyle(
                   color: theme.disabledColor,

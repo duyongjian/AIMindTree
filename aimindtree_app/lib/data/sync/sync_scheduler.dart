@@ -1,11 +1,8 @@
 /// SyncScheduler：同步调度（T03）。
 ///
-/// P0 简化策略：
-/// - 启动时一次性全量（push pending + pull since lastPulledAt）；
-/// - 周期性 60s 增量同步（pushed 时 push + pull）；
-/// - 手动触发（设置页「立即同步」按钮）。
-///
-/// 失败退避：单次失败 → 下次周期尝试；连续 3 次失败 → 暂停 5 分钟（指数退避）。
+/// **自动调度已下线**（改设置页手动 push / pull 双按钮）；本类保留供手动
+/// 触发（[runOnce]）与测试连接（[testConnection]）使用，start/stop 暂不
+/// 删除以防别处引用。
 library;
 
 import 'dart:async';
