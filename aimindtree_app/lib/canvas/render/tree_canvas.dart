@@ -89,12 +89,13 @@ class TreeCanvas extends StatefulWidget {
     this.onMoveNode,
     this.onCreateEdge,
     this.onDeleteEdge,
-    this.onRelayout,
     this.selectionMode = false,
     this.selectedKpIds = const <String>{},
     this.onSelectionChanged,
     this.onMoveNodes,
     this.allowGroupDrag = false,
+    this.frameMode = false,
+    this.onToggleFrameMode,
     this.config = const LayoutConfig(),
   });
 
@@ -118,11 +119,6 @@ class TreeCanvas extends StatefulWidget {
   /// 删除前置关系：(edgeId)。
   final void Function(String edgeId)? onDeleteEdge;
 
-  /// 「重新布局」：清空已固化的节点位置，让布局引擎重排一次。
-  ///
-  /// 位置一旦固化就永久有效，用户把图拖乱之后需要一个一键恢复的入口。
-  final VoidCallback? onRelayout;
-
   /// 框选模式：在画布上拖拽出选框框选多个知识点（此模式下禁用画布平移/缩放）。
   final bool selectionMode;
 
@@ -141,6 +137,12 @@ class TreeCanvas extends StatefulWidget {
   /// 允许「框选后拖动整组移动」：仅当处于 [selectionMode] 且指针压在**已选中**
   /// 节点上时生效（否则照常开始新框选）。
   final bool allowGroupDrag;
+
+  /// 框选模式开关状态（父组件持有；右下角悬浮栏的「框选模式」按钮反映它）。
+  final bool frameMode;
+
+  /// 悬浮栏「框选模式」开关回调（把切换动作交回父组件）。
+  final VoidCallback? onToggleFrameMode;
 
   final LayoutConfig config;
 
@@ -1286,7 +1288,8 @@ class TreeCanvasState extends State<TreeCanvas> {
                           setState(() => _fitToContent(posOf, layout.nodes)),
                       onReset: _reset,
                       scale: _scale,
-                      onRelayout: widget.onRelayout,
+                      frameMode: widget.frameMode,
+                      onToggleFrameMode: widget.onToggleFrameMode,
                     ),
                   ),
                 ],
@@ -1377,7 +1380,8 @@ class _ZoomControls extends StatelessWidget {
     required this.onFit,
     required this.onReset,
     required this.scale,
-    this.onRelayout,
+    required this.frameMode,
+    this.onToggleFrameMode,
   });
 
   final VoidCallback onZoomIn;
@@ -1385,7 +1389,12 @@ class _ZoomControls extends StatelessWidget {
   final VoidCallback onFit;
   final VoidCallback onReset;
   final double scale;
-  final VoidCallback? onRelayout;
+
+  /// 框选模式开关状态（按钮图标 / 高亮反映它）。
+  final bool frameMode;
+
+  /// 「框选模式」开关回调。
+  final VoidCallback? onToggleFrameMode;
 
   @override
   Widget build(BuildContext context) => Card(
@@ -1421,13 +1430,21 @@ class _ZoomControls extends StatelessWidget {
                 tooltip: '重置视图',
                 onPressed: onReset,
               ),
-              if (onRelayout != null)
-                IconButton(
-                  icon: const Icon(Icons.auto_awesome_mosaic),
-                  iconSize: 18,
-                  tooltip: '重新布局（清掉手动拖动的位置，自动重排）',
-                  onPressed: onRelayout,
-                ),
+              // 框选模式（常驻开关）：开启后画布可拖拽框选知识点，选好后可
+              // 局部重排 / 局部连线，拖动选中组内任意一个即整组一起移动。
+              IconButton(
+                icon: Icon(frameMode ? Icons.deselect : Icons.crop_free),
+                iconSize: 18,
+                tooltip: frameMode
+                    ? '退出框选模式'
+                    : '框选模式：拖拽框选知识点；选好后可局部重排 / 局部连线，拖动其中一个整组移动',
+                onPressed: onToggleFrameMode,
+                style: frameMode
+                    ? IconButton.styleFrom(
+                        backgroundColor:
+                            Theme.of(context).colorScheme.primaryContainer)
+                    : null,
+              ),
             ],
           ),
         ),

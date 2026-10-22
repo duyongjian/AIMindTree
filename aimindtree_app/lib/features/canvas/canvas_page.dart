@@ -11,7 +11,7 @@
 ///
 /// 顶部工具栏：左侧切换知识树；右侧动作归组为 4 个图标菜单（见 [_buildToolbarGroups]）：
 /// 知识树（新建 / 重命名 / 删除）、内容导入（笔记并入 / 已有知识点）、
-/// 布局与连线（框选模式 / 局部重排 / 自动连线 / 局部连线）、
+/// 布局与连线（重新布局 / 局部重排 / 自动连线 / 局部连线）、
 /// AI 与作业（批量补前置 / 布置作业 / 作业历史 / 作业模式）。
 library;
 
@@ -2197,7 +2197,7 @@ class CanvasPageState extends State<CanvasPage> {
   /// 1. **知识树**（实体 CRUD）：新建知识树 / 重命名 / 删除知识树；
   /// 2. **内容导入**：从笔记并入知识点 / 加入已有知识点；
   /// 3. **布局与连线**（布局系列 + 连线系列，用分隔线分开）：
-  ///    - 布局系列：框选模式（常驻开关）/ 局部重排；
+  ///    - 布局系列：重新布局（全量重排）/ 局部重排；
   ///    - 连线系列：自动连线（原「自动布局」，实为 T3 前置连线）/ 局部连线（仅对框选子集连线）；
   /// 4. **AI 与作业**：批量补前置 / 布置作业 / 作业历史 / 作业模式。
   ///
@@ -2252,14 +2252,14 @@ class CanvasPageState extends State<CanvasPage> {
       // ③ 布局与连线（布局系列 + 连线系列，PopupMenuDivider 分隔）
       _toolbarGroupButton(
         icon: Icons.dashboard_outlined,
-        tooltip: '布局与连线：框选模式 / 局部重排 / 自动连线 / 局部连线',
+        tooltip: '布局与连线：重新布局 / 局部重排 / 自动连线 / 局部连线',
         itemBuilder: (_) => <PopupMenuEntry<int>>[
           // —— 布局系列 ——
           _toolbarMenuItem(
-            icon: _frameMode ? Icons.deselect : Icons.crop_free,
-            label: _frameMode ? '退出框选模式' : '框选模式',
+            icon: Icons.grid_view,
+            label: '重新布局',
             enabled: hasTree,
-            onTap: _toggleFrameMode,
+            onTap: _onRelayout,
           ),
           _toolbarMenuItem(
             icon: Icons.schema,
@@ -2423,7 +2423,6 @@ class CanvasPageState extends State<CanvasPage> {
                           onMoveNode: _onMoveNode,
                           onCreateEdge: _onCreateEdge,
                           onDeleteEdge: _onDeleteEdge,
-                          onRelayout: _onRelayout,
                           selectionMode: _homeworkMode || _frameMode,
                           selectedKpIds: _selectedKpIds,
                           onSelectionChanged: (s) => setState(() {
@@ -2432,6 +2431,8 @@ class CanvasPageState extends State<CanvasPage> {
                               ..addAll(s);
                           }),
                           allowGroupDrag: _frameMode,
+                          frameMode: _frameMode,
+                          onToggleFrameMode: _toggleFrameMode,
                           onMoveNodes: _onMoveNodes,
                         ),
         ),

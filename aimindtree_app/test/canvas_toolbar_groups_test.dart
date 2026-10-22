@@ -7,7 +7,8 @@
 /// 1. **动作不丢**：4 个分组按钮齐全，每组菜单项与原平铺图标一一对应；
 /// 2. **禁用态保留**：`tree == null`（空库）时，除「新建知识树」外全部禁用。
 ///
-/// 另点一个真实菜单项（框选模式）验证 handler 是真的接上了，而不是空壳。
+/// 另验证画布右下角悬浮栏的「框选模式」开关图标翻转（crop_free ⇄ deselect），
+/// 确认悬浮栏按钮的 handler 是真的接上了，而不是空壳。
 library;
 
 import 'package:aimindtree_app/ai/ai_job_service.dart';
@@ -156,20 +157,22 @@ void main() {
       expect(itemEnabled(tester, '加入已有知识点'), isTrue);
     });
 
-    testWidgets('③ 布局与连线组：框选模式 / 局部重排 / 自动连线 / 局部连线',
+    testWidgets('③ 布局与连线组：重新布局 / 局部重排 / 自动连线 / 局部连线',
         (tester) async {
       await pumpCanvasWithTree(tester);
 
       final labels = await openGroup(tester, Icons.dashboard_outlined);
       expect(labels, <String>[
-        '框选模式',
+        '重新布局',
         '局部重排',
         '自动连线',
         '局部连线',
       ]);
       // 防回归：旧的「自动布局」label 不应再出现（已改名「自动连线」）。
       expect(labels, isNot(contains('自动布局')));
-      expect(itemEnabled(tester, '框选模式'), isTrue);
+      // 防回归：「框选模式」开关已移到画布右下角悬浮栏，菜单里不应再有它。
+      expect(labels, isNot(contains('框选模式')));
+      expect(itemEnabled(tester, '重新布局'), isTrue);
       expect(itemEnabled(tester, '自动连线'), isTrue);
       // 未开框选模式时「局部重排」禁用（需框选模式 + 至少 1 个选中点）。
       expect(itemEnabled(tester, '局部重排'), isFalse);
@@ -193,24 +196,29 @@ void main() {
       expect(itemEnabled(tester, '布置作业'), isFalse);
     });
 
-    testWidgets('点菜单项真的触发既有 handler：框选模式可开可关', (tester) async {
+    testWidgets('点悬浮栏「框选模式」真的触发既有 handler：可开可关', (tester) async {
       await pumpCanvasWithTree(tester);
 
-      // 打开 ③ 布局视图组 → 点「框选模式」。
-      await openGroup(tester, Icons.dashboard_outlined);
-      await tester.tap(find.text('框选模式'));
-      await tester.pumpAndSettle();
+      // 初始：画布右下角悬浮栏（_ZoomControls）显示 crop_free（未开框选模式）。
+      expect(find.byIcon(Icons.crop_free), findsOneWidget);
 
-      // handler 生效：菜单关闭，再开时标签翻成「退出框选模式」。
-      final onLabels = await openGroup(tester, Icons.dashboard_outlined);
-      expect(onLabels, contains('退出框选模式'));
-
-      // 再点一次退出，标签翻回来。
-      await tester.tap(find.text('退出框选模式'));
+      // 点它 → _toggleFrameMode 生效：图标翻成 deselect（crop_free 消失）。
+      await tester.tap(find.byIcon(Icons.crop_free));
       await tester.pumpAndSettle();
-      final offLabels = await openGroup(tester, Icons.dashboard_outlined);
-      expect(offLabels, contains('框选模式'));
-      expect(offLabels, isNot(contains('退出框选模式')));
+      expect(find.byIcon(Icons.deselect), findsOneWidget);
+      expect(find.byIcon(Icons.crop_free), findsNothing);
+
+      // 开启时的 toast 是一条 2s SnackBar，盖在屏幕底部会挡住悬浮栏按钮：
+      // 推虚拟时间越过其时长并等退场动画结束，确认它消失后再点退出。
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+      expect(find.byType(SnackBar), findsNothing);
+
+      // 再点一次退出，图标翻回来。
+      await tester.tap(find.byIcon(Icons.deselect));
+      await tester.pumpAndSettle();
+      expect(find.byIcon(Icons.crop_free), findsOneWidget);
+      expect(find.byIcon(Icons.deselect), findsNothing);
     });
   });
 
@@ -235,13 +243,13 @@ void main() {
 
       labels = await openGroup(tester, Icons.dashboard_outlined);
       expect(labels, <String>[
-        '框选模式',
+        '重新布局',
         '局部重排',
         '自动连线',
         '局部连线',
       ]);
       for (final l in const <String>[
-        '框选模式',
+        '重新布局',
         '局部重排',
         '自动连线',
         '局部连线',
@@ -263,13 +271,13 @@ void main() {
   });
 
   group('菜单改名防回归（需求①②③④）', () {
-    testWidgets('③ 含 框选模式/自动连线/局部连线，不含 重新布局/自动布局', (tester) async {
+    testWidgets('③ 含 重新布局/自动连线/局部连线，不含 框选模式/自动布局', (tester) async {
       await pumpCanvasWithTree(tester);
       final labels = await openGroup(tester, Icons.dashboard_outlined);
-      expect(labels, contains('框选模式'));
+      expect(labels, contains('重新布局'));
       expect(labels, contains('自动连线'));
       expect(labels, contains('局部连线'));
-      expect(labels, isNot(contains('重新布局')));
+      expect(labels, isNot(contains('框选模式')));
       expect(labels, isNot(contains('自动布局')));
     });
 
