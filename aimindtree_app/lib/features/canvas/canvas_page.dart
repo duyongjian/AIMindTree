@@ -11,7 +11,7 @@
 ///
 /// 顶部工具栏：左侧切换知识树；右侧动作归组为 4 个图标菜单（见 [_buildToolbarGroups]）：
 /// 知识树（新建 / 重命名 / 删除）、内容导入（笔记并入 / 已有知识点）、
-/// 布局与连线（重新布局 / 框选重排 / 局部重排 / 框选移动 / 自动连线 / 局部连线）、
+/// 布局与连线（框选模式 / 局部重排 / 自动连线 / 局部连线）、
 /// AI 与作业（批量补前置 / 布置作业 / 作业历史 / 作业模式）。
 library;
 
@@ -37,6 +37,7 @@ import '../../data/repositories/homework_repository.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
 import '../../features/homework/homework_page.dart';
+import '../../features/knowledge/kp_dedup.dart' show kpDedupSchedule;
 
 /// 补前置入库「笔记归属」四选项（默认 [manual]，见 [_pickSupplementMode]）。
 enum _SupplementMode {
@@ -81,13 +82,12 @@ class CanvasPageState extends State<CanvasPage> {
   /// 作业模式：开启后可在画布上框选薄弱点，再「布置作业」。
   bool _homeworkMode = false;
 
-  /// 框选重排模式：开启后可在画布上框选若干知识点，再「局部重排」。
-  bool _frameSelectMode = false;
+  /// 框选模式（常驻开关）：开启后画布可拖拽框选知识点；框选类功能
+  /// （局部重排 / 局部连线 / 整组拖动）在此模式下才可用，再点一次退出。
+  /// 与作业模式互斥。
+  bool _frameMode = false;
 
-  /// 框选移动模式：开启后框选若干知识点，拖动其中任意一个即整组一起移动。
-  bool _frameMoveMode = false;
-
-  /// 当前画布上框选 / 多选选中的知识点 id（作业模式与框选重排模式共用同一份状态）。
+  /// 当前画布上框选 / 多选选中的知识点 id（作业模式与框选模式共用同一份状态）。
   final Set<String> _selectedKpIds = <String>{};
 
   /// 作业仓储（落库 + 历史）。
@@ -720,7 +720,7 @@ class CanvasPageState extends State<CanvasPage> {
     final tree = _selectedTree;
     if (tree == null) return;
     if (_selectedKpIds.length < 2) {
-      _toast('请先框选至少 2 个知识点（框选重排 / 框选移动模式）再局部连线');
+      _toast('请先框选至少 2 个知识点（先开「框选模式」）再局部连线');
       return;
     }
     final ids = <String>{..._selectedKpIds};
@@ -1184,7 +1184,7 @@ class CanvasPageState extends State<CanvasPage> {
     }
 
     // 3) 都为空 → 提示。
-    _toast('请先框选若干知识点（框选重排 / 框选移动模式），或点选一个知识点');
+    _toast('请先框选若干知识点（先开「框选模式」），或点选一个知识点');
   }
 
   // ============ 作业模式（框选薄弱点 → 布置作业 / 历史）============
@@ -1192,10 +1192,9 @@ class CanvasPageState extends State<CanvasPage> {
   void _toggleHomeworkMode() {
     setState(() {
       _homeworkMode = !_homeworkMode;
-      // 三种框选模式互斥：开一个就关掉另外两个。
+      // 作业模式与框选模式互斥。
       if (_homeworkMode) {
-        _frameSelectMode = false;
-        _frameMoveMode = false;
+        _frameMode = false;
       }
       if (!_homeworkMode) {
         _selectedKpIds.clear();
@@ -1206,39 +1205,22 @@ class CanvasPageState extends State<CanvasPage> {
     }
   }
 
-  /// 切换「框选重排」模式：与作业模式 / 框选移动互斥，关闭时清空选中。
-  void _toggleFrameSelectMode() {
+  /// 切换「框选模式」（常驻开关，与作业模式互斥）：
+  /// 开启后画布进入框选态——拖拽框选知识点，选好后可「局部重排 / 局部连线」，
+  /// 拖动选中组内任意一个即整组一起移动；关闭时清空选中。
+  void _toggleFrameMode() {
     setState(() {
-      _frameSelectMode = !_frameSelectMode;
-      if (_frameSelectMode) {
+      _frameMode = !_frameMode;
+      if (_frameMode) {
         _homeworkMode = false;
-        _frameMoveMode = false;
       }
-      if (!_frameSelectMode) {
+      if (!_frameMode) {
         _selectedKpIds.clear();
       }
     });
-    if (_frameSelectMode) {
-      _toast('框选重排：在画布上拖拽框选若干知识点，再点「局部重排」');
-    }
-  }
-
-  /// 切换「框选移动」模式：与作业模式 / 框选重排互斥，关闭时清空选中。
-  ///
-  /// 开启后：先在画布上拖拽框选出一组知识点，再直接拖动其中任意一个，整组一起移动。
-  void _toggleFrameMoveMode() {
-    setState(() {
-      _frameMoveMode = !_frameMoveMode;
-      if (_frameMoveMode) {
-        _homeworkMode = false;
-        _frameSelectMode = false;
-      }
-      if (!_frameMoveMode) {
-        _selectedKpIds.clear();
-      }
-    });
-    if (_frameMoveMode) {
-      _toast('框选移动：先拖拽框选若干知识点，再拖动其中任意一个，整组一起移动');
+    if (_frameMode) {
+      _toast('框选模式：拖拽框选知识点；选好后可局部重排 / 局部连线，'
+          '拖动其中一个整组移动；再点一次退出');
     }
   }
 
@@ -1645,12 +1627,6 @@ class CanvasPageState extends State<CanvasPage> {
                         child: const Text('取消'),
                       ),
                       const SizedBox(width: 8),
-                      TextButton.icon(
-                        onPressed: () => _createAllNotes(r.suggestions),
-                        icon: const Icon(Icons.note_add_outlined),
-                        label: const Text('全部新建为笔记'),
-                      ),
-                      const SizedBox(width: 8),
                       ElevatedButton.icon(
                         icon: const Icon(Icons.add),
                         onPressed: selectedCount == 0 || targetTree == null
@@ -1764,6 +1740,10 @@ class CanvasPageState extends State<CanvasPage> {
       switch (outcome) {
         case ChainOutcome.queued:
           // 关建议 BottomSheet：提交即返回，不钉界面（R1）。
+          // 后台异步查重：队列路径的知识点由后台 T1 任务随后落库，查重任务
+          // 排在其后执行；若执行时新点尚未落库则本轮静默无结果（不影响
+          // 正确性，手动去重按钮可随时兜底）。
+          kpDedupSchedule(repo: _repo, jobs: widget.service.jobs);
           Navigator.of(context).pop();
           return;
         case ChainOutcome.locked:
@@ -1959,6 +1939,8 @@ class CanvasPageState extends State<CanvasPage> {
     if (!mounted) return;
     _toast('已补充进「${tree.name}」：$added 个知识点${linkMsg ?? ''}');
     await _load();
+    // 后台异步查重：补前置是知识点创建环节之一（用户要求全覆盖）。
+    kpDedupSchedule(repo: _repo, jobs: widget.service.jobs);
   }
 
   /// 同步阻塞路径的「T3 连线」封装：带进度对话框跑 [_auto.autoLink]，返回连线文案。
@@ -2132,26 +2114,6 @@ class CanvasPageState extends State<CanvasPage> {
     );
   }
 
-  /// P2-1：把整批建议一次性落成多条笔记（同样不创建知识点，遵守锚点铁律）。
-  Future<void> _createAllNotes(List<SuggestedPrerequisite> list) async {
-    if (list.isEmpty) return;
-    var ok = 0;
-    for (final s in list) {
-      final note = Note(
-        title: s.name,
-        contentMd: '# ${s.name}\n\n${s.definition}',
-        deviceId: DeviceId.orEmpty,
-      );
-      final res = await _repo.saveNote(note);
-      if (!mounted) return;
-      if (res.isSuccess) ok++;
-    }
-    Navigator.of(context).pop(); // 关闭建议 BottomSheet
-    _toast(ok == list.length
-        ? '已新建 $ok 条笔记，去「提取」页跑一次 T1 即可收录对应知识点'
-        : '已新建 $ok/${list.length} 条笔记（部分失败），去「提取」页跑一次 T1 即可收录知识点');
-  }
-
   Future<String?> _askName(String title, String label, String initial) async {
     final controller = TextEditingController(text: initial);
     return showDialog<String>(
@@ -2235,7 +2197,7 @@ class CanvasPageState extends State<CanvasPage> {
   /// 1. **知识树**（实体 CRUD）：新建知识树 / 重命名 / 删除知识树；
   /// 2. **内容导入**：从笔记并入知识点 / 加入已有知识点；
   /// 3. **布局与连线**（布局系列 + 连线系列，用分隔线分开）：
-  ///    - 布局系列：重新布局（全量重排）/ 框选重排 / 局部重排 / 框选移动；
+  ///    - 布局系列：框选模式（常驻开关）/ 局部重排；
   ///    - 连线系列：自动连线（原「自动布局」，实为 T3 前置连线）/ 局部连线（仅对框选子集连线）；
   /// 4. **AI 与作业**：批量补前置 / 布置作业 / 作业历史 / 作业模式。
   ///
@@ -2290,33 +2252,20 @@ class CanvasPageState extends State<CanvasPage> {
       // ③ 布局与连线（布局系列 + 连线系列，PopupMenuDivider 分隔）
       _toolbarGroupButton(
         icon: Icons.dashboard_outlined,
-        tooltip:
-            '布局与连线：重新布局 / 框选重排 / 局部重排 / 框选移动 / 自动连线 / 局部连线',
+        tooltip: '布局与连线：框选模式 / 局部重排 / 自动连线 / 局部连线',
         itemBuilder: (_) => <PopupMenuEntry<int>>[
           // —— 布局系列 ——
           _toolbarMenuItem(
-            icon: Icons.grid_view,
-            label: '重新布局',
+            icon: _frameMode ? Icons.deselect : Icons.crop_free,
+            label: _frameMode ? '退出框选模式' : '框选模式',
             enabled: hasTree,
-            onTap: _onRelayout,
-          ),
-          _toolbarMenuItem(
-            icon: _frameSelectMode ? Icons.deselect : Icons.highlight_alt,
-            label: _frameSelectMode ? '退出框选重排' : '框选重排',
-            enabled: hasTree,
-            onTap: _toggleFrameSelectMode,
+            onTap: _toggleFrameMode,
           ),
           _toolbarMenuItem(
             icon: Icons.schema,
             label: '局部重排',
-            enabled: hasTree && _frameSelectMode && _selectedKpIds.isNotEmpty,
+            enabled: hasTree && _frameMode && _selectedKpIds.isNotEmpty,
             onTap: _relayoutSelected,
-          ),
-          _toolbarMenuItem(
-            icon: _frameMoveMode ? Icons.deselect : Icons.open_with,
-            label: _frameMoveMode ? '退出框选移动' : '框选移动',
-            enabled: hasTree,
-            onTap: _toggleFrameMoveMode,
           ),
           // —— 连线系列（与布局系列分隔）——
           const PopupMenuDivider(),
@@ -2408,8 +2357,7 @@ class CanvasPageState extends State<CanvasPage> {
                       setState(() {
                         _selectedTree = v;
                         _homeworkMode = false;
-                        _frameSelectMode = false;
-                        _frameMoveMode = false;
+                        _frameMode = false;
                         _selectedKpIds.clear();
                       });
                       await _loadForTree(v.id);
@@ -2476,16 +2424,14 @@ class CanvasPageState extends State<CanvasPage> {
                           onCreateEdge: _onCreateEdge,
                           onDeleteEdge: _onDeleteEdge,
                           onRelayout: _onRelayout,
-                          selectionMode: _homeworkMode ||
-                              _frameSelectMode ||
-                              _frameMoveMode,
+                          selectionMode: _homeworkMode || _frameMode,
                           selectedKpIds: _selectedKpIds,
                           onSelectionChanged: (s) => setState(() {
                             _selectedKpIds
                               ..clear()
                               ..addAll(s);
                           }),
-                          allowGroupDrag: _frameMoveMode,
+                          allowGroupDrag: _frameMode,
                           onMoveNodes: _onMoveNodes,
                         ),
         ),
