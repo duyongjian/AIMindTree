@@ -44,6 +44,8 @@ class SyncSettingsSection extends StatefulWidget {
 
 class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   late final TextEditingController _url;
+  late final TextEditingController _cfUrl;
+  late final TextEditingController _cfToken;
   int _pending = 0;
   int _failed = 0;
   String _status = 'idle';
@@ -52,6 +54,8 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   void initState() {
     super.initState();
     _url = TextEditingController(text: widget.config.baseUrl ?? '');
+    _cfUrl = TextEditingController(text: widget.config.cfUrl ?? '');
+    _cfToken = TextEditingController(text: widget.config.cfToken ?? '');
     _status = widget.statusStore.status;
     _refreshCounters();
   }
@@ -59,6 +63,8 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   @override
   void dispose() {
     _url.dispose();
+    _cfUrl.dispose();
+    _cfToken.dispose();
     super.dispose();
   }
 
@@ -84,100 +90,99 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     );
   }
 
-  Future<void> _pushNow() async {
-    if (!widget.config.isConfigured) {
+  Future<void> _saveCf() async {
+    await widget.config.setCfUrl(_cfUrl.text.trim());
+    final t = _cfToken.text.trim();
+    await widget.config.setCfToken(t.isEmpty ? null : t);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('CF 同步配置已保存（重启 App 后生效）。')),
+    );
+  }
+
+  /// 开发期手动同步：按目标（llm / CF）× 方向（上传 / 拉取）触发。
+  ///
+  /// 复用 [widget.scheduler.engine] 的本地 outbox / deviceId，仅覆盖其 [api]
+  /// 指向对应后端。拉取前强制游标归零（dev 期两个后端共用游标，避免漏拉）。
+  Future<void> _runSync({required bool toCf, required bool push}) async {
+    final url = toCf ? widget.config.cfUrl : widget.config.llmUrl;
+    if (url == null || url.trim().isEmpty) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('尚未收到管理后台下发的同步配置。')),
+        SnackBar(
+          content: Text(toCf ? '未配置 CF 同步地址。' : '未配置 llm_server 同步地址。'),
+        ),
       );
       return;
     }
-    _warnIfStaleApi();
+    String? token;
+    if (toCf) {
+      token = await widget.config.resolveCfToken();
+      if (token == null || token.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('CF 同步需要先配置 token。')),
+        );
+        return;
+      }
+    } else {
+      token = await widget.config.resolveToken(); // 可能为空（relay 开发期免 token）
+    }
+
+    final api = HttpSyncApi(baseUrl: url.trim(), userToken: token ?? '');
+    final engine = widget.scheduler.engine;
+    if (!push) {
+      engine.updateLastPulledAt(DateTime.fromMillisecondsSinceEpoch(0, isUtc: true));
+    }
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('正在上传…')),
+      SnackBar(content: Text(push ? '正在上传…' : '正在拉取…')),
     );
     await widget.statusStore.setStatus('syncing');
     try {
-      final report = await widget.scheduler.engine.push();
-      await widget.statusStore.setLastPushAt(DateTime.now().toUtc());
-      await widget.statusStore.setStatus('ok');
-      await _refreshCounters();
-      if (!mounted) return;
-      final failedNote = report.failed > 0 ? '，失败 ${report.failed} 条' : '';
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('上传完成：推送 ${report.pushed} 条$failedNote'),
-          backgroundColor: report.failed > 0 ? Colors.red : Colors.green,
-        ),
-      );
+      if (push) {
+        final report = await engine.push(api: api);
+        await widget.statusStore.setLastPushAt(DateTime.now().toUtc());
+        await widget.statusStore.setStatus('ok');
+        await _refreshCounters();
+        if (!mounted) return;
+        final failedNote = report.failed > 0 ? '，失败 ${report.failed} 条' : '';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('上传完成：推送 ${report.pushed} 条$failedNote'),
+            backgroundColor: report.failed > 0 ? Colors.red : Colors.green,
+          ),
+        );
+      } else {
+        final report = await engine.pull(api: api);
+        await widget.statusStore.setLastPulledAt(report.serverTime);
+        await widget.statusStore.setStatus('ok');
+        await _refreshCounters();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('拉取完成：应用 ${report.applied} 条变更'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
     } on Object catch (e) {
       await widget.statusStore.setStatus('error:$e');
       await _refreshCounters();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('上传失败：$e'),
+          content: Text(push ? '上传失败：$e' : '拉取失败：$e'),
           backgroundColor: Colors.red,
         ),
-      );
-    }
-  }
-
-  Future<void> _pullNow() async {
-    if (!widget.config.isConfigured) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('尚未收到管理后台下发的同步配置。')),
-      );
-      return;
-    }
-    _warnIfStaleApi();
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('正在拉取…')),
-    );
-    await widget.statusStore.setStatus('syncing');
-    try {
-      final report = await widget.scheduler.engine.pull();
-      await widget.statusStore.setLastPulledAt(report.serverTime);
-      await widget.statusStore.setStatus('ok');
-      await _refreshCounters();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('拉取完成：应用 ${report.applied} 条变更'),
-          backgroundColor: Colors.green,
-        ),
-      );
-    } on Object catch (e) {
-      await widget.statusStore.setStatus('error:$e');
-      await _refreshCounters();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('拉取失败：$e'),
-          backgroundColor: Colors.red,
-        ),
-      );
-    }
-  }
-
-  /// stale api 防护：HttpSyncApi 在 bootstrap 一次性构建，管理后台运行时改
-  /// Base URL 不会热更新到已构造实例。比对当前配置与实例地址，不一致时
-  /// 提醒重启 App（不重构 bootstrap）。
-  void _warnIfStaleApi() {
-    final api = widget.scheduler.api;
-    if (api is! HttpSyncApi) return; // MockSyncApi 占位：无真实地址可比
-    final configured = (widget.config.baseUrl ?? '').trim();
-    final actual = api.baseUrl.trim();
-    if (configured.isNotEmpty && configured != actual) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('同步地址已在管理后台变更，重启 App 后生效')),
       );
     }
   }
 
   Future<void> _testConnection() async {
-    if (!widget.config.isConfigured) {
+    if (!widget.config.isLlmConfigured) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('尚未收到管理后台下发的同步配置。')),
+        const SnackBar(content: Text('尚未配置 llm_server 同步地址。')),
       );
       return;
     }
@@ -209,7 +214,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
         const Padding(
           padding: EdgeInsets.fromLTRB(16, 24, 16, 8),
           child: Text(
-            '同步（Supabase ai-proxy）',
+            '同步（可指向 llm_server / Cloudflare）',
             style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
           ),
         ),
@@ -272,22 +277,72 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
                   child: const Text('测试连接'),
                 ),
               const SizedBox(height: 8),
-              // 手动同步（自动调度已下线）：push / pull 各自独立触发。
+              // ---- Cloudflare 目标（方案 B，可选）----
+              const Divider(),
+              const Text(
+                'Cloudflare 目标（方案 B）',
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+              ),
+              const SizedBox(height: 4),
+              TextField(
+                controller: _cfUrl,
+                decoration: const InputDecoration(
+                  labelText: 'CF Worker URL',
+                  helperText: '形如 https://<subdomain>.workers.dev',
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _cfToken,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'CF Token（开发期直存本机）',
+                  helperText: '也可由管理后台下发 token_ref 经 SecretStore 保存',
+                ),
+              ),
+              const SizedBox(height: 8),
+              FilledButton.tonal(
+                onPressed: _saveCf,
+                child: const Text('保存 CF 配置'),
+              ),
+              const SizedBox(height: 8),
+              // 开发期手动同步：两个目标 × 上传 / 拉取 = 4 个按钮。
+              const Divider(),
               Row(
                 children: [
                   Expanded(
                     child: FilledButton.icon(
-                      onPressed: _pushNow,
+                      onPressed: () => _runSync(toCf: false, push: true),
                       icon: const Icon(Icons.cloud_upload_outlined),
-                      label: const Text('上传本地到管理端'),
+                      label: const Text('上传到 llmserver'),
                     ),
                   ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: FilledButton.icon(
-                      onPressed: _pullNow,
+                      onPressed: () => _runSync(toCf: true, push: true),
+                      icon: const Icon(Icons.cloud_upload_outlined),
+                      label: const Text('上传到 CF'),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: () => _runSync(toCf: false, push: false),
                       icon: const Icon(Icons.cloud_download_outlined),
-                      label: const Text('拉取管理端到本地'),
+                      label: const Text('从 llmserver 拉取'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: () => _runSync(toCf: true, push: false),
+                      icon: const Icon(Icons.cloud_download_outlined),
+                      label: const Text('从 CF 拉取'),
                     ),
                   ),
                 ],
@@ -303,10 +358,11 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
               ),
               const SizedBox(height: 8),
               Text(
-                '• Base URL / Token 由管理后台统一下发，本机不可修改；\n'
-                '• Token 仅本机 SecretStore 保存，不入 DB；\n'
-                '• 同步为手动：上传 = 本地 → 管理端，拉取 = 管理端 → 本地；\n'
-                '• 跨设备冲突用 LWW（version 大者赢），自回声自动过滤。',
+                '• 默认指向本机 llm_server（127.0.0.1:8787）；CF 需先填 URL + Token；\n'
+                '• Token 仅本机保存，不入 DB；\n'
+                '• 同步为手动：上传 = 本地 → 目标，拉取 = 目标 → 本地；\n'
+                '• 跨设备冲突用 LWW（version 大者赢），自回声自动过滤；\n'
+                '• 上传会消费本地 outbox（标记 done）；同一份数据传两个后端请先清空 outbox 或换库。',
                 style: TextStyle(
                   color: theme.disabledColor,
                   fontSize: 11,

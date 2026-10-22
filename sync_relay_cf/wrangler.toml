@@ -1,0 +1,16 @@
+# Cloudflare Worker + D1 同步中继配置（方案 B）。
+# 部署前：把 database_id 换成你自己的 D1 实例 id（wrangler d1 create aimindtree_sync）。
+
+name = "aimindtree-sync-relay"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "aimindtree_sync"
+database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+# 开发期留空 = 免 token 放行；部署公网请删除此行并用：
+#   wrangler secret put SYNC_TOKEN
+[vars]
+SYNC_TOKEN = ""

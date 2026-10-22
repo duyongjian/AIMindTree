@@ -1,0 +1,12 @@
+{
+  "name": "aimindtree-sync-relay-cf",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Worker + D1 sync relay (Plan B) for AIMindTree.",
+  "type": "module",
+  "scripts": {
+    "test": "node test_worker.mjs",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  }
+}

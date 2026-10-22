@@ -66,10 +66,13 @@ DEFAULTS: dict[str, Any] = {
     #: 唯一例外是经 ``/v1/app/config`` 随运行配置明文下发给 App（依赖
     #: 「服务端仅绑 127.0.0.1」的安全假设，见 core/app_config.py 注释）。
     #: ``enabled`` 默认 true：地址未配置时 App 侧自行跳过同步。
+    #: ``relay_token``：方案 A（llm_server 本地中继）的 Bearer 令牌；空 = 放行
+    #: （开发期 localhost 信任），部署公网务必设置。
     'sync': {
         'base_url': '',
         'enabled': True,
         'token': '',
+        'relay_token': '',
     },
 }
 

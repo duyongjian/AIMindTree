@@ -4,7 +4,17 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from routers import admin, app_config, chat, health, jobs, logs, prompts, tasks
+from routers import (
+    admin,
+    app_config,
+    chat,
+    health,
+    jobs,
+    logs,
+    prompts,
+    sync_relay,
+    tasks,
+)
 
 
 def build_router() -> APIRouter:
@@ -17,6 +27,7 @@ def build_router() -> APIRouter:
     router.include_router(jobs.router)  # /v1/jobs 异步任务队列
     router.include_router(logs.router)  # POST /v1/logs（App→服务端日志抄送）
     router.include_router(prompts.router)
+    router.include_router(sync_relay.router)  # /sync/* 本地同步中继（方案 A）
     router.include_router(admin.router)
     return router
 

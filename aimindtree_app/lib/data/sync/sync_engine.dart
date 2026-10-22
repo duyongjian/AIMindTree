@@ -132,10 +132,15 @@ SyncEngine({
   ///    不入队失败）—— 这是远端表名白名单不兼容时的回退通道；
   /// 3. 单条 > [kMaxEnvelopeBytes] → `markFailed` + warning，不参与切批；
   /// 4. 其余按 [kPushBatchBudgetBytes] 贪心切批 → 逐批 push。
+  ///
+  /// [api] 可覆盖默认后端（用于「上传到 llmserver / 上传到 CF」双目标分流）；
+  /// 不传则用构造时的 [_api]。
   Future<PushReport> push({
     int limit = 100,
     bool includeFailed = true,
+    SyncApi? api,
   }) async {
+    final target = api ?? _api;
     final pending = await _outbox.pending(limit: limit);
     final failed = includeFailed
         ? await _outbox.failedPending(limit: limit - pending.length)
@@ -211,7 +216,7 @@ SyncEngine({
       await _outbox.markSending(ids);
       try {
         final result =
-            await _api.pushBatch(<SyncEnvelope>[for (final e in batch) e.envelope]);
+            await target.pushBatch(<SyncEnvelope>[for (final e in batch) e.envelope]);
         await _outbox.markPushed(ids);
         pushed += result.accepted;
         serverTime = result.serverTime;
@@ -268,8 +273,12 @@ SyncEngine({
   // ============ Pull ============
 
   /// 拉取 since [lastPulledAt]（首次为 null = 全量）→ 自回声过滤 → LWW merge。
-  Future<PullReport> pull() async {
-    final result = await _api.pullSince(_lastPulledAt);
+  ///
+  /// [api] 可覆盖默认后端（用于「从 llmserver / 从 CF 拉取」双目标分流）；
+  /// 不传则用构造时的 [_api]。
+  Future<PullReport> pull({SyncApi? api}) async {
+    final target = api ?? _api;
+    final result = await target.pullSince(_lastPulledAt);
     var applied = 0;
     var skipped = 0;
     for (final env in result.envelopes) {

@@ -86,3 +86,6 @@ app.*.symbols
 
 # M10 面板测试夹具（gen_m10_fixture.py 可再生）
 llm_server/.m10_fixture.json
+
+# 方案 A 本地同步中继的运行时 SQLite（可随时重建）
+llm_server/sync_relay.db
