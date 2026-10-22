@@ -1,21 +1,20 @@
 @echo off
-chcp 65001 >nul
 REM ============================================================
-REM  AIMindTree æœåŠ¡ç«¯ä¸€é”®å¯åŠ¨ â€”â€” Ollama + LLM Server
+REM  AIMindTree ·şÎñ¶ËÒ»¼üÆô¶¯ ¡ª¡ª Ollama + LLM Server
 REM
-REM  ç”¨æ³•ï¼š
-REM     scripts\run_llm_server.bat              é»˜è®¤ 8787 ç«¯å£
-REM     scripts\run_llm_server.bat --port 8788  ç«¯å£è¢«å æ—¶æ¢ä¸€ä¸ª
+REM  ÓÃ·¨£º
+REM     scripts\run_llm_server.bat              Ä¬ÈÏ 8787 ¶Ë¿Ú
+REM     scripts\run_llm_server.bat --port 8788  ¶Ë¿Ú±»Õ¼Ê±»»Ò»¸ö
 REM
-REM  å®ƒåšä¸‰ä»¶äº‹ï¼ˆç¼ºä¸€æ­¥éƒ½èµ·ä¸æ¥ï¼‰ï¼š
-REM    1) ç¡®è®¤ Ollama åœ¨è·‘        â€”â€” æ²¡èµ·å°±è‡ªåŠ¨ `ollama serve`ï¼ˆæœ€å°åŒ–çª—å£ï¼‰
-REM    2) ç¡®è®¤æ¨¡å‹ qwen3:8b-8k åœ¨  â€”â€” ä¸åœ¨å°±è‡ªåŠ¨ createï¼ˆè¯» llm_server\ollama\Modelfile.qwen3-8kï¼‰
-REM    3) å¯åŠ¨ LLM Server          â€”â€” http://127.0.0.1:8787
+REM  Ëü×öÈı¼şÊÂ£¨È±Ò»²½¶¼Æğ²»À´£©£º
+REM    1) È·ÈÏ Ollama ÔÚÅÜ        ¡ª¡ª Ã»Æğ¾Í×Ô¶¯ `ollama serve`£¨×îĞ¡»¯´°¿Ú£©
+REM    2) È·ÈÏÄ£ĞÍ qwen3:8b-8k ÔÚ  ¡ª¡ª ²»ÔÚ¾Í×Ô¶¯ create£¨¶Á llm_server\ollama\Modelfile.qwen3-8k£©
+REM    3) Æô¶¯ LLM Server          ¡ª¡ª http://127.0.0.1:8787
 REM
-REM  å¯åŠ¨åï¼š
-REM    ç®¡ç†åå°   http://127.0.0.1:8787/admin
-REM    å¥åº·æ£€æŸ¥   http://127.0.0.1:8787/health
-REM  é€€å‡ºï¼šåœ¨æœ¬çª—å£æŒ‰ Ctrl+Cï¼ˆOllama é‚£ä¸ªæœ€å°åŒ–çª—å£è¦å•ç‹¬å…³ï¼‰
+REM  Æô¶¯ºó£º
+REM    ¹ÜÀíºóÌ¨   http://127.0.0.1:8787/admin
+REM    ½¡¿µ¼ì²é   http://127.0.0.1:8787/health
+REM  ÍË³ö£ºÔÚ±¾´°¿Ú°´ Ctrl+C£¨Ollama ÄÇ¸ö×îĞ¡»¯´°¿ÚÒªµ¥¶À¹Ø£©
 REM ============================================================
 setlocal EnableDelayedExpansion
 
@@ -25,8 +24,8 @@ set "BASE=C:\Users\ASUS\.workbuddy\binaries\python\versions\3.13.12\python.exe"
 set "MODEL=qwen3:8b-8k"
 set "MODELFILE=%REPO%\llm_server\ollama\Modelfile.qwen3-8k"
 
-REM æ¸…ç©ºä»£ç†ï¼šæœ¬æœºç³»ç»Ÿä»£ç† 127.0.0.1:44166 ä¼šæŠŠ 127.0.0.1 çš„è¯·æ±‚é€ç»™ä»£ç†ï¼Œ
-REM è¡¨ç°ä¸ºã€Œæœ¬åœ°åç«¯è¿ä¸ä¸Šã€çš„å‡æ•…éšœï¼ˆæœåŠ¡ç«¯é»˜è®¤ trust_env=Falseï¼Œè¿™é‡ŒåŒä¿é™©ï¼‰ã€‚
+REM Çå¿Õ´úÀí£º±¾»úÏµÍ³´úÀí 127.0.0.1:44166 »á°Ñ 127.0.0.1 µÄÇëÇóËÍ¸ø´úÀí£¬
+REM ±íÏÖÎª¡¸±¾µØºó¶ËÁ¬²»ÉÏ¡¹µÄ¼Ù¹ÊÕÏ£¨·şÎñ¶ËÄ¬ÈÏ trust_env=False£¬ÕâÀïË«±£ÏÕ£©¡£
 set "HTTP_PROXY="
 set "HTTPS_PROXY="
 set "http_proxy="
@@ -34,7 +33,7 @@ set "https_proxy="
 set "NO_PROXY=localhost,127.0.0.1,::1"
 set "no_proxy=localhost,127.0.0.1,::1"
 
-REM ---------- Python è§£é‡Šå™¨ ----------
+REM ---------- Python ½âÊÍÆ÷ ----------
 if exist "%VENV%" (
     set "PY=%VENV%"
     echo [llm_server] using venv: %VENV%
@@ -45,18 +44,18 @@ if exist "%VENV%" (
     echo     "%BASE%" -m pip install -r "%REPO%\llm_server\requirements.txt"
 )
 
-REM ---------- [1/3] Ollama æœåŠ¡ ----------
+REM ---------- [1/3] Ollama ·şÎñ ----------
 echo [llm_server] [1/3] checking Ollama ...
 where ollama >nul 2>&1
 if errorlevel 1 (
-    echo [llm_server] æ‰¾ä¸åˆ° ollama å‘½ä»¤ã€‚è¯·å…ˆå®‰è£… Ollama: https://ollama.com/download
+    echo [llm_server] ÕÒ²»µ½ ollama ÃüÁî¡£ÇëÏÈ°²×° Ollama: https://ollama.com/download
     pause
     exit /b 1
 )
 
 ollama list >nul 2>&1
 if errorlevel 1 (
-    echo [llm_server] Ollama æœªè¿è¡Œï¼Œæ­£åœ¨å¯åŠ¨ ollama serve ...
+    echo [llm_server] Ollama Î´ÔËĞĞ£¬ÕıÔÚÆô¶¯ ollama serve ...
     start "" /min ollama serve
     set /a _tries=0
     :wait_ollama
@@ -64,7 +63,7 @@ if errorlevel 1 (
     ollama list >nul 2>&1
     if not errorlevel 1 goto :ollama_ready
     if !_tries! geq 20 (
-        echo [llm_server] ç­‰å¾… Ollama å°±ç»ªè¶…æ—¶ï¼ˆ20sï¼‰ã€‚è¯·æ‰‹åŠ¨è¿è¡Œ ollama serve åé‡è¯•ã€‚
+        echo [llm_server] µÈ´ı Ollama ¾ÍĞ÷³¬Ê±£¨20s£©¡£ÇëÊÖ¶¯ÔËĞĞ ollama serve ºóÖØÊÔ¡£
         pause
         exit /b 1
     )
@@ -74,26 +73,26 @@ if errorlevel 1 (
 :ollama_ready
 echo [llm_server] Ollama OK
 
-REM ---------- [2/3] æ¨¡å‹ ----------
+REM ---------- [2/3] Ä£ĞÍ ----------
 echo [llm_server] [2/3] checking model %MODEL% ...
 ollama list | findstr /c:"%MODEL%" >nul
 if errorlevel 1 (
-    echo [llm_server] æ¨¡å‹ %MODEL% ä¸å­˜åœ¨ï¼Œæ­£åœ¨åˆ›å»ºï¼ˆçº¦ 1-2 åˆ†é’Ÿï¼‰...
+    echo [llm_server] Ä£ĞÍ %MODEL% ²»´æÔÚ£¬ÕıÔÚ´´½¨£¨Ô¼ 1-2 ·ÖÖÓ£©...
     if not exist "%MODELFILE%" (
-        echo [llm_server] æ‰¾ä¸åˆ° Modelfile: %MODELFILE%
+        echo [llm_server] ÕÒ²»µ½ Modelfile: %MODELFILE%
         pause
         exit /b 1
     )
     ollama create %MODEL% -f "%MODELFILE%"
     if errorlevel 1 (
-        echo [llm_server] æ¨¡å‹åˆ›å»ºå¤±è´¥ã€‚è¯·ç¡®è®¤åŸºç¡€æ¨¡å‹ qwen3:8b å·² pullï¼š
+        echo [llm_server] Ä£ĞÍ´´½¨Ê§°Ü¡£ÇëÈ·ÈÏ»ù´¡Ä£ĞÍ qwen3:8b ÒÑ pull£º
         echo     ollama pull qwen3:8b
         pause
         exit /b 1
     )
-    echo [llm_server] æ¨¡å‹ %MODEL% åˆ›å»ºå®Œæˆ
+    echo [llm_server] Ä£ĞÍ %MODEL% ´´½¨Íê³É
 ) else (
-    echo [llm_server] æ¨¡å‹ %MODEL% å·²å­˜åœ¨
+    echo [llm_server] Ä£ĞÍ %MODEL% ÒÑ´æÔÚ
 )
 
 REM ---------- [3/3] LLM Server ----------

@@ -1,28 +1,27 @@
 @echo off
-chcp 65001 >nul
-REM AIMindTree Windows æ¡Œé¢åº”ç”¨ â€”â€” å¿«é€Ÿå¯åŠ¨ï¼ˆæ—¥å¸¸ç”¨è¿™ä¸ªï¼‰ã€‚
+REM AIMindTree Windows ×ÀÃæÓ¦ÓÃ ¡ª¡ª ¿ìËÙÆô¶¯£¨ÈÕ³£ÓÃÕâ¸ö£©¡£
 REM
-REM ä¸ scripts\run_windows.bat çš„åŒºåˆ«ï¼š**è·³è¿‡** flutter pub get ä¸é¡¹ç›®é—¨ç¦
-REM ï¼ˆdart tool\analyze_inproc.dartï¼‰ï¼Œç›´æ¥ flutter runã€‚
-REM é‚£ä¸¤ä¸ªæ­¥éª¤åªåœ¨ã€Œä¾èµ–å˜äº†ã€æˆ–ã€Œæƒ³å…ˆè¿‡ä¸€éé™æ€æ£€æŸ¥ã€æ—¶æ‰éœ€è¦è·‘ï¼Œç”¨å®Œæ•´è„šæœ¬ã€‚
+REM Óë scripts\run_windows.bat µÄÇø±ğ£º**Ìø¹ı** flutter pub get ÓëÏîÄ¿ÃÅ½û
+REM £¨dart tool\analyze_inproc.dart£©£¬Ö±½Ó flutter run¡£
+REM ÄÇÁ½¸ö²½ÖèÖ»ÔÚ¡¸ÒÀÀµ±äÁË¡¹»ò¡¸ÏëÏÈ¹ıÒ»±é¾²Ì¬¼ì²é¡¹Ê±²ÅĞèÒªÅÜ£¬ÓÃÍêÕû½Å±¾¡£
 REM
-REM æœ¬è„šæœ¬ä»ç„¶åšä¸¤ä»¶å¿…é¡»åšçš„äº‹ï¼ˆéƒ½ä¸ä»£ç†æœ‰å…³ï¼Œåˆ«åˆ ï¼‰ï¼š
-REM   1) æ¸…ç©º HTTP_PROXY / HTTPS_PROXY / http_proxy / https_proxy
-REM      â€”â€” æœ¬æœºæœ‰ç³»ç»Ÿä»£ç† 127.0.0.1:44166ï¼Œä¼šæŠŠ flutter run çš„ VM Service
-REM      WebSocket æ‹¦æˆ 502ï¼Œäºæ˜¯å¡åœ¨ "Connecting to the VM Service"ï¼ˆé‡è¯• 350+
-REM      æ¬¡ä¹Ÿä¸é€€ï¼ŒApp å…¶å®å·²ç»èµ·æ¥äº†ï¼‰ã€‚åªè®¾ NO_PROXY æ— æ•ˆï¼Œå¿…é¡»æ¸…ç©ºã€‚
-REM   2) æ˜¾å¼ set PROGRAMFILES(X86) â€”â€” æŸäº›ç²¾ç®€ç¯å¢ƒæ²¡æœ‰è¿™ä¸ªå˜é‡ã€‚
+REM ±¾½Å±¾ÈÔÈ»×öÁ½¼ş±ØĞë×öµÄÊÂ£¨¶¼Óë´úÀíÓĞ¹Ø£¬±ğÉ¾£©£º
+REM   1) Çå¿Õ HTTP_PROXY / HTTPS_PROXY / http_proxy / https_proxy
+REM      ¡ª¡ª ±¾»úÓĞÏµÍ³´úÀí 127.0.0.1:44166£¬»á°Ñ flutter run µÄ VM Service
+REM      WebSocket À¹³É 502£¬ÓÚÊÇ¿¨ÔÚ "Connecting to the VM Service"£¨ÖØÊÔ 350+
+REM      ´ÎÒ²²»ÍË£¬App ÆäÊµÒÑ¾­ÆğÀ´ÁË£©¡£Ö»Éè NO_PROXY ÎŞĞ§£¬±ØĞëÇå¿Õ¡£
+REM   2) ÏÔÊ½ set PROGRAMFILES(X86) ¡ª¡ª Ä³Ğ©¾«¼ò»·¾³Ã»ÓĞÕâ¸ö±äÁ¿¡£
 REM
-REM å‰ç½®æ¡ä»¶ï¼ˆä¸åœ¨æœ¬è„šæœ¬èŒè´£å†…ï¼‰ï¼š
-REM   - ollama serve æ­£åœ¨è·‘ï¼ˆæœ¬åœ°æ¨ç†ï¼‰
-REM   - scripts\run_llm_server.bat å·²å¯åŠ¨ï¼ˆApp çš„ AI æœåŠ¡ç«¯ï¼Œ127.0.0.1:8787ï¼‰
-REM   App å†·å¯åŠ¨ä¼šè‡ªå·±æ‹‰ /v1/app/configï¼Œæ— éœ€æ‰‹å·¥é… providerã€‚
+REM Ç°ÖÃÌõ¼ş£¨²»ÔÚ±¾½Å±¾Ö°ÔğÄÚ£©£º
+REM   - ollama serve ÕıÔÚÅÜ£¨±¾µØÍÆÀí£©
+REM   - scripts\run_llm_server.bat ÒÑÆô¶¯£¨App µÄ AI ·şÎñ¶Ë£¬127.0.0.1:8787£©
+REM   App ÀäÆô¶¯»á×Ô¼ºÀ­ /v1/app/config£¬ÎŞĞèÊÖ¹¤Åä provider¡£
 REM
-REM é€€å‡ºï¼šåœ¨ flutter run çª—å£æŒ‰ q æˆ– Ctrl+Cã€‚
+REM ÍË³ö£ºÔÚ flutter run ´°¿Ú°´ q »ò Ctrl+C¡£
 
 setlocal
 
-REM ---- ç¯å¢ƒä¿®è¡¥ ----
+REM ---- »·¾³ĞŞ²¹ ----
 set "PROGRAMFILES(X86)=C:\Program Files (x86)"
 
 set "HTTP_PROXY="
@@ -34,12 +33,12 @@ set "no_proxy=localhost,127.0.0.1,::1"
 
 set "FLUTTER=D:\DevTools\flutter\bin\flutter.bat"
 
-REM ---- åˆ‡åˆ°åº”ç”¨ç›®å½• ----
+REM ---- ÇĞµ½Ó¦ÓÃÄ¿Â¼ ----
 cd /d "%~dp0..\aimindtree_app"
 if errorlevel 1 (
-    echo !!! æ‰¾ä¸åˆ°åº”ç”¨ç›®å½• aimindtree_app
+    echo !!! ÕÒ²»µ½Ó¦ÓÃÄ¿Â¼ aimindtree_app
     exit /b 1
 )
 
-echo === flutter run -d windows --debug  (fast: è·³è¿‡ pub get + é—¨ç¦) ===
+echo === flutter run -d windows --debug  (fast: Ìø¹ı pub get + ÃÅ½û) ===
 call "%FLUTTER%" --no-version-check run -d windows --debug

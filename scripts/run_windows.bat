@@ -1,32 +1,31 @@
 @echo off
-chcp 65001 >nul
-REM ä¸€é”®å¯åŠ¨ AIMindTree Windows æ¡Œé¢åº”ç”¨ã€‚
+REM Ò»¼üÆô¶¯ AIMindTree Windows ×ÀÃæÓ¦ÓÃ¡£
 REM
-REM è¸©è¿‡çš„å‘ï¼ˆéƒ½å®é™…å‘ç”Ÿè¿‡ï¼Œåˆ«åˆ æ³¨é‡Šï¼‰ï¼š
-REM   1) %PROGRAMFILES(X86)% å¯èƒ½ç¼ºå¤± â†’ æ˜¾å¼ set
-REM   2) æœ¬æœºç³»ç»Ÿä»£ç† 127.0.0.1:44166 ä¼šæŠŠ flutter run çš„ VM Service WebSocket
-REM      è¯·æ±‚é€ç»™ä»£ç† â†’ 502 â†’ å¡åœ¨ "Connecting to the VM Service"ï¼ˆApp å…¶å®å·²ç»
-REM      èµ·æ¥äº†ï¼Œé‡è¯• 350 æ¬¡ä¹Ÿä¸é€€ï¼‰ã€‚åªè®¾ NO_PROXY **æ²¡ç”¨**ï¼Œå¿…é¡»æŠŠä»£ç†å˜é‡æ¸…ç©ºã€‚
-REM   3) sqlite3 native assets é¦–æ¬¡ä¼šä» GitHub ä¸‹è½½ â†’ èµ° pub get æµç¨‹
-REM   4) flutter run é»˜è®¤ release æ¨¡å¼ â†’ debug æ¨¡å¼æ›´å‹å¥½ï¼ˆä¿ç•™ hot reloadï¼‰
-REM   5) `flutter analyze` ç”¨ flutter_lintsï¼Œä¼šæŠŠ tool/ ä¸ test/ é‡Œçš„ info çº§ lint
-REM      ç®—æˆå¤±è´¥ï¼ˆå½“å‰ 22 issuesï¼Œå¦‚ depend_on_referenced_packages /
-REM      deprecated_member_use / prefer_interpolation_to_compose_stringsï¼‰ï¼Œ
-REM      äºæ˜¯æ¯æ¬¡å¯åŠ¨éƒ½è¢«æŒ¡ä¸‹ã€‚é¡¹ç›®çœŸæ­£çš„é—¨ç¦æ˜¯ tool/analyze_inproc.dart
-REM      ï¼ˆerror + warning + info å…¨æŸ¥ï¼Œå½“å‰ 74 æ–‡ä»¶ 0/0/0ï¼‰ï¼Œæ‰€ä»¥ç¬¬ 2 æ­¥æ”¹ç”¨å®ƒã€‚
+REM ²È¹ıµÄ¿Ó£¨¶¼Êµ¼Ê·¢Éú¹ı£¬±ğÉ¾×¢ÊÍ£©£º
+REM   1) %PROGRAMFILES(X86)% ¿ÉÄÜÈ±Ê§ ¡ú ÏÔÊ½ set
+REM   2) ±¾»úÏµÍ³´úÀí 127.0.0.1:44166 »á°Ñ flutter run µÄ VM Service WebSocket
+REM      ÇëÇóËÍ¸ø´úÀí ¡ú 502 ¡ú ¿¨ÔÚ "Connecting to the VM Service"£¨App ÆäÊµÒÑ¾­
+REM      ÆğÀ´ÁË£¬ÖØÊÔ 350 ´ÎÒ²²»ÍË£©¡£Ö»Éè NO_PROXY **Ã»ÓÃ**£¬±ØĞë°Ñ´úÀí±äÁ¿Çå¿Õ¡£
+REM   3) sqlite3 native assets Ê×´Î»á´Ó GitHub ÏÂÔØ ¡ú ×ß pub get Á÷³Ì
+REM   4) flutter run Ä¬ÈÏ release Ä£Ê½ ¡ú debug Ä£Ê½¸üÓÑºÃ£¨±£Áô hot reload£©
+REM   5) `flutter analyze` ÓÃ flutter_lints£¬»á°Ñ tool/ Óë test/ ÀïµÄ info ¼¶ lint
+REM      Ëã³ÉÊ§°Ü£¨µ±Ç° 22 issues£¬Èç depend_on_referenced_packages /
+REM      deprecated_member_use / prefer_interpolation_to_compose_strings£©£¬
+REM      ÓÚÊÇÃ¿´ÎÆô¶¯¶¼±»µ²ÏÂ¡£ÏîÄ¿ÕæÕıµÄÃÅ½ûÊÇ tool/analyze_inproc.dart
+REM      £¨error + warning + info È«²é£¬µ±Ç° 74 ÎÄ¼ş 0/0/0£©£¬ËùÒÔµÚ 2 ²½¸ÄÓÃËü¡£
 REM
-REM   scripts\run_windows.bat            å®Œæ•´æµç¨‹ï¼ˆpub get + é—¨ç¦ + runï¼‰
-REM   scripts\run_windows_fast.bat       å¿«é€Ÿå¯åŠ¨ï¼ˆè·³è¿‡ pub get + é—¨ç¦ï¼Œç›´æ¥ runï¼‰
-REM   ï¼ˆä¼  fast å‚æ•°ç­‰ä»·äºè°ƒç”¨å¿«é€Ÿè„šæœ¬ï¼Œä¿ç•™å…¼å®¹ï¼šrun_windows.bat fastï¼‰
+REM   scripts\run_windows.bat            ÍêÕûÁ÷³Ì£¨pub get + ÃÅ½û + run£©
+REM   scripts\run_windows_fast.bat       ¿ìËÙÆô¶¯£¨Ìø¹ı pub get + ÃÅ½û£¬Ö±½Ó run£©
+REM   £¨´« fast ²ÎÊıµÈ¼ÛÓÚµ÷ÓÃ¿ìËÙ½Å±¾£¬±£Áô¼æÈİ£ºrun_windows.bat fast£©
 REM
-REM é€€å‡ºï¼šåœ¨ flutter run çª—å£æŒ‰ q æˆ– Ctrl+Cã€‚
+REM ÍË³ö£ºÔÚ flutter run ´°¿Ú°´ q »ò Ctrl+C¡£
 
 setlocal
 
-REM ---- è§£å†³ #1ï¼šbash ä¸èƒ½ export å¸¦æ‹¬å·å˜é‡ã€‚----
+REM ---- ½â¾ö #1£ºbash ²»ÄÜ export ´øÀ¨ºÅ±äÁ¿¡£----
 set "PROGRAMFILES(X86)=C:\Program Files (x86)"
 
-REM ---- è§£å†³ #2ï¼šæ¸…ç©ºä»£ç† + è®¾ NO_PROXYï¼ˆæ¸…ç©ºæ‰æ˜¯å…³é”®ï¼‰ã€‚----
+REM ---- ½â¾ö #2£ºÇå¿Õ´úÀí + Éè NO_PROXY£¨Çå¿Õ²ÅÊÇ¹Ø¼ü£©¡£----
 set "HTTP_PROXY="
 set "HTTPS_PROXY="
 set "http_proxy="
@@ -37,10 +36,10 @@ set "no_proxy=localhost,127.0.0.1,::1"
 set "FLUTTER=D:\DevTools\flutter\bin\flutter.bat"
 set "DART=D:\DevTools\flutter\bin\cache\dart-sdk\bin\dart.exe"
 
-REM åˆ‡åˆ°åº”ç”¨ç›®å½•ã€‚
+REM ÇĞµ½Ó¦ÓÃÄ¿Â¼¡£
 cd /d "%~dp0..\aimindtree_app"
 if errorlevel 1 (
-    echo !!! æ‰¾ä¸åˆ°åº”ç”¨ç›®å½• aimindtree_app
+    echo !!! ÕÒ²»µ½Ó¦ÓÃÄ¿Â¼ aimindtree_app
     exit /b 1
 )
 
@@ -64,9 +63,9 @@ goto :eof
 
 :fail
 echo.
-echo !!! å¯åŠ¨å‰æ£€æŸ¥å¤±è´¥ï¼Œè¯·çœ‹ä¸Šæ–¹é”™è¯¯ã€‚
-echo     å¸¸è§åŸå› ï¼š
-echo       1) ä¾èµ–ç¼ºå¤±        -^> æ‰‹åŠ¨è·‘ä¸€é flutter pub get
-echo       2) native assets ä¸‹è½½å¤±è´¥ -^> ç¡®è®¤èƒ½è®¿é—® GitHubï¼Œæˆ–é‡è¯•
-echo       3) é—¨ç¦æœ‰ error    -^> æŒ‰ dart tool\analyze_inproc.dart çš„è¾“å‡ºä¿®
+echo !!! Æô¶¯Ç°¼ì²éÊ§°Ü£¬Çë¿´ÉÏ·½´íÎó¡£
+echo     ³£¼ûÔ­Òò£º
+echo       1) ÒÀÀµÈ±Ê§        -^> ÊÖ¶¯ÅÜÒ»±é flutter pub get
+echo       2) native assets ÏÂÔØÊ§°Ü -^> È·ÈÏÄÜ·ÃÎÊ GitHub£¬»òÖØÊÔ
+echo       3) ÃÅ½ûÓĞ error    -^> °´ dart tool\analyze_inproc.dart µÄÊä³öĞŞ
 exit /b 1
