@@ -5,6 +5,8 @@
 /// - **提取知识点 (T1)** —— 一键跑通 T1 流水线。
 library;
 
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
 import '../../ai/extraction_service.dart';
@@ -14,6 +16,7 @@ import '../../data/models/knowledge_point.dart';
 import '../../data/repositories/ai_session_repository.dart';
 import '../../features/teacher/teacher_page.dart';
 import 'markdown_render.dart';
+import 'markdown_toolbar.dart';
 
 class NoteEditorPage extends StatefulWidget {
   const NoteEditorPage({
@@ -36,6 +39,7 @@ class NoteEditorPage extends StatefulWidget {
 class _NoteEditorPageState extends State<NoteEditorPage> {
   final _titleCtrl = TextEditingController();
   final _bodyCtrl = TextEditingController();
+  final _bodyFocus = FocusNode();
   bool _busy = false;
   bool _dirty = false;
   String _status = '';
@@ -50,6 +54,14 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     _titleCtrl.addListener(() => setState(() => _dirty = true));
     _bodyCtrl.addListener(() => setState(() => _dirty = true));
     if (widget.noteId != null) _load();
+  }
+
+  @override
+  void dispose() {
+    _titleCtrl.dispose();
+    _bodyCtrl.dispose();
+    _bodyFocus.dispose();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -94,6 +106,12 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
       ),
     ));
   }
+
+  /// 笔记内嵌图片 `aimindtree-asset://<assetId>` 的字节解析器。
+  ///
+  /// 图片同步链路尚未接线（见后续「图片插入全链路」任务），当前一律返回 `null`
+  /// —— 渲染层会降级成「图片未同步」占位块，保证任何时候整篇笔记都能渲染出来。
+  Future<Uint8List?> _resolveAssetBytes(String assetId) async => null;
 
   Future<String> _save() async {
     final id = _note?.id;
@@ -236,6 +254,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
             ),
           ),
           const Divider(height: 1),
+          MarkdownToolbar(controller: _bodyCtrl, focusNode: _bodyFocus),
           Expanded(
             child: Row(
               children: [
@@ -244,6 +263,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
                     padding: const EdgeInsets.all(8),
                     child: TextField(
                       controller: _bodyCtrl,
+                      focusNode: _bodyFocus,
                       maxLines: null,
                       expands: true,
                       keyboardType: TextInputType.multiline,
@@ -268,10 +288,11 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
                       ),
                       padding: const EdgeInsets.all(8),
                       child: SingleChildScrollView(
-                        child: Text.rich(
-                          TextSpan(
-                            style: const TextStyle(fontSize: 14),
-                            children: renderMarkdown(_bodyCtrl.text),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: renderMarkdownBlocks(
+                            _bodyCtrl.text,
+                            resolveAsset: _resolveAssetBytes,
                           ),
                         ),
                       ),
