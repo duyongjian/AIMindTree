@@ -5,10 +5,14 @@
 /// 2. 每轮 AI 回答后跑一次「检测」：让 AI 从对话中抽两类建议——
 ///    - needed：对话涉及、用户应掌握的知识点；
 ///    - weak：用户明显薄弱 / 混淆 / 答错的知识点。
-///    检测结果是「建议」，**不入库**；只有用户勾选并「加入知识树」时才走 T1 锚定。
-/// 3. 加入知识树：勾选项 → 拼成 Markdown → [ExtractionService.extract]（T1 锚点校验，
-///    剔除无出处的幻觉点）→ [TreeRepository.addPoints] → 共享布局铺开新点。
-///    与 canvas_page 的 _supplementIntoTree 同源逻辑，保证「无原文出处不入库」。
+///    检测结果是「建议」，**不入库**；用户可勾选加入知识树，也可「不添加」。
+/// 3. 加入知识树（D：直连知识点）：检测建议**没有原文出处**，走 T1 锚定必被
+///    整条剔除，因此按「手动知识点」（origin=user_manual，锚点豁免，PRD §4.2）
+///    直建，再幂等并入所选树。**不再先建笔记**；与 canvas_page 共用的
+///    [ExtractIntoTreeChain]（笔记 → T1 路径）保持原样，本页不走。
+/// 4. 会话管理（H）：一个「会话」= 一行 kpId 为空的 ai_session，消息落
+///    ai_messages；标题运行时派生（首条 user 消息 / 时间），重命名写现有
+///    title 列。AI 不可用时历史会话照样能看。
 library;
 
 import 'dart:convert';
@@ -18,8 +22,6 @@ import 'package:flutter/material.dart';
 import '../../ai/ai_job_service.dart' show kAiJobQueueEnabled;
 import '../../ai/ai_task.dart';
 import '../../ai/agent_tools.dart';
-import '../../ai/auto_graph_service.dart';
-import '../../ai/extract_into_tree_chain.dart';
 import '../../ai/extraction_service.dart';
 import '../../canvas/layout_autoplace.dart';
 import '../../core/logger.dart';
@@ -27,6 +29,7 @@ import '../../core/result.dart';
 import '../../data/db/drift_database.dart';
 import '../../data/models/knowledge_point.dart';
 import '../../data/models/knowledge_tree.dart';
+import '../../data/repositories/ai_session_repository.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
 
@@ -69,6 +72,171 @@ class AgentDetectedItem {
   int get hashCode => name.hashCode;
 }
 
+/// D：直连入树结果（建点 / 入树的执行明细，供 UI 精确移除与提示）。
+class DirectAddResult {
+  const DirectAddResult({
+    required this.createdIds,
+    required this.createdNames,
+    required this.addedCount,
+    required this.failures,
+  });
+
+  /// 新建知识点的 id（与 [createdNames] 同序对齐）。
+  final List<String> createdIds;
+
+  /// 新建成功的知识点名（用于从检测列表精确移除成功项）。
+  final List<String> createdNames;
+
+  /// 实际并入树的点数（[TreeRepository.addPoints] 幂等去重后）。
+  final int addedCount;
+
+  /// 创建失败的知识点名（建点抛错 / 名称为空）。
+  final List<String> failures;
+}
+
+/// D：把检测建议**直连**为手动知识点并入树（不建笔记、不走 T1 锚定）。
+///
+/// 为什么直连：检测建议没有原文出处，走 T1 锚定必被整条剔除（无出处不入库），
+/// 所以按 origin=user_manual 直建（锚点豁免，PRD §4.2）。
+/// 抽成模块级函数：agent 页与单测共用同一实现，避免「逻辑藏在 UI 里测不到」。
+Future<DirectAddResult> addDetectedDirectlyToTree({
+  required KnowledgeRepository repo,
+  required TreeRepository trees,
+  required AppDatabase db,
+  required KnowledgeTree tree,
+  required List<AgentDetectedItem> items,
+}) async {
+  final ids = <String>[];
+  final names = <String>[];
+  final failures = <String>[];
+  for (final item in items) {
+    final res = await repo.createManualKnowledgePoint(
+      name: item.name,
+      // needed / weak 都按「概念」直建：检测建议无原文，锚点字段只能留空，
+      // 类型仅作展示分类，统一 concept 最稳（类型可在知识库页再改）。
+      type: KnowledgePointType.concept,
+      definition: item.definition,
+    );
+    res.fold(
+      (kp) {
+        ids.add(kp.id);
+        names.add(item.name);
+      },
+      (e, _) => failures.add(item.name),
+    );
+  }
+  if (ids.isEmpty) {
+    return DirectAddResult(
+      createdIds: const <String>[],
+      createdNames: const <String>[],
+      addedCount: 0,
+      failures: failures,
+    );
+  }
+  final existing = (await trees.memberPointIds(tree.id)).toSet();
+  final newIds = ids.where((id) => !existing.contains(id)).toList();
+  final addRes = await trees.addPoints(tree.id, ids);
+  final added = addRes.valueOrNull ?? 0;
+  // 新并入的点 x/y 默认 0，用布局引擎铺开（与 canvas 页同一函数，避免叠在原点）。
+  if (added > 0 && newIds.isNotEmpty) {
+    await autoPlaceNewPointsInTree(
+      db: db,
+      trees: trees,
+      repo: repo,
+      treeId: tree.id,
+      newIds: newIds,
+    );
+  }
+  return DirectAddResult(
+    createdIds: ids,
+    createdNames: names,
+    addedCount: added,
+    failures: failures,
+  );
+}
+
+/// 会话标题：优先用户在 title 列里的重命名覆盖；否则**运行时派生**——
+/// 首条 user 消息首行（截 24 字），没有再退「新对话」。
+///
+/// ai_sessions 本就带 title 列（tables.dart），重命名直接写该列即可，
+/// **不需要改表结构**；未重命名时该列为空，退回派生标题。
+String deriveSessionTitle({
+  required String storedTitle,
+  required List<ChatMessage> messages,
+}) {
+  final override = storedTitle.trim();
+  if (override.isNotEmpty) return override;
+  for (final m in messages) {
+    if (m.role != 'user') continue;
+    final first = m.content.trim().split('\n').first.trim();
+    if (first.isEmpty) continue;
+    return first.length <= 24 ? first : '${first.substring(0, 24)}…';
+  }
+  return '新对话';
+}
+
+/// 会话列表时间戳（本地时区，MM-dd HH:mm）。
+String fmtSessionTime(DateTime t) {
+  final l = t.toLocal();
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${two(l.month)}-${two(l.day)} ${two(l.hour)}:${two(l.minute)}';
+}
+
+/// 弹一个单行输入框（建树命名 / 会话重命名共用）。
+Future<String?> askNameDialog(
+  BuildContext context, {
+  required String title,
+  required String hint,
+  String initial = '',
+}) async {
+  final c = TextEditingController(text: initial);
+  final name = await showDialog<String>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text(title),
+      content: TextField(
+        controller: c,
+        autofocus: true,
+        decoration: InputDecoration(hintText: hint, isDense: true),
+        onSubmitted: (_) => Navigator.pop(ctx, c.text.trim()),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, c.text.trim()),
+          child: const Text('确定'),
+        ),
+      ],
+    ),
+  );
+  return name;
+}
+
+/// 通用确认框（清空 / 删除会话）。
+Future<bool> confirmDialog(
+  BuildContext context, {
+  required String title,
+  required String message,
+}) async {
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text(title),
+      content: Text(message),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消')),
+        TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('确定')),
+      ],
+    ),
+  );
+  return ok ?? false;
+}
+
 /// 一条对话消息。
 class _Msg {
   const _Msg({required this.role, required this.content});
@@ -77,10 +245,22 @@ class _Msg {
 }
 
 class AgentPage extends StatefulWidget {
-  const AgentPage({super.key, required this.service, required this.db});
+  const AgentPage({
+    super.key,
+    required this.service,
+    required this.db,
+    this.debugSeedDetected,
+  });
 
   final ExtractionService service;
   final AppDatabase db;
+
+  /// 测试注入的初始检测项（仅单测用；生产不传）。
+  ///
+  /// 让 widget 测试能绕过「必须真的聊一轮」直接验证检测面板的
+  /// 收起 / 不添加 / 批量不添加交互。
+  @visibleForTesting
+  final List<AgentDetectedItem>? debugSeedDetected;
 
   @override
   State<AgentPage> createState() => _AgentPageState();
@@ -95,12 +275,21 @@ class _AgentPageState extends State<AgentPage> {
   String? _error;
   String? _conversationId;
 
+  /// H：当前会话行 id（一个「会话」= 一行 ai_session；null = 尚未建）。
+  String? _sessionId;
+
+  /// H：会话仓储（与 main.dart 各自持有实例，底层同一个 AppDatabase）。
+  late final AiSessionRepository _sessions = AiSessionRepository(widget.db);
+
   List<_Msg> _history = const <_Msg>[];
   bool _detecting = false;
 
-  /// 检测到的建议（去重累加，跨多轮）。
+  /// 检测到的建议（去重累加，跨多轮；仅当前会话的内存态，切会话即清空）。
   List<AgentDetectedItem> _detected = const <AgentDetectedItem>[];
   final Set<AgentDetectedItem> _picked = <AgentDetectedItem>{};
+
+  /// G：检测面板是否展开（默认展开；收起只显示标题行）。
+  bool _panelExpanded = true;
 
   /// 目标知识树（对话语境 + 加入落点）。null = 未指定，加入前须先选。
   List<KnowledgeTree> _trees = const <KnowledgeTree>[];
@@ -119,7 +308,9 @@ class _AgentPageState extends State<AgentPage> {
       repo: widget.service.repo,
       trees: widget.service.trees,
     );
+    _detected = widget.debugSeedDetected ?? const <AgentDetectedItem>[];
     _loadTrees();
+    _initSession();
   }
 
   Future<void> _loadTrees() async {
@@ -146,11 +337,132 @@ class _AgentPageState extends State<AgentPage> {
     super.dispose();
   }
 
+  // ===================== H：会话管理 =====================
+
+  /// 进页面：打开最近一次会话；没有则新建。
+  ///
+  /// 纯本地 DB 操作，**AI 不可用时历史照样能看能切**。
+  Future<void> _initSession() async {
+    try {
+      final sessions = await _sessions.listAgentSessions();
+      if (!mounted) return;
+      if (sessions.isEmpty) {
+        // 首次自动建会话只是补一行会话记录：不重置视图态（生产里此刻视图态
+        // 本就是空的，重置与否无差别；保留语义更保守）。
+        await _newSession(resetView: false);
+      } else {
+        await _openSession(sessions.first);
+      }
+    } on Object catch (e) {
+      // 会话初始化失败不阻断问答（_send 里还会兜底建会话）。
+      _log.w('会话初始化失败（不影响问答）：$e');
+    }
+  }
+
+  /// 新建对话（建会话行；[resetView] = 是否同时清空当前视图态）。
+  Future<void> _newSession({bool resetView = true}) async {
+    try {
+      final s = await _sessions.createAgentSession();
+      if (!mounted) return;
+      setState(() {
+        _sessionId = s.id;
+        if (resetView) {
+          _history = const <_Msg>[];
+          _detected = const <AgentDetectedItem>[];
+          _picked.clear();
+          // Dify conversationId 只存内存：换会话即重开（App 重启同样失效，
+          // 历史消息仍可看，见 AiSessionRepository 文档）。
+          _conversationId = null;
+        }
+      });
+    } on Object catch (e) {
+      _log.w('新建会话失败：$e');
+    }
+  }
+
+  /// 切换 / 打开某会话：读消息重建视图（工具回显不入库，只留 user/assistant）。
+  Future<void> _openSession(AiSessionRow row) async {
+    try {
+      final msgs = await _sessions.listMessages(row.id);
+      if (!mounted) return;
+      setState(() {
+        _sessionId = row.id;
+        _history = msgs
+            .where((m) => m.role == 'user' || m.role == 'assistant')
+            .map((m) => _Msg(role: m.role, content: m.content))
+            .toList();
+        _detected = const <AgentDetectedItem>[];
+        _picked.clear();
+        _conversationId = null;
+      });
+    } on Object catch (e) {
+      _log.w('打开会话失败：$e');
+    }
+  }
+
+  /// 当前会话被删 / 清空后重新对齐：还在就重开，没了就取最新或新建。
+  Future<void> _resyncCurrentSession() async {
+    final id = _sessionId;
+    if (id != null) {
+      final sessions = await _sessions.listAgentSessions();
+      if (!mounted) return;
+      final still = sessions.where((s) => s.id == id).toList();
+      if (still.isNotEmpty) {
+        await _openSession(still.first);
+        return;
+      }
+    }
+    final sessions = await _sessions.listAgentSessions();
+    if (!mounted) return;
+    if (sessions.isEmpty) {
+      await _newSession();
+    } else {
+      await _openSession(sessions.first);
+    }
+  }
+
+  /// 发送前确保有会话行（初始化失败时的兜底）。
+  Future<void> _ensureSession() async {
+    if (_sessionId != null) return;
+    final s = await _sessions.createAgentSession();
+    if (!mounted) return;
+    setState(() => _sessionId = s.id);
+  }
+
+  /// 消息落 ai_messages（失败只记日志：持久化是增强，不阻断问答）。
+  Future<void> _persistMessage(String role, String content) async {
+    final id = _sessionId;
+    if (id == null || content.trim().isEmpty) return;
+    try {
+      await _sessions.addMessage(sessionId: id, role: role, content: content);
+    } on Object catch (e) {
+      _log.w('消息持久化失败（$role）：$e');
+    }
+  }
+
+  /// 打开会话管理面板（H：列表 + 切换 / 重命名 / 清空 / 删除 / 新建）。
+  Future<void> _openSessionSheet() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _SessionManagerSheet(
+        sessions: _sessions,
+        currentSessionId: _sessionId,
+        onOpen: _openSession,
+        onNew: () async {
+          await _newSession();
+        },
+        onCurrentMutated: _resyncCurrentSession,
+      ),
+    );
+  }
+
   // ===================== 问答 =====================
 
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _busy) return;
+    await _ensureSession();
     setState(() {
       _busy = true;
       _error = null;
@@ -159,6 +471,7 @@ class _AgentPageState extends State<AgentPage> {
     });
     _input.clear();
     _scrollToEnd();
+    await _persistMessage('user', text);
 
     // 工具循环：每一轮都是一次完整的 T5 问答；整轮输出是合法工具调用 →
     // 就地执行（只读）并把结果并入下一轮；否则即为最终答案。
@@ -261,7 +574,7 @@ class _AgentPageState extends State<AgentPage> {
     return b.toString();
   }
 
-  /// 收尾：落最终答案 + 跑每轮检测。
+  /// 收尾：落最终答案（持久化）+ 跑每轮检测。
   Future<void> _finishWithAnswer(String answer) async {
     if (!mounted) return;
     setState(() {
@@ -270,6 +583,7 @@ class _AgentPageState extends State<AgentPage> {
       _status = '';
     });
     _scrollToEnd();
+    await _persistMessage('assistant', answer);
 
     // 每轮回答后自动检测薄弱点 / 需要的知识点。
     await _runDetection();
@@ -431,12 +745,13 @@ class _AgentPageState extends State<AgentPage> {
     }
   }
 
-  // ===================== 加入知识树（锚定铁律） =====================
+  // ===================== 加入知识树（D：直连知识点） =====================
 
-  /// 加入知识树（B1：T1 入队；T3 连线作为第二段**同锁链式提交**，方案 §11.1）。
+  /// 加入知识树：勾选项 → 直连建 user_manual 知识点 → 幂等并入所选树。
   ///
-  /// 队列路径全程不弹加载框，进度在全局托盘；取消任一段回滚半成品（Q6）；
-  /// 服务不可达 → 复用已存笔记走同步兜底。
+  /// 不再先建笔记 / 不走 T1 锚定：检测建议无原文出处，锚定必被整条剔除
+  /// （PRD §4.2 手动点锚点豁免）。与 canvas_page 共用的 ExtractIntoTreeChain
+  /// 保持原样（那是「笔记 → T1」路径，本页不碰）。
   Future<void> _addToTree() async {
     final chosen = _detected.where((d) => _picked.contains(d)).toList();
     if (chosen.isEmpty) {
@@ -449,156 +764,40 @@ class _AgentPageState extends State<AgentPage> {
       return;
     }
 
-    // 1) 拼成 Markdown 笔记 → T1 锚定（无原文出处的不入库）。
-    final md = chosen.map((i) => i.toMarkdown()).join('\n\n');
-
-    // 同步路径（开关关闭）：原阻塞流程原样保留。
-    if (!kAiJobQueueEnabled) {
-      await _addToTreeSync(tree, md);
-      return;
-    }
-
-    final Note note;
-    try {
-      final (outcome, saved) = await _chain.submit(
-        tree: tree,
-        md: md,
-        label: '提取并加入《${tree.name}》',
-      );
-      note = saved;
-      switch (outcome) {
-        case ChainOutcome.queued:
-          return; // 已入队：进度见托盘（R1）。
-        case ChainOutcome.locked:
-          _toast('「${tree.name}」有 AI 任务正在进行，完成后再试');
-          widget.service.jobs.requestExpandTray();
-          return;
-        case ChainOutcome.serviceDown:
-          _toast('AI 服务连接失败，改用同步处理');
-      }
-    } on Object catch (e) {
-      _toast('保存笔记失败：$e');
-      return;
-    }
-    // 同步兜底：复用已存笔记，不重复存。
-    await _addToTreeSync(tree, md, existingNote: note);
-  }
-
-  /// 「提取 → 入树 → 自动连线」复合链（与 canvas 页共用同一实现）。
-  ExtractIntoTreeChain get _chain => ExtractIntoTreeChain(
-        service: widget.service,
-        auto: _autoGraph,
-        db: widget.db,
-        onRefresh: (_) {
-          if (!mounted) return;
-          setState(() {
-            _detected = _detected.where((d) => !_picked.contains(d)).toList();
-            _picked.clear();
-          });
-        },
-        onMessage: _toast,
-      );
-
-  AutoGraphService get _autoGraph => AutoGraphService(
-        ai: widget.service.ai,
-        repo: widget.service.repo,
-        trees: widget.service.trees,
-      );
-  /// 同步路径（开关关闭 / 服务不可达兜底）：原阻塞流程。
-  Future<void> _addToTreeSync(
-    KnowledgeTree tree,
-    String md, {
-    Note? existingNote,
-  }) async {
-    if (!mounted) return;
-    final progress = ValueNotifier<String>('正在通过 T1 锚定知识点…');
-    await showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        content: Row(
-          children: [
-            const CircularProgressIndicator(),
-            const SizedBox(width: 16),
-            Expanded(
-              child: ValueListenableBuilder<String>(
-                valueListenable: progress,
-                builder: (_, msg, __) => Text('$msg\n并入「${tree.name}」'),
-              ),
-            ),
-          ],
-        ),
-      ),
+    final result = await addDetectedDirectlyToTree(
+      repo: widget.service.repo,
+      trees: widget.service.trees,
+      db: widget.db,
+      tree: tree,
+      items: chosen,
     );
-
-    final ext = existingNote == null
-        ? await widget.service.extract(md)
-        : await ExtractIntoTreeChain.extractWithExistingNote(
-            widget.service, existingNote, md);
     if (!mounted) return;
-    if (ext is Failure<ExtractionSaveResult>) {
-      Navigator.of(context, rootNavigator: true).pop();
-      _toast('T1 锚定失败：${ext.error}');
+
+    // 只移除「建成功」的；失败的留在列表里可重试。
+    final created = result.createdNames.toSet();
+    setState(() {
+      _detected = _detected.where((d) => !created.contains(d.name)).toList();
+      _picked.clear();
+    });
+    if (result.addedCount == 0 && result.createdIds.isEmpty) {
+      _toast('加入失败：${result.failures.join('、')} 创建知识点出错');
       return;
     }
-    final res = (ext as Success<ExtractionSaveResult>).value;
-    final ids = res.saved.map((k) => k.id).toList();
-    if (ids.isEmpty) {
-      Navigator.of(context, rootNavigator: true).pop();
-      _toast('没有可锚定的知识点被收录（${res.rejectedCount} 条因缺少原文出处被剔除）。'
-          '可改用「新建笔记」手动收录。');
-      return;
+    var msg = '已加入「${tree.name}」：${result.addedCount} 个';
+    if (result.failures.isNotEmpty) {
+      msg += '（${result.failures.join('、')} 创建失败）';
     }
-
-    final existing = await widget.service.trees.memberPointIds(tree.id);
-    final newIds = ids.where((id) => !existing.contains(id)).toList();
-    final addRes = await widget.service.trees.addPoints(tree.id, ids);
-    if (!mounted) return;
-    await addRes.fold(
-      (added) async {
-        await autoPlaceNewPointsInTree(
-          db: widget.db,
-          trees: widget.service.trees,
-          repo: widget.service.repo,
-          treeId: tree.id,
-          newIds: newIds,
-        );
-
-        var linkNote = '';
-        final linkRes = await _autoGraph.autoLink(tree.id);
-        linkRes.fold(
-          (r) {
-            if (r.created > 0) {
-              linkNote = '；已自动建立 ${r.created} 条前置关系';
-            }
-          },
-          (e, _) {
-            linkNote = '（自动连线未完成：$e，可稍后手动点「自动连线」）';
-          },
-        );
-
-        if (!mounted) return;
-        Navigator.of(context, rootNavigator: true).pop();
-        setState(() {
-          _detected = _detected.where((d) => !_picked.contains(d)).toList();
-          _picked.clear();
-        });
-        _toast('已加入「${tree.name}」：$added 个知识点'
-            '${res.rejectedCount > 0 ? '（${res.rejectedCount} 条无出处未入库）' : ''}'
-            '$linkNote');
-      },
-      (e, _) {
-        if (!mounted) return;
-        Navigator.of(context, rootNavigator: true).pop();
-        _toast('并入失败：$e');
-      },
-    );
+    _toast(msg);
   }
 
   // ===================== 目标树选择 =====================
 
   Future<KnowledgeTree?> _createTreeInline() async {
-    final name = await _askName('新建知识树', '给这棵树起个名字', '');
+    final name = await askNameDialog(
+      context,
+      title: '新建知识树',
+      hint: '给这棵树起个名字',
+    );
     if (name == null || name.trim().isEmpty) return null;
     final res = await widget.service.trees.createTree(name.trim());
     if (!mounted) return null;
@@ -662,6 +861,14 @@ class _AgentPageState extends State<AgentPage> {
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(
           title: const Text('AI 助手'),
+          actions: [
+            // H：会话管理入口（历史列表 + 切换 / 重命名 / 清空 / 删除 / 新建）。
+            IconButton(
+              tooltip: '会话',
+              icon: const Icon(Icons.history),
+              onPressed: _openSessionSheet,
+            ),
+          ],
           bottom: _activeTree == null
               ? null
               : PreferredSize(
@@ -691,7 +898,7 @@ class _AgentPageState extends State<AgentPage> {
                           _error == null
                               ? '和 AI 助手聊一聊你的学习。每轮回答后，'
                                   '它会标出你「需要的知识点」和「薄弱点」，\n'
-                                  '勾选后即可一键加入指定知识树（经 T1 锚定，无出处不入库）。'
+                                  '勾选后即可一键加入指定知识树。'
                               : '错误：$_error',
                           style: const TextStyle(color: Colors.grey),
                           textAlign: TextAlign.center,
@@ -724,73 +931,122 @@ class _AgentPageState extends State<AgentPage> {
   Widget _buildDetectPanel() {
     final needed = _detected.where((d) => !d.weak).toList();
     final weak = _detected.where((d) => d.weak).toList();
+    final expanded = _panelExpanded;
+    // Container 只画边框，背景色交给内层 Material：ListTile（勾选行）的墨水
+    // 反馈需要就近的 Material 祖先，直接给带底色的 Container 会触发
+    // 「ListTile background color or ink splashes may be invisible」断言。
     return Container(
       constraints: const BoxConstraints(maxHeight: 260),
       decoration: BoxDecoration(
         border: Border(top: BorderSide(color: Colors.grey.shade300)),
-        color: Colors.grey.shade50,
       ),
-      child: Column(
+      child: Material(
+        color: Colors.grey.shade50,
+        child: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
-            child: Row(
-              children: [
-                Icon(Icons.auto_awesome_outlined,
-                    size: 16, color: Colors.teal),
-                const SizedBox(width: 6),
-                Text('检测到的知识点（${_detected.length}）',
-                    style: const TextStyle(fontWeight: FontWeight.bold)),
-                const Spacer(),
-                if (_detecting)
-                  const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                else
-                  TextButton(
-                    onPressed: _runDetection,
-                    child: const Text('重新分析'),
+          // G：头部整行可点，收起 / 展开（收起只显示标题）。
+          InkWell(
+            onTap: () => setState(() => _panelExpanded = !expanded),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
+              child: Row(
+                children: [
+                  Icon(
+                    expanded ? Icons.expand_less : Icons.expand_more,
+                    size: 18,
+                    color: Colors.grey,
                   ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              children: [
-                if (weak.isNotEmpty) ...[
-                  const _SectionLabel(text: '薄弱点（应重点补）', weak: true),
-                  for (final d in weak) _DetectTile(item: d, picked: _picked, onTap: _toggle),
+                  Icon(Icons.auto_awesome_outlined,
+                      size: 16, color: Colors.teal),
+                  const SizedBox(width: 6),
+                  Text('检测到的知识点（${_detected.length}）',
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                  const Spacer(),
+                  if (_detecting)
+                    const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  else
+                    TextButton(
+                      onPressed: _runDetection,
+                      child: const Text('重新分析'),
+                    ),
                 ],
-                if (needed.isNotEmpty) ...[
-                  const _SectionLabel(text: '需要的知识点', weak: false),
-                  for (final d in needed) _DetectTile(item: d, picked: _picked, onTap: _toggle),
+              ),
+            ),
+          ),
+          if (expanded) ...[
+            // G：批量「不添加」（仅从本地检测列表移除，不入库、不持久化）。
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
+              child: Row(
+                children: [
+                  TextButton.icon(
+                    onPressed: _picked.isEmpty ? null : _removePickedDetected,
+                    icon: const Icon(Icons.playlist_remove, size: 16),
+                    label: Text('批量不添加（${_picked.length}）'),
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton.icon(
+                    onPressed: _removeAllDetected,
+                    icon: const Icon(Icons.clear_all, size: 16),
+                    label: const Text('全不添加'),
+                  ),
                 ],
-              ],
+              ),
             ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-            child: Row(
-              children: [
-                const Icon(Icons.account_tree_outlined, size: 18, color: Colors.grey),
-                const SizedBox(width: 8),
-                const Text('并入：', style: TextStyle(fontSize: 13)),
-                Expanded(child: _buildTreePicker()),
-                const SizedBox(width: 8),
-                ElevatedButton.icon(
-                  icon: const Icon(Icons.add),
-                  onPressed: _picked.isEmpty || _activeTree == null
-                      ? null
-                      : _addToTree,
-                  label: Text('加入（${_picked.length}）'),
-                ),
-              ],
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                children: [
+                  if (weak.isNotEmpty) ...[
+                    const _SectionLabel(text: '薄弱点（应重点补）', weak: true),
+                    for (final d in weak)
+                      _DetectTile(
+                        item: d,
+                        picked: _picked,
+                        onTap: _toggle,
+                        onRemove: _removeDetected,
+                      ),
+                  ],
+                  if (needed.isNotEmpty) ...[
+                    const _SectionLabel(text: '需要的知识点', weak: false),
+                    for (final d in needed)
+                      _DetectTile(
+                        item: d,
+                        picked: _picked,
+                        onTap: _toggle,
+                        onRemove: _removeDetected,
+                      ),
+                  ],
+                ],
+              ),
             ),
-          ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              child: Row(
+                children: [
+                  const Icon(Icons.account_tree_outlined,
+                      size: 18, color: Colors.grey),
+                  const SizedBox(width: 8),
+                  const Text('并入：', style: TextStyle(fontSize: 13)),
+                  Expanded(child: _buildTreePicker()),
+                  const SizedBox(width: 8),
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.add),
+                    onPressed: _picked.isEmpty || _activeTree == null
+                        ? null
+                        : _addToTree,
+                    label: Text('加入（${_picked.length}）'),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
+        ),
       ),
     );
   }
@@ -802,6 +1058,30 @@ class _AgentPageState extends State<AgentPage> {
       } else {
         _picked.add(item);
       }
+    });
+  }
+
+  /// G：单条「不添加」——仅从本地检测列表移除（不入库、不持久化）。
+  void _removeDetected(AgentDetectedItem item) {
+    setState(() {
+      _detected = _detected.where((d) => d.name != item.name).toList();
+      _picked.remove(item);
+    });
+  }
+
+  /// G：批量不添加（对勾选项）——从本地检测列表移除已选项。
+  void _removePickedDetected() {
+    setState(() {
+      _detected = _detected.where((d) => !_picked.contains(d)).toList();
+      _picked.clear();
+    });
+  }
+
+  /// G：全不添加——清空整个本地检测列表。
+  void _removeAllDetected() {
+    setState(() {
+      _detected = const <AgentDetectedItem>[];
+      _picked.clear();
     });
   }
 
@@ -858,30 +1138,6 @@ class _AgentPageState extends State<AgentPage> {
       );
 
   // ===================== 工具 =====================
-
-  Future<String?> _askName(String title, String hint, String initial) async {
-    final c = TextEditingController(text: initial);
-    final name = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(title),
-        content: TextField(
-          controller: c,
-          autofocus: true,
-          decoration: InputDecoration(hintText: hint, isDense: true),
-          onSubmitted: (_) => Navigator.pop(ctx, c.text.trim()),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, c.text.trim()),
-            child: const Text('确定'),
-          ),
-        ],
-      ),
-    );
-    return name;
-  }
 
   void _toast(String msg) {
     if (!mounted) return;
@@ -942,16 +1198,20 @@ class _Bubble extends StatelessWidget {
   }
 }
 
-/// 检测项（可勾选）。
+/// 检测项（可勾选 + 行尾「不添加」）。
 class _DetectTile extends StatelessWidget {
   const _DetectTile({
     required this.item,
     required this.picked,
     required this.onTap,
+    required this.onRemove,
   });
   final AgentDetectedItem item;
   final Set<AgentDetectedItem> picked;
   final ValueChanged<AgentDetectedItem> onTap;
+
+  /// G：「不添加」——仅从本地检测列表移除（不入库、不持久化）。
+  final ValueChanged<AgentDetectedItem> onRemove;
 
   @override
   Widget build(BuildContext context) => CheckboxListTile(
@@ -962,9 +1222,11 @@ class _DetectTile extends StatelessWidget {
         title: Row(
           children: [
             if (item.weak)
-              const Icon(Icons.warning_amber_rounded, size: 14, color: Colors.orange)
+              const Icon(Icons.warning_amber_rounded,
+                  size: 14, color: Colors.orange)
             else
-              const Icon(Icons.lightbulb_outline, size: 14, color: Colors.teal),
+              const Icon(Icons.lightbulb_outline,
+                  size: 14, color: Colors.teal),
             const SizedBox(width: 6),
             Expanded(
               child: Text(item.name,
@@ -974,8 +1236,16 @@ class _DetectTile extends StatelessWidget {
         ),
         subtitle: item.reason.isNotEmpty
             ? Text(item.reason,
-                maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12))
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 12))
             : null,
+        secondary: IconButton(
+          icon: const Icon(Icons.close, size: 16),
+          tooltip: '不添加',
+          visualDensity: VisualDensity.compact,
+          onPressed: () => onRemove(item),
+        ),
         dense: true,
       );
 }
@@ -998,4 +1268,160 @@ class _SectionLabel extends StatelessWidget {
           ),
         ),
       );
+}
+
+/// H：会话管理面板（历史列表 + 切换 / 重命名 / 清空 / 删除 / 新建）。
+///
+/// 标题：优先 title 列里的重命名覆盖，否则运行时派生（见 [deriveSessionTitle]）。
+/// 所有动作走 [AiSessionRepository]，软删铁律（读过滤 deleted_at isNull）。
+class _SessionManagerSheet extends StatefulWidget {
+  const _SessionManagerSheet({
+    required this.sessions,
+    required this.currentSessionId,
+    required this.onOpen,
+    required this.onNew,
+    required this.onCurrentMutated,
+  });
+
+  final AiSessionRepository sessions;
+  final String? currentSessionId;
+
+  /// 切换 / 打开某会话（页面负责重建视图）。
+  final Future<void> Function(AiSessionRow row) onOpen;
+
+  /// 新建对话。
+  final Future<void> Function() onNew;
+
+  /// 当前会话被删 / 被清空后，页面重新对齐当前会话。
+  final Future<void> Function() onCurrentMutated;
+
+  @override
+  State<_SessionManagerSheet> createState() => _SessionManagerSheetState();
+}
+
+class _SessionManagerSheetState extends State<_SessionManagerSheet> {
+  /// 自增 revision：任何变更后 +1，FutureBuilder 据此重新拉列表。
+  int _revision = 0;
+
+  Future<void> _refresh() async {
+    if (!mounted) return;
+    setState(() => _revision++);
+  }
+
+  /// 拉「会话行 + 消息」对（消息用于派生标题与条数；会话量小，逐条查可接受）。
+  Future<List<(AiSessionRow, List<ChatMessage>)>> _load() async {
+    final rows = await widget.sessions.listAgentSessions();
+    final out = <(AiSessionRow, List<ChatMessage>)>[];
+    for (final r in rows) {
+      out.add((r, await widget.sessions.listMessages(r.id)));
+    }
+    return out;
+  }
+
+  Future<void> _onMenu(
+      String action, AiSessionRow row, List<ChatMessage> msgs) async {
+    switch (action) {
+      case 'rename':
+        final name = await askNameDialog(
+          context,
+          title: '重命名会话',
+          hint: '给会话起个名字',
+          initial: deriveSessionTitle(storedTitle: row.title, messages: msgs),
+        );
+        if (name == null || name.trim().isEmpty) return;
+        await widget.sessions.renameSession(row.id, name.trim());
+        await _refresh();
+      case 'clear':
+        final ok = await confirmDialog(
+          context,
+          title: '清空该会话的消息？',
+          message: '会话会保留，消息不可恢复。',
+        );
+        if (!ok) return;
+        await widget.sessions.clearMessages(row.id);
+        await widget.onCurrentMutated();
+        await _refresh();
+      case 'delete':
+        final ok = await confirmDialog(
+          context,
+          title: '删除该会话？',
+          message: '连同消息一起删除，不可恢复。',
+        );
+        if (!ok) return;
+        await widget.sessions.deleteSession(row.id);
+        await widget.onCurrentMutated();
+        await _refresh();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: SizedBox(
+        height: MediaQuery.sizeOf(context).height * 0.7,
+        child: Column(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.add_comment_outlined),
+              title: const Text('新建对话'),
+              onTap: () async {
+                Navigator.pop(context);
+                await widget.onNew();
+              },
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: FutureBuilder<List<(AiSessionRow, List<ChatMessage>)>>(
+                key: ValueKey<int>(_revision),
+                future: _load(),
+                builder: (context, snap) {
+                  if (snap.connectionState != ConnectionState.done) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  final list = snap.data ?? const <(AiSessionRow, List<ChatMessage>)>[];
+                  if (list.isEmpty) {
+                    return const Center(child: Text('还没有历史会话'));
+                  }
+                  return ListView.builder(
+                    itemCount: list.length,
+                    itemBuilder: (_, i) {
+                      final (row, msgs) = list[i];
+                      final title = deriveSessionTitle(
+                        storedTitle: row.title,
+                        messages: msgs,
+                      );
+                      final current = row.id == widget.currentSessionId;
+                      return ListTile(
+                        selected: current,
+                        leading: Icon(current
+                            ? Icons.chat_bubble
+                            : Icons.chat_bubble_outline),
+                        title: Text(title,
+                            maxLines: 1, overflow: TextOverflow.ellipsis),
+                        subtitle: Text(
+                            '${fmtSessionTime(row.updatedAt)} · ${msgs.length} 条消息'),
+                        trailing: PopupMenuButton<String>(
+                          tooltip: '会话操作',
+                          onSelected: (v) => _onMenu(v, row, msgs),
+                          itemBuilder: (_) => const [
+                            PopupMenuItem(value: 'rename', child: Text('重命名')),
+                            PopupMenuItem(value: 'clear', child: Text('清空消息')),
+                            PopupMenuItem(value: 'delete', child: Text('删除会话')),
+                          ],
+                        ),
+                        onTap: () async {
+                          Navigator.pop(context);
+                          await widget.onOpen(row);
+                        },
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
