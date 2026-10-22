@@ -4479,9 +4479,7 @@ class $CanvasNodesTable extends CanvasNodes
     ),
     defaultValue: const Constant(false),
   );
-  static const VerificationMeta _pinnedMeta = const VerificationMeta(
-    'pinned',
-  );
+  static const VerificationMeta _pinnedMeta = const VerificationMeta('pinned');
   @override
   late final GeneratedColumn<bool> pinned = GeneratedColumn<bool>(
     'pinned',
@@ -4494,7 +4492,6 @@ class $CanvasNodesTable extends CanvasNodes
     ),
     defaultValue: const Constant(true),
   );
-
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -4596,6 +4593,12 @@ class $CanvasNodesTable extends CanvasNodes
     }
     if (data.containsKey('z')) {
       context.handle(_zMeta, z.isAcceptableOrUnknown(data['z']!, _zMeta));
+    }
+    if (data.containsKey('collapsed')) {
+      context.handle(
+        _collapsedMeta,
+        collapsed.isAcceptableOrUnknown(data['collapsed']!, _collapsedMeta),
+      );
     }
     if (data.containsKey('pinned')) {
       context.handle(
@@ -4705,6 +4708,10 @@ class CanvasNodeRow extends DataClass implements Insertable<CanvasNodeRow> {
   final double h;
   final int z;
   final bool collapsed;
+
+  /// 是否锁定：true = 用户拖过 / 已固化，结构变化（增删边）的自动重排**不**移动它；
+  /// false = 浮动节点，结构变化时由布局引擎自动重新铺位。
+  /// 默认 true（历史数据 + 手动固化都按「已锁定」处理，除非显式置 false）。
   final bool pinned;
   const CanvasNodeRow({
     required this.id,
@@ -4884,7 +4891,7 @@ class CanvasNodeRow extends DataClass implements Insertable<CanvasNodeRow> {
           ..write('w: $w, ')
           ..write('h: $h, ')
           ..write('z: $z, ')
-          ..write('collapsed: $collapsed')
+          ..write('collapsed: $collapsed, ')
           ..write('pinned: $pinned')
           ..write(')'))
         .toString();
@@ -6396,9 +6403,7 @@ class $HomeworksTable extends Homeworks
   final GeneratedDatabase attachedDatabase;
   final String? _alias;
   $HomeworksTable(this.attachedDatabase, [this._alias]);
-  static const VerificationMeta _idMeta = const VerificationMeta(
-    'id',
-  );
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
   @override
   late final GeneratedColumn<String> id = GeneratedColumn<String>(
     'id',
@@ -6463,9 +6468,7 @@ class $HomeworksTable extends Homeworks
     type: DriftSqlType.string,
     requiredDuringInsert: true,
   );
-  static const VerificationMeta _titleMeta = const VerificationMeta(
-    'title',
-  );
+  static const VerificationMeta _titleMeta = const VerificationMeta('title');
   @override
   late final GeneratedColumn<String> title = GeneratedColumn<String>(
     'title',
@@ -6524,10 +6527,7 @@ class $HomeworksTable extends Homeworks
     final context = VerificationContext();
     final data = instance.toColumns(true);
     if (data.containsKey('id')) {
-      context.handle(
-        _idMeta,
-        id.isAcceptableOrUnknown(data['id']!, _idMeta),
-      );
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
     } else if (isInserting) {
       context.missing(_idMeta);
     }
@@ -6645,7 +6645,6 @@ class HomeworkRow extends DataClass implements Insertable<HomeworkRow> {
 
   /// 本地递增版本号，服务端接管后用于 LWW 冲突判定。
   final int version;
-
   final DateTime updatedAt;
 
   /// 产生该次变更的设备，用于同步自回声过滤。
@@ -6660,12 +6659,11 @@ class HomeworkRow extends DataClass implements Insertable<HomeworkRow> {
   /// 作业标题。
   final String title;
 
-  /// 布置时选中的薄弱点 id（快照）。
+  /// 布置时选中的薄弱点 id（快照：日后知识点改名不影响历史作业的可读性）。
   final String kpIdsJson;
 
-  /// 题目 JSON。
+  /// 题目 JSON：`[{"kpId","kpName","type","question","answer","difficulty"}]`。
   final String itemsJson;
-
   const HomeworkRow({
     required this.id,
     required this.version,
@@ -6855,8 +6853,7 @@ class HomeworksCompanion extends UpdateCompanion<HomeworkRow> {
     this.kpIdsJson = const Value.absent(),
     this.itemsJson = const Value.absent(),
     this.rowid = const Value.absent(),
-  }) :
-       id = Value(id),
+  }) : id = Value(id),
        updatedAt = Value(updatedAt),
        deviceId = Value(deviceId),
        canvasId = Value(canvasId);
@@ -8584,9 +8581,11 @@ class AiProviderRow extends DataClass implements Insertable<AiProviderRow> {
   final String name;
 
   /// 厂商类型：openai/anthropic/ollama/dify/minimax/local。
+  /// llm_server 场景复用为 backend 名（auto/ollama/minimax/openai_compat）。
+  /// ⚠️ 表结构不可改（Drift 依赖 build_runner 生成 .g.dart）；此处只加注释。
   final String type;
 
-  /// 端点协议：openai / anthropic / dify（三协议）。
+  /// 端点协议：openai / anthropic / dify（已停用）/ llm_server。
   final String protocol;
   final String baseUrl;
 
@@ -8594,6 +8593,7 @@ class AiProviderRow extends DataClass implements Insertable<AiProviderRow> {
   final String apiKeyRef;
 
   /// 可选模型列表 JSON。
+  /// llm_server 场景：JSON 数组，最多 1 个元素 = model 覆盖，`[]` = 用后端默认。
   final String models;
   final bool isDefault;
   final bool enabled;
@@ -12202,6 +12202,11 @@ class $$CanvasNodesTableFilterComposer
     column: $table.collapsed,
     builder: (column) => ColumnFilters(column),
   );
+
+  ColumnFilters<bool> get pinned => $composableBuilder(
+    column: $table.pinned,
+    builder: (column) => ColumnFilters(column),
+  );
 }
 
 class $$CanvasNodesTableOrderingComposer
@@ -12282,6 +12287,11 @@ class $$CanvasNodesTableOrderingComposer
     column: $table.collapsed,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<bool> get pinned => $composableBuilder(
+    column: $table.pinned,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$CanvasNodesTableAnnotationComposer
@@ -12336,6 +12346,9 @@ class $$CanvasNodesTableAnnotationComposer
 
   GeneratedColumn<bool> get collapsed =>
       $composableBuilder(column: $table.collapsed, builder: (column) => column);
+
+  GeneratedColumn<bool> get pinned =>
+      $composableBuilder(column: $table.pinned, builder: (column) => column);
 }
 
 class $$CanvasNodesTableTableManager
@@ -13084,6 +13097,289 @@ typedef $$KpGroupsTableProcessedTableManager =
       $$KpGroupsTableUpdateCompanionBuilder,
       (KpGroupRow, BaseReferences<_$AppDatabase, $KpGroupsTable, KpGroupRow>),
       KpGroupRow,
+      PrefetchHooks Function()
+    >;
+typedef $$HomeworksTableCreateCompanionBuilder = HomeworksCompanion Function({
+  required String id,
+  Value<int> version,
+  required DateTime updatedAt,
+  required String deviceId,
+  Value<DateTime?> deletedAt,
+  required String canvasId,
+  Value<String> title,
+  Value<String> kpIdsJson,
+  Value<String> itemsJson,
+  Value<int> rowid,
+});
+typedef $$HomeworksTableUpdateCompanionBuilder = HomeworksCompanion Function({
+  Value<String> id,
+  Value<int> version,
+  Value<DateTime> updatedAt,
+  Value<String> deviceId,
+  Value<DateTime?> deletedAt,
+  Value<String> canvasId,
+  Value<String> title,
+  Value<String> kpIdsJson,
+  Value<String> itemsJson,
+  Value<int> rowid,
+});
+
+class $$HomeworksTableFilterComposer
+    extends Composer<_$AppDatabase, $HomeworksTable> {
+  $$HomeworksTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get version => $composableBuilder(
+    column: $table.version,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get deviceId => $composableBuilder(
+    column: $table.deviceId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get deletedAt => $composableBuilder(
+    column: $table.deletedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get canvasId => $composableBuilder(
+    column: $table.canvasId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get title => $composableBuilder(
+    column: $table.title,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get kpIdsJson => $composableBuilder(
+    column: $table.kpIdsJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get itemsJson => $composableBuilder(
+    column: $table.itemsJson,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$HomeworksTableOrderingComposer
+    extends Composer<_$AppDatabase, $HomeworksTable> {
+  $$HomeworksTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get version => $composableBuilder(
+    column: $table.version,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get deviceId => $composableBuilder(
+    column: $table.deviceId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get deletedAt => $composableBuilder(
+    column: $table.deletedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get canvasId => $composableBuilder(
+    column: $table.canvasId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get title => $composableBuilder(
+    column: $table.title,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get kpIdsJson => $composableBuilder(
+    column: $table.kpIdsJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get itemsJson => $composableBuilder(
+    column: $table.itemsJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$HomeworksTableAnnotationComposer
+    extends Composer<_$AppDatabase, $HomeworksTable> {
+  $$HomeworksTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<int> get version =>
+      $composableBuilder(column: $table.version, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get deviceId =>
+      $composableBuilder(column: $table.deviceId, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get deletedAt =>
+      $composableBuilder(column: $table.deletedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get canvasId =>
+      $composableBuilder(column: $table.canvasId, builder: (column) => column);
+
+  GeneratedColumn<String> get title =>
+      $composableBuilder(column: $table.title, builder: (column) => column);
+
+  GeneratedColumn<String> get kpIdsJson =>
+      $composableBuilder(column: $table.kpIdsJson, builder: (column) => column);
+
+  GeneratedColumn<String> get itemsJson =>
+      $composableBuilder(column: $table.itemsJson, builder: (column) => column);
+}
+
+class $$HomeworksTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $HomeworksTable,
+          HomeworkRow,
+          $$HomeworksTableFilterComposer,
+          $$HomeworksTableOrderingComposer,
+          $$HomeworksTableAnnotationComposer,
+          $$HomeworksTableCreateCompanionBuilder,
+          $$HomeworksTableUpdateCompanionBuilder,
+          (
+            HomeworkRow,
+            BaseReferences<_$AppDatabase, $HomeworksTable, HomeworkRow>,
+          ),
+          HomeworkRow,
+          PrefetchHooks Function()
+        > {
+  $$HomeworksTableTableManager(_$AppDatabase db, $HomeworksTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$HomeworksTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$HomeworksTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$HomeworksTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<int> version = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<String> deviceId = const Value.absent(),
+                Value<DateTime?> deletedAt = const Value.absent(),
+                Value<String> canvasId = const Value.absent(),
+                Value<String> title = const Value.absent(),
+                Value<String> kpIdsJson = const Value.absent(),
+                Value<String> itemsJson = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => HomeworksCompanion(
+                id: id,
+                version: version,
+                updatedAt: updatedAt,
+                deviceId: deviceId,
+                deletedAt: deletedAt,
+                canvasId: canvasId,
+                title: title,
+                kpIdsJson: kpIdsJson,
+                itemsJson: itemsJson,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                Value<int> version = const Value.absent(),
+                required DateTime updatedAt,
+                required String deviceId,
+                Value<DateTime?> deletedAt = const Value.absent(),
+                required String canvasId,
+                Value<String> title = const Value.absent(),
+                Value<String> kpIdsJson = const Value.absent(),
+                Value<String> itemsJson = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => HomeworksCompanion.insert(
+                id: id,
+                version: version,
+                updatedAt: updatedAt,
+                deviceId: deviceId,
+                deletedAt: deletedAt,
+                canvasId: canvasId,
+                title: title,
+                kpIdsJson: kpIdsJson,
+                itemsJson: itemsJson,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$HomeworksTable, HomeworkRow>(table),
+                  BaseReferences<_$AppDatabase, $HomeworksTable, HomeworkRow>(
+                    db,
+                    table,
+                    e,
+                  ),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$HomeworksTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $HomeworksTable,
+      HomeworkRow,
+      $$HomeworksTableFilterComposer,
+      $$HomeworksTableOrderingComposer,
+      $$HomeworksTableAnnotationComposer,
+      $$HomeworksTableCreateCompanionBuilder,
+      $$HomeworksTableUpdateCompanionBuilder,
+      (
+        HomeworkRow,
+        BaseReferences<_$AppDatabase, $HomeworksTable, HomeworkRow>,
+      ),
+      HomeworkRow,
       PrefetchHooks Function()
     >;
 typedef $$AiSessionsTableCreateCompanionBuilder = AiSessionsCompanion Function({
@@ -14579,6 +14875,8 @@ class $AppDatabaseManager {
       $$CanvasEdgesTableTableManager(_db, _db.canvasEdges);
   $$KpGroupsTableTableManager get kpGroups =>
       $$KpGroupsTableTableManager(_db, _db.kpGroups);
+  $$HomeworksTableTableManager get homeworks =>
+      $$HomeworksTableTableManager(_db, _db.homeworks);
   $$AiSessionsTableTableManager get aiSessions =>
       $$AiSessionsTableTableManager(_db, _db.aiSessions);
   $$AiMessagesTableTableManager get aiMessages =>
