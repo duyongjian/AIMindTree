@@ -149,12 +149,12 @@ void main() {
       expect(_visibleNames(tester), <String>['新点', '中点', '旧点']);
 
       // 点排序图标 → 切换为升序。
-      await tester.tap(find.byTooltip('更新时间降序（最近改动在上）'));
+      await tester.tap(find.byTooltip('更新时间降序（最新在上）'));
       await tester.pumpAndSettle();
       expect(_visibleNames(tester), <String>['旧点', '中点', '新点']);
 
       // 再点 → 切回降序。
-      await tester.tap(find.byTooltip('更新时间升序（最早改动在上）'));
+      await tester.tap(find.byTooltip('更新时间升序（最早在上）'));
       await tester.pumpAndSettle();
       expect(_visibleNames(tester), <String>['新点', '中点', '旧点']);
     });
@@ -187,8 +187,12 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('已选 1 个'), findsOneWidget);
-      // 预选的那条 Checkbox 为选中态。
-      final checkbox = tester.widget<Checkbox>(find.byType(Checkbox).first);
+      // 预选的那条 Checkbox 为选中态（按条目定位：同秒创建的知识点
+      // 会按名称决胜排序，不能假设它在列表第一位）。
+      final checkbox = tester.widget<Checkbox>(find.descendant(
+        of: find.widgetWithText(ListTile, '长按点'),
+        matching: find.byType(Checkbox),
+      ));
       expect(checkbox.value, isTrue);
     });
 

@@ -1,11 +1,18 @@
 /// 知识点管理页（P1-1）。
 ///
-/// 全量列表（默认更新时间倒序）+ 搜索 + 筛选（类型 / 来源 / 掌握状态）。
-/// 点条目 → 进入该知识点的老师模式页（讲解 + 追问，复用 [TeacherPage]）。
+/// 全量列表（默认更新时间倒序）+ 搜索 + 筛选（类型 / 来源 / 掌握状态 / 分组）。
+/// 点条目 → 进入该知识点的老师模式页（讲解 + 追问，复用 [TeacherPage])。
 /// 顶部「+」手动新建（名称必填；类型、定义、可选关联笔记）。
-/// 条目菜单：编辑 / 加入知识树 / 追问 / 删除（影响面预览）。
-/// 多选批量删除：AppBar 图标或长按条目进入多选态，全选 +「删除(N)」批量
-/// 软删（墓碑，进回收站可恢复）。
+/// 条目菜单：置顶 / 设置分组 / 编辑 / 加入知识树 / 追问 / 删除（影响面预览）。
+/// 多选批量：AppBar 图标或长按条目进入多选态，全选 +「删除(N)」批量
+/// 软删（墓碑，进回收站可恢复）+「归组」批量调整分组归属。
+///
+/// 分组（全局作用域）：chips 行筛选（全部 / 各组 / 未分组）+「分组管理」
+/// 面板（新建 / 重命名 / 删除）。**分组只在知识点界面出现**，不进知识树
+/// 画布（架构定稿 2026-10-22）。
+///
+/// 排序（[compareKp]）：置顶 > 选定时间字段（更新时间 / 创建时间，升 / 降序
+/// 可切）> 名称。
 ///
 /// 数据铁律：列表只读 `allKnowledgePoints()`（已过滤软删）；删除走
 /// [KnowledgeRepository.softDeleteKnowledgePoint]（墓碑，见 PRD §4.1）。
@@ -18,8 +25,12 @@ import '../../core/result.dart';
 import '../../data/db/drift_database.dart';
 import '../../data/models/knowledge_point.dart';
 import '../../data/models/knowledge_tree.dart';
+import '../../data/models/kp_group.dart';
+import '../../data/repositories/group_repository.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
+import 'kp_group_manage_sheet.dart';
+import 'kp_sort.dart';
 import 'knowledge_recycle_bin_page.dart';
 
 class KnowledgeManagePage extends StatefulWidget {
@@ -43,10 +54,22 @@ class KnowledgeManagePage extends StatefulWidget {
 class KnowledgeManagePageState extends State<KnowledgeManagePage> {
   KnowledgeRepository get _repo => widget.service.repo;
   TreeRepository get _trees => widget.service.trees;
+  GroupRepository get _groupRepo => widget.service.groups;
 
   List<KnowledgePoint> _all = <KnowledgePoint>[];
   final Map<String, MasteryStatus> _mastery = <String, MasteryStatus>{};
   final Map<String, String> _noteTitles = <String, String>{};
+
+  // ============ 分组（全局作用域） ============
+  /// 全部全局组（按组序升序，`listGlobalGroups` 已过滤软删）。
+  List<KpGroup> _kpGroups = <KpGroup>[];
+
+  /// kpId → 所属组 id（一个知识点可能残留在多个组的 members_json 里，
+  /// 展示口径归到**组序最前**的组；未分组 = map 里没有）。
+  final Map<String, String> _kpGroupOf = <String, String>{};
+
+  /// 分组筛选：null = 全部分组；'' = 未分组；否则组 id。
+  String? _groupFilter;
 
   // 搜索与筛选
   final _queryCtrl = TextEditingController();
@@ -55,8 +78,9 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
   String _originFilter = 'all'; // all | ai | manual | no_note
   MasteryStatus? _masteryFilter; // null = 全部
 
-  // 排序：按更新时间。默认降序（最近改动在上）；用户可切升序。
-  // （knowledge_points 表暂无 created_at 列，创建时间排序待 schema 拍板后再加。）
+  // 排序：置顶恒在最前（见 kp_sort.dart），其余按选定时间字段。
+  // 默认更新时间降序（最近改动在上）；用户可切字段与升 / 降序。
+  KpSortField _sortField = KpSortField.updatedAt;
   bool _updatedAtAsc = false;
 
   // ============ 多选批量删除 ============
@@ -76,11 +100,23 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
           (_mastery[kp.id] ?? MasteryStatus.unknown) != _masteryFilter) {
         return false;
       }
+      // 分组筛选：'' = 只要未分组（map 无记录）；其余 = 只要该组成员。
+      if (_groupFilter != null) {
+        final gid = _kpGroupOf[kp.id];
+        if (_groupFilter!.isEmpty) {
+          if (gid != null) return false;
+        } else if (gid != _groupFilter) {
+          return false;
+        }
+      }
       return true;
     }).toList()
-      ..sort((a, b) => _updatedAtAsc
-          ? a.updatedAt.compareTo(b.updatedAt)
-          : b.updatedAt.compareTo(a.updatedAt));
+      ..sort((a, b) => compareKp(
+            a,
+            b,
+            field: _sortField,
+            asc: _updatedAtAsc,
+          ));
   }
 
   @override
@@ -102,7 +138,15 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
     for (final kp in all) {
       mastery[kp.id] = await _repo.currentMastery(kp.id);
     }
+    final groups = await _groupRepo.listGlobalGroups();
     if (!mounted) return;
+    // 分组归属表：按组序升序，先到先得（一个点残留在多个组时归最前的组）。
+    final kpGroupOf = <String, String>{};
+    for (final g in groups) {
+      for (final m in g.members) {
+        kpGroupOf.putIfAbsent(m.kpId, () => g.id);
+      }
+    }
     setState(() {
       _all = all;
       _mastery
@@ -111,6 +155,10 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
       _noteTitles
         ..clear()
         ..addAll({for (final n in notes) n.id: n.title});
+      _kpGroups = groups;
+      _kpGroupOf
+        ..clear()
+        ..addAll(kpGroupOf);
     });
   }
 
@@ -393,6 +441,103 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
     await _reload();
   }
 
+  // ============ 置顶 / 分组 ============
+
+  /// 置顶 / 取消置顶（[KnowledgeRepository.setPinned]：只 bump version，
+  /// 不 bump updated_at——置顶是排序偏好不是内容变更）。
+  Future<void> _togglePin(KnowledgePoint kp) async {
+    final next = !kp.pinned;
+    final res = await _repo.setPinned(kp.id, next);
+    if (!mounted) return;
+    res.fold(
+      (_) => _toast(next ? '已置顶' : '已取消置顶'),
+      (e, _) => _toast('操作失败：$e'),
+    );
+    await _reload();
+  }
+
+  /// 把 [ids] 归入指定分组（'' = 移到未分组）。
+  ///
+  /// 口径：一个知识点只归属**一个**组（展示层取组序最前的组）→ 先从所有组
+  /// 摘除，再按需加入目标组。删组侧的「删组不解散成员」由
+  /// [GroupRepository.deleteGroup] 保证，这里只做归属调整。
+  Future<void> _assignGroup(List<String> ids, {KnowledgePoint? single}) async {
+    if (ids.isEmpty) return;
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text(single == null
+            ? '把选中的 ${ids.length} 个知识点放到哪个分组？'
+            : '把「${single.name}」放到哪个分组？'),
+        children: [
+          for (final g in _kpGroups)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, g.id),
+              child: Text(g.name.isEmpty ? '(未命名分组)' : g.name),
+            ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, ''),
+            child: const Text('移到未分组'),
+          ),
+          if (_kpGroups.isEmpty)
+            const SimpleDialogOption(
+              onPressed: null,
+              child: Text(
+                '（还没有分组，可先去「分组管理」新建）',
+                style: TextStyle(color: Colors.grey),
+              ),
+            ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消', style: TextStyle(color: Colors.grey)),
+          ),
+        ],
+      ),
+    );
+    if (picked == null || !mounted) return;
+    var failed = false;
+    // 1. 先从所有现有组摘除（保持「一个点只在一个组」的展示口径）。
+    for (final g in _kpGroups) {
+      final removeIds = ids.where((id) => g.memberIds.contains(id)).toList();
+      if (removeIds.isEmpty) continue;
+      final res = await _groupRepo.removeMembers(g.id, removeIds);
+      if (res is Failure<void>) {
+        failed = true;
+        _toast('移出分组失败：${res.message}');
+      }
+    }
+    // 2. 加入目标组（'' = 未分组，无需写）。
+    if (picked.isNotEmpty) {
+      final res = await _groupRepo.addMembers(picked, ids);
+      if (res is Failure<void>) {
+        failed = true;
+        _toast('加入分组失败：${res.message}');
+      }
+    }
+    if (!mounted) return;
+    if (!failed) {
+      _toast(picked.isEmpty
+          ? '已移到未分组（${ids.length} 个）'
+          : '已归入分组（${ids.length} 个）');
+    }
+    if (_selectionMode) _exitSelection();
+    await _reload();
+  }
+
+  /// 多选态 AppBar 的「归组」入口。
+  Future<void> _batchAssignGroup() => _assignGroup(_selected.toList());
+
+  /// 打开分组管理面板（新建 / 重命名 / 删除全局组）。
+  Future<void> _openGroupManage() async {
+    await showKpGroupManageSheet(
+      context,
+      groups: _groupRepo,
+      liveKpIds: <String>{for (final kp in _all) kp.id},
+    );
+    if (!mounted) return;
+    await _reload();
+  }
+
   // ============ 多选批量删除（软删进回收站） ============
 
   /// 进入多选态并预选 [id]（长按条目入口）。
@@ -539,6 +684,11 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
               icon: const Icon(Icons.select_all),
               tooltip: '全选',
             ),
+            IconButton(
+              onPressed: _selected.isEmpty ? null : _batchAssignGroup,
+              icon: const Icon(Icons.label_outline),
+              tooltip: '批量归组',
+            ),
             TextButton(
               onPressed: _selected.isEmpty ? null : _confirmBatchDelete,
               child: Text(
@@ -647,10 +797,66 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
               ],
             ),
           ),
-          // 排序：更新时间 升/降序切换（创建时间排序待 schema 拍板后补充）。
+          // 筛选 chips：分组（全局组 + 未分组 + 分组管理入口）。
+          // 分组只在本页出现，不进知识树画布（架构定稿 2026-10-22）。
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(
+              children: [
+                FilterChip(
+                  label: const Text('全部分组'),
+                  selected: _groupFilter == null,
+                  onSelected: (_) => setState(() => _groupFilter = null),
+                ),
+                const SizedBox(width: 6),
+                for (final g in _kpGroups)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: FilterChip(
+                      avatar: const Icon(Icons.folder_outlined, size: 16),
+                      label: Text(g.name.isEmpty ? '(未命名分组)' : g.name),
+                      selected: _groupFilter == g.id,
+                      onSelected: (_) => setState(
+                        () => _groupFilter = _groupFilter == g.id ? null : g.id,
+                      ),
+                    ),
+                  ),
+                FilterChip(
+                  label: const Text('未分组'),
+                  selected: _groupFilter == '',
+                  onSelected: (_) => setState(
+                    () => _groupFilter = _groupFilter == '' ? null : '',
+                  ),
+                ),
+                const SizedBox(width: 6),
+                IconButton(
+                  onPressed: _openGroupManage,
+                  icon: const Icon(Icons.folder_open_outlined, size: 20),
+                  tooltip: '分组管理',
+                  visualDensity: VisualDensity.compact,
+                ),
+              ],
+            ),
+          ),
+          // 排序：字段下拉（更新时间 / 创建时间）+ 升 / 降序切换。
+          // 置顶恒在最前，与字段、方向无关（见 kp_sort.dart）。
           Row(
             children: [
               const SizedBox(width: 12),
+              const Icon(Icons.sort, size: 18, color: Colors.grey),
+              const SizedBox(width: 4),
+              DropdownButton<KpSortField>(
+                value: _sortField,
+                isDense: true,
+                underline: const SizedBox.shrink(),
+                items: [
+                  for (final f in KpSortField.values)
+                    DropdownMenuItem(value: f, child: Text(f.label)),
+                ],
+                onChanged: (v) =>
+                    setState(() => _sortField = v ?? _sortField),
+              ),
               IconButton(
                 onPressed: () => setState(() => _updatedAtAsc = !_updatedAtAsc),
                 icon: Icon(
@@ -659,11 +865,11 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
                 ),
                 visualDensity: VisualDensity.compact,
                 tooltip: _updatedAtAsc
-                    ? '更新时间升序（最早改动在上）'
-                    : '更新时间降序（最近改动在上）',
+                    ? '${_sortField.label}升序（最早在上）'
+                    : '${_sortField.label}降序（最新在上）',
               ),
               Text(
-                _updatedAtAsc ? '更新最早在上' : '最近改动在上',
+                _updatedAtAsc ? '最早在上' : '最新在上',
                 style: const TextStyle(fontSize: 12, color: Colors.grey),
               ),
             ],
@@ -726,6 +932,15 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
+                            if (kp.pinned)
+                              const Padding(
+                                padding: EdgeInsets.only(right: 4),
+                                child: Icon(
+                                  Icons.push_pin,
+                                  size: 14,
+                                  color: Colors.deepPurple,
+                                ),
+                              ),
                             Container(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 8,
@@ -747,6 +962,10 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
                               tooltip: '更多',
                               onSelected: (v) {
                                 switch (v) {
+                                  case 'pin':
+                                    _togglePin(kp);
+                                  case 'group':
+                                    _assignGroup(<String>[kp.id], single: kp);
                                   case 'edit':
                                     _showEditDialog(kp);
                                   case 'tree':
@@ -757,20 +976,28 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
                                     _confirmDelete(kp);
                                 }
                               },
-                              itemBuilder: (_) => const [
+                              itemBuilder: (_) => [
                                 PopupMenuItem(
+                                  value: 'pin',
+                                  child: Text(kp.pinned ? '取消置顶' : '置顶'),
+                                ),
+                                const PopupMenuItem(
+                                  value: 'group',
+                                  child: Text('设置分组…'),
+                                ),
+                                const PopupMenuItem(
                                   value: 'edit',
                                   child: Text('编辑'),
                                 ),
-                                PopupMenuItem(
+                                const PopupMenuItem(
                                   value: 'tree',
                                   child: Text('加入知识树'),
                                 ),
-                                PopupMenuItem(
+                                const PopupMenuItem(
                                   value: 'teach',
                                   child: Text('追问 / 讲解'),
                                 ),
-                                PopupMenuItem(
+                                const PopupMenuItem(
                                   value: 'delete',
                                   child: Text(
                                     '删除',

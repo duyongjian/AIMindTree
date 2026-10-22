@@ -769,6 +769,36 @@ class KnowledgeRepository {
     }
   }
 
+  /// 置顶 / 取消置顶（用户诉求：控制哪些知识点排在列表最前）。
+  ///
+  /// **刻意不 bump `updated_at`**（与 [updateKpMeta] 的有意不一致）：
+  /// 置顶是纯 UI 排序偏好，不是内容变更。若 bump updated_at，用户每次置顶
+  /// 都会把该点推到「最近改动在上」的顶部，把真正的编辑记录淹掉，还会
+  /// 误导同步对端「内容变了」。同步侧靠 version bump 触发 LWW 收敛。
+  ///
+  /// 幂等：目标值与当前值相同 → 不写库、不入队（连点两次不产生版本号噪音）。
+  /// 已软删的点不允許置顶（墓碑行不响应 UI 操作）。
+  Future<Result<void>> setPinned(String kpId, bool pinned) async {
+    try {
+      final row = await (_db.select(_db.knowledgePoints)
+            ..where((t) => t.id.equals(kpId) & t.deletedAt.isNull()))
+          .getSingleOrNull();
+      if (row == null) return Failure(StateError('知识点不存在或已删除'));
+      if (row.pinned == pinned) return const Success<void>(null);
+      await (_db.update(_db.knowledgePoints)..where((t) => t.id.equals(kpId)))
+          .write(KnowledgePointsCompanion(
+        pinned: Value(pinned),
+        version: Value(row.version + 1),
+      ));
+      await _sync.upsertKnowledgePoint(kpId);
+      _log.i('${pinned ? '置顶' : '取消置顶'}知识点 $kpId');
+      return const Success<void>(null);
+    } on Object catch (e, s) {
+      _log.e('设置置顶失败', error: e, stackTrace: s);
+      return Failure<void>(e, s);
+    }
+  }
+
   /// 某知识点涉及的前置边数量（删除时用于弹窗提示影响面，见 PRD §4.1）。
   Future<int> countPrerequisiteEdges(String kpId) async {
     final rows = await (_db.select(_db.prerequisiteEdges)
