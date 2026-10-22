@@ -236,6 +236,65 @@ void main() {
       // 输入栏还在（页面本身没坏）。
       expect(find.byType(TextField), findsOne);
     });
+
+    testWidgets('收起后面板真正收拢：仅剩标题行、检测项消失且容器高度收缩',
+        (tester) async {
+      await tester.pumpWidget(wrap(AgentPage(
+        service: makeService(),
+        db: db,
+        debugSeedDetected: seed,
+      )));
+      await tester.pumpAndSettle();
+
+      // 定位检测面板容器（maxHeight: 260）。
+      final panel = find.byWidgetPredicate(
+        (w) => w is Container && w.constraints?.maxHeight == 260.0,
+      );
+      expect(panel, findsOne);
+      final expandedH = tester.getSize(panel).height;
+
+      // 默认展开：标题 + 检测项都可见。
+      expect(find.text('检测到的知识点（2）'), findsOne);
+      expect(find.text('薄弱点：极限概念'), findsOne);
+
+      // 收起。
+      await tester.tap(find.text('检测到的知识点（2）'));
+      await tester.pumpAndSettle();
+
+      // 标题仍可见，任一检测项标题已不可见（真正收拢，非留空白）。
+      expect(find.text('检测到的知识点（2）'), findsOne);
+      expect(find.text('薄弱点：极限概念'), findsNothing);
+      expect(find.text('需要的知识点：导数'), findsNothing);
+
+      // 容器高度从 ~260 收缩到仅标题行高度（远小于展开时的一半）。
+      final collapsedH = tester.getSize(panel).height;
+      expect(collapsedH, lessThan(expandedH / 2));
+      expect(collapsedH, lessThan(120));
+    });
+
+    testWidgets('点「全部添加」：勾选全部检测项，加入按钮计数=总数',
+        (tester) async {
+      await tester.pumpWidget(wrap(AgentPage(
+        service: makeService(),
+        db: db,
+        debugSeedDetected: seed,
+      )));
+      await tester.pumpAndSettle();
+
+      // 初始无勾选 → 加入（0）。
+      expect(find.text('加入（0）'), findsOne);
+
+      // 点「全部添加」（默认展开、按钮可见且可用）。
+      await tester.tap(find.text('全部添加'));
+      await tester.pumpAndSettle();
+
+      // 全部检测项被勾选 → 加入按钮 N = 检测项总数（2）。
+      expect(find.text('全部添加'), findsOne);
+      expect(find.text('加入（2）'), findsOne);
+      expect(find.text('批量不添加（2）'), findsOne);
+      // 未选目标树时只提示、不入树（库仍为空）。
+      expect(await repo.allKnowledgePoints(), isEmpty);
+    });
   });
 
   // ============================== H：会话管理 ==============================

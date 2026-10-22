@@ -947,6 +947,7 @@ class AgentPageState extends State<AgentPage> {
       child: Material(
         color: Colors.grey.shade50,
         child: Column(
+          mainAxisSize: MainAxisSize.min,
         children: [
           // G：头部整行可点，收起 / 展开（收起只显示标题）。
           InkWell(
@@ -997,6 +998,12 @@ class AgentPageState extends State<AgentPage> {
                     onPressed: _removeAllDetected,
                     icon: const Icon(Icons.clear_all, size: 16),
                     label: const Text('全不添加'),
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton.icon(
+                    onPressed: _detected.isEmpty ? null : _addAllDetected,
+                    icon: const Icon(Icons.done_all, size: 16),
+                    label: const Text('全部添加'),
                   ),
                 ],
               ),
@@ -1087,6 +1094,16 @@ class AgentPageState extends State<AgentPage> {
       _detected = const <AgentDetectedItem>[];
       _picked.clear();
     });
+  }
+
+  /// G：全部添加——勾选所有检测项；已选好目标树时直接走加入流程。
+  void _addAllDetected() {
+    setState(() => _picked.addAll(_detected));
+    if (_activeTree != null) {
+      _addToTree();
+    } else {
+      _toast('已全选，先在下方选择要并入的知识树');
+    }
   }
 
   Widget _buildInputBar() => SafeArea(
