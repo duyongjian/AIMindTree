@@ -507,23 +507,69 @@ class CanvasPageState extends State<CanvasPage> {
     final tree = _selectedTree;
     if (tree == null) return;
 
+    final notes = _notes;
+    final query = TextEditingController();
     final picked = await showDialog<String>(
       context: context,
-      builder: (ctx) => SimpleDialog(
-        title: const Text('把哪篇笔记的知识点并入？'),
-        children: [
-          for (final n in _notes)
-            SimpleDialogOption(
-              onPressed: () => Navigator.pop(ctx, n.id),
-              child: Text(_titleOf(n), overflow: TextOverflow.ellipsis),
+      builder: (ctx) {
+        var keyword = '';
+        return StatefulBuilder(
+          builder: (ctx, setSt) {
+            final filtered = notes
+                .where((n) =>
+                    _titleOf(n).toLowerCase().contains(keyword.toLowerCase()))
+                .toList();
+            return AlertDialog(
+            title: const Text('把哪篇笔记的知识点并入？'),
+            content: SizedBox(
+              width: 420,
+              height: 360,
+              child: Column(
+                children: [
+                  TextField(
+                    controller: query,
+                    decoration: const InputDecoration(
+                      prefixIcon: Icon(Icons.search),
+                      hintText: '搜索笔记标题',
+                      isDense: true,
+                    ),
+                    onChanged: (v) => setSt(() => keyword = v.trim()),
+                  ),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: filtered.isEmpty
+                        ? const Center(
+                            child: Text('没有匹配的笔记',
+                                style: TextStyle(color: Colors.grey)),
+                          )
+                        : ListView.builder(
+                            itemCount: filtered.length,
+                            itemBuilder: (_, i) {
+                              final n = filtered[i];
+                              return ListTile(
+                                dense: true,
+                                title: Text(_titleOf(n),
+                                    overflow: TextOverflow.ellipsis),
+                                onTap: () => Navigator.pop(ctx, n.id),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
             ),
-          SimpleDialogOption(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消', style: TextStyle(color: Colors.grey)),
-          ),
-        ],
-      ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('取消'),
+              ),
+            ],
+          );
+        },
+      );
+    },
     );
+    query.dispose();
     if (picked == null) return;
 
     final kps = await _repo.pointsForNote(picked);
@@ -562,55 +608,89 @@ class CanvasPageState extends State<CanvasPage> {
         all.where((p) => !existing.contains(p.id)).toList();
     if (!mounted) return;
     final selected = <String>{};
+    final query = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSt) => AlertDialog(
-          title: Text('向「${tree.name}」添加知识点'),
-          content: candidates.isEmpty
-              ? const SizedBox(
-                  height: 120,
-                  child: Center(
-                    child: Text('没有可添加的知识点（都已经在树里了）',
-                        style: TextStyle(color: Colors.grey)),
+      builder: (ctx) {
+        var keyword = '';
+        return StatefulBuilder(
+          builder: (ctx, setSt) {
+            final filtered = candidates.where((p) {
+              final k = keyword.toLowerCase();
+              return p.name.toLowerCase().contains(k) ||
+                  p.type.label.toLowerCase().contains(k);
+            }).toList();
+            return AlertDialog(
+            title: Text('向「${tree.name}」添加知识点'),
+            content: candidates.isEmpty
+                ? const SizedBox(
+                    height: 120,
+                    child: Center(
+                      child: Text('没有可添加的知识点（都已经在树里了）',
+                          style: TextStyle(color: Colors.grey)),
+                    ),
+                  )
+                : SizedBox(
+                    width: 420,
+                    height: 420,
+                    child: Column(
+                      children: [
+                        TextField(
+                          controller: query,
+                          decoration: const InputDecoration(
+                            prefixIcon: Icon(Icons.search),
+                            hintText: '搜索知识点名称 / 类型',
+                            isDense: true,
+                          ),
+                          onChanged: (v) => setSt(() => keyword = v.trim()),
+                        ),
+                        const SizedBox(height: 8),
+                        Expanded(
+                          child: filtered.isEmpty
+                              ? const Center(
+                                  child: Text('没有匹配的知识点',
+                                      style: TextStyle(color: Colors.grey)),
+                                )
+                              : ListView.builder(
+                                  itemCount: filtered.length,
+                                  itemBuilder: (_, i) {
+                                    final kp = filtered[i];
+                                    return CheckboxListTile(
+                                      dense: true,
+                                      value: selected.contains(kp.id),
+                                      onChanged: (v) => setSt(() {
+                                        if (v == true) {
+                                          selected.add(kp.id);
+                                        } else {
+                                          selected.remove(kp.id);
+                                        }
+                                      }),
+                                      title: Text(kp.name),
+                                      subtitle: Text(kp.type.label),
+                                    );
+                                  },
+                                ),
+                        ),
+                      ],
+                    ),
                   ),
-                )
-              : SizedBox(
-                  width: 420,
-                  height: 360,
-                  child: ListView.builder(
-                    itemCount: candidates.length,
-                    itemBuilder: (_, i) {
-                      final kp = candidates[i];
-                      return CheckboxListTile(
-                        dense: true,
-                        value: selected.contains(kp.id),
-                        onChanged: (v) => setSt(() {
-                          if (v == true) {
-                            selected.add(kp.id);
-                          } else {
-                            selected.remove(kp.id);
-                          }
-                        }),
-                        title: Text(kp.name),
-                        subtitle: Text(kp.type.label),
-                      );
-                    },
-                  ),
-                ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('取消'),
-            ),
-            TextButton(
-              onPressed: selected.isEmpty ? null : () => Navigator.pop(ctx, true),
-              child: const Text('添加'),
-            ),
-          ],
-        ),
-      ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('取消'),
+              ),
+              TextButton(
+                onPressed:
+                    selected.isEmpty ? null : () => Navigator.pop(ctx, true),
+                child: const Text('添加'),
+              ),
+            ],
+            );
+          }
+        );
+      },
     );
+    query.dispose();
     if (ok != true || selected.isEmpty) return;
     final ids = selected.toList();
     final res = await _treesRepo.addPoints(tree.id, ids);
@@ -620,6 +700,145 @@ class CanvasPageState extends State<CanvasPage> {
       (added) =>
           _toast(added == 0 ? '都在树里了' : '已添加 $added 个知识点'),
       (e, _) => _toast('添加失败：$e'),
+    );
+    await _loadForTree(tree.id);
+  }
+
+  /// 从当前知识树移除知识点（只解除成员关系，知识点仍保留为独立资产）。
+  ///
+  /// 弹窗多选当前树成员；提交后 [TreeRepository.removePoints] 删除 canvas_nodes
+  /// 行（硬删、同步对账），不触碰知识点本体，也不动全局前置关系（边按当前树成员
+  /// 过滤渲染，移除后自然不再显示）。
+  Future<void> _removeFromTree() async {
+    final tree = _selectedTree;
+    if (tree == null) return;
+    final members = _points;
+    if (members.isEmpty) {
+      _toast('这棵树还没有知识点');
+      return;
+    }
+    final selected = <String>{};
+    final query = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        var keyword = '';
+        return StatefulBuilder(
+          builder: (ctx, setSt) {
+            final filtered = members.where((p) {
+              final k = keyword.toLowerCase();
+              return p.name.toLowerCase().contains(k);
+            }).toList();
+            return AlertDialog(
+              title: Text('从「${tree.name}」移除知识点'),
+              content: SizedBox(
+                width: 420,
+                height: 420,
+                child: Column(
+                  children: [
+                    TextField(
+                      controller: query,
+                      decoration: const InputDecoration(
+                        prefixIcon: Icon(Icons.search),
+                        hintText: '搜索知识点名称',
+                        isDense: true,
+                      ),
+                      onChanged: (v) => setSt(() => keyword = v.trim()),
+                    ),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: filtered.isEmpty
+                          ? const Center(
+                              child: Text('没有匹配的知识点',
+                                  style: TextStyle(color: Colors.grey)),
+                            )
+                          : ListView.builder(
+                              itemCount: filtered.length,
+                              itemBuilder: (_, i) {
+                                final kp = filtered[i];
+                                return CheckboxListTile(
+                                  dense: true,
+                                  value: selected.contains(kp.id),
+                                  onChanged: (v) => setSt(() {
+                                    if (v == true) {
+                                      selected.add(kp.id);
+                                    } else {
+                                      selected.remove(kp.id);
+                                    }
+                                  }),
+                                  title: Text(kp.name),
+                                  subtitle: Text(kp.type.label),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('取消'),
+                ),
+                TextButton(
+                  onPressed:
+                      selected.isEmpty ? null : () => Navigator.pop(ctx, true),
+                  child: const Text('移除'),
+                ),
+              ],
+            );
+          }
+        );
+      },
+    );
+    query.dispose();
+    if (ok != true || selected.isEmpty) return;
+    final ids = selected.toList();
+    final res = await _treesRepo.removePoints(tree.id, ids);
+    if (!mounted) return;
+    res.fold(
+      (_) {
+        _toast('已从树中移除 ${ids.length} 个知识点（知识点仍保留为资产）');
+        _selectedKpIds.removeAll(ids);
+      },
+      (e, _) => _toast('移除失败：$e'),
+    );
+    await _loadForTree(tree.id);
+  }
+
+  /// 框选模式下，把当前框选（[_selectedKpIds]）的知识点从树中批量移除。
+  Future<void> _removeSelectedFromTree() async {
+    final tree = _selectedTree;
+    if (tree == null) return;
+    final ids = <String>{..._selectedKpIds};
+    if (ids.isEmpty) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('从知识树移除选中的知识点？'),
+        content: Text(
+            '将移除 $ids.length 个框选知识点（知识点仍保留为资产，其全局前置关系不动）。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('移除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final res = await _treesRepo.removePoints(tree.id, ids.toList());
+    if (!mounted) return;
+    res.fold(
+      (_) {
+        _toast('已移除 ${ids.length} 个知识点');
+        _selectedKpIds.clear();
+      },
+      (e, _) => _toast('移除失败：$e'),
     );
     await _loadForTree(tree.id);
   }
@@ -2195,7 +2414,7 @@ class CanvasPageState extends State<CanvasPage> {
   /// 工具栏右侧的 4 个分组按钮（由原来一排平铺图标归类而来）：
   ///
   /// 1. **知识树**（实体 CRUD）：新建知识树 / 重命名 / 删除知识树；
-  /// 2. **内容导入**：从笔记并入知识点 / 加入已有知识点；
+  /// 2. **内容导入（树成员管理）**：从笔记并入知识点 / 加入已有知识点 / 从知识树移除知识点；
   /// 3. **布局与连线**（布局系列 + 连线系列，用分隔线分开）：
   ///    - 布局系列：重新布局（全量重排）/ 局部重排；
   ///    - 连线系列：自动连线（原「自动布局」，实为 T3 前置连线）/ 局部连线（仅对框选子集连线）；
@@ -2230,10 +2449,10 @@ class CanvasPageState extends State<CanvasPage> {
           ),
         ],
       ),
-      // ② 内容导入
+      // ② 内容导入（树成员管理：并入 / 添加 / 移除）
       _toolbarGroupButton(
         icon: Icons.playlist_add,
-        tooltip: '内容导入：并入笔记 / 已有知识点',
+        tooltip: '内容导入：并入笔记 / 已有知识点 / 移除',
         itemBuilder: (_) => <PopupMenuEntry<int>>[
           _toolbarMenuItem(
             icon: Icons.merge_type,
@@ -2246,6 +2465,19 @@ class CanvasPageState extends State<CanvasPage> {
             label: '加入已有知识点',
             enabled: hasTree,
             onTap: _addKnowledgePoints,
+          ),
+          const PopupMenuDivider(),
+          _toolbarMenuItem(
+            icon: Icons.remove_circle_outline,
+            label: '从知识树移除知识点',
+            enabled: hasTree && _points.isNotEmpty,
+            onTap: _removeFromTree,
+          ),
+          _toolbarMenuItem(
+            icon: Icons.delete_outline,
+            label: '移除框选的知识点',
+            enabled: hasTree && _frameMode && _selectedKpIds.isNotEmpty,
+            onTap: _removeSelectedFromTree,
           ),
         ],
       ),
