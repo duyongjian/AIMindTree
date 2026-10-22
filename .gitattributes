@@ -1,0 +1,5 @@
+# Windows 批处理必须 CRLF：CMD 遇 LF 会把中文注释/长行拆断，
+# 报「'xxx' is not recognized as an internal or external command」（本项目复发过多次）。
+# 之前只靠 core.autocrlf=true（本机 git 设置）→ 换机 / 关 autocrlf / 编辑器直接存盘就复发。
+# 用 -text 让 git 对 *.bat 原样存取 CRLF 字节，任何 autocrlf 设置都不再变形。
+*.bat -text
