@@ -135,6 +135,9 @@ class SettingsPageState extends State<SettingsPage> {
         AiServiceStatusSection(
           key: _statusKey,
           settings: widget.settings,
+          // 任务 B：「重新连接」时一并消费管理后台下发的同步配置。
+          syncConfig: widget.syncConfig,
+          secretStore: widget.secretStore,
         ),
         const Padding(
           padding: EdgeInsets.fromLTRB(16, 16, 16, 8),

@@ -1,4 +1,4 @@
-/// AI 服务状态区（AC-20）。
+/// AI 服务状态区（AC-20 + 任务 I：探活超时与文案优化）。
 ///
 /// 取代设置页里原来的「AI 提供商」列表 / 「AI 任务路由」两区：运维级配置已
 /// 收口到管理后台（`llm_server/static/`），App 只负责**展示状态**与两个动作：
@@ -9,6 +9,10 @@
 /// - 服务名：[AppConfigService.last]（下发值）→ 行的 `name` → 内置默认名；
 /// - 后端 / 模型：走 [backendOf] / [firstModel] **helper**（C8：白名单与 JSON
 ///   容错只有一份实现，本页绝不自己解析 `type` / `models` 列）。
+///
+/// 任务 I：探活超时 3s → 5s（本机首次加载模型可能超过 3s，误报「未连接」）；
+/// TimeoutException 文案经 [formatProbeError] 人话化，不再裸抛
+/// "TimeoutException after ..."。
 library;
 
 import 'package:flutter/material.dart';
@@ -18,11 +22,34 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../ai/app_config_service.dart';
 import '../../ai/clients/llm_server_client.dart';
 import '../../core/logger.dart';
+import '../../core/secret_store.dart';
 import '../../data/db/drift_database.dart';
 import '../../data/repositories/settings_repository.dart';
+import '../../data/sync/sync_config.dart';
 
 /// 状态区徽标的四态。
 enum AiServiceState { connected, partial, disconnected, unknown }
+
+/// 任务 I：把探活错误文案人话化。
+///
+/// `SettingsRepository.testLlmServer` 失败时返回的是 `e.toString()`，
+/// TimeoutException 会裸奔成「TimeoutException after 0:00:05.000000:
+/// Future not completed」—— 用户完全看不懂。这里识别超时并改写成
+/// 「N 秒内无响应：服务可能未启动或在加载模型」；HTTP 码 / 后端不可达等
+/// 已经人话化的文案**原样返回**（只动超时，不动其它）。
+String formatProbeError(String? raw) {
+  final text = (raw ?? '').trim();
+  if (text.isEmpty) return '未知错误';
+  final m = RegExp(r'^TimeoutException after (\d+):(\d{2}):(\d{2}(?:\.\d+)?)')
+      .firstMatch(text);
+  if (m == null) return text;
+  final hours = int.parse(m.group(1)!);
+  final minutes = int.parse(m.group(2)!);
+  final seconds = double.parse(m.group(3)!);
+  final total = hours * 3600 + minutes * 60 + seconds;
+  final n = total < 1 ? 1 : total.round();
+  return '$n 秒内无响应：服务可能未启动或在加载模型';
+}
 
 /// 一次探活的结果。
 class _Probe {
@@ -37,9 +64,16 @@ class AiServiceStatusSection extends StatefulWidget {
   const AiServiceStatusSection({
     super.key,
     required this.settings,
+    this.syncConfig,
+    this.secretStore,
   });
 
   final SettingsRepository settings;
+
+  /// 任务 B：「重新连接」时把下发 `sync` 段一并消费（可空 = 运行时兜底走
+  /// [FileSecretStore] 默认实例）。
+  final SyncConfig? syncConfig;
+  final SecretStore? secretStore;
 
   @override
   State<AiServiceStatusSection> createState() => AiServiceStatusSectionState();
@@ -108,10 +142,16 @@ class AiServiceStatusSectionState extends State<AiServiceStatusSection> {
     final sw = Stopwatch()..start();
     final err = await widget.settings.testLlmServer(
       row.baseUrl,
-      timeout: const Duration(seconds: 3),
+      // 任务 I：3s → 5s。本机首次加载模型可能超过 3s，避免误报「未连接」。
+      timeout: const Duration(seconds: 5),
     );
     sw.stop();
-    return _Probe(ok: err == null, ms: sw.elapsedMilliseconds, error: err);
+    // 任务 I：TimeoutException 文案人话化（不再裸奔 e.toString()）。
+    return _Probe(
+      ok: err == null,
+      ms: sw.elapsedMilliseconds,
+      error: err == null ? null : formatProbeError(err),
+    );
   }
 
   AiServiceState _deriveState(AiProviderRow? row, _Probe? probe) {
@@ -132,7 +172,13 @@ class AiServiceStatusSectionState extends State<AiServiceStatusSection> {
     });
     try {
       final prefs = await SharedPreferences.getInstance();
-      await AppConfigService.fetchAndApply(widget.settings, prefs);
+      // 任务 B：顺手消费管理后台下发的同步配置（sync 段）。
+      await AppConfigService.fetchAndApply(
+        widget.settings,
+        prefs,
+        syncConfig: widget.syncConfig,
+        secretStore: widget.secretStore,
+      );
     } on Object catch (e, s) {
       // fetchAndApply 内部已吞异常，这里只是双保险。
       _log.e('重新连接失败', error: e, stackTrace: s);

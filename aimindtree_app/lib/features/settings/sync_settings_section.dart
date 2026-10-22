@@ -1,8 +1,11 @@
-/// SettingsPage 中的「同步」分区（T03）。
+/// SettingsPage 中的「同步」分区（T03 + 任务 B：系统级字段改管理后台下发）。
 ///
 /// 包含：
-/// - Supabase URL / Token 输入；
-/// - 启用自动同步 switch；
+/// - Base URL / Token：**由管理后台统一下发**（任务 B）——
+///   - Base URL 有值时只读展示（标注「由管理后台配置」）；无下发值时保留
+///     原手动输入作兜底；
+///   - Token 不再手输，展示「Token 由管理后台配置（本机 SecretStore 保存）」；
+/// - 启用自动同步 switch（默认值来自后端 enabled，缺省 true）；
 /// - 立即同步按钮（调 SyncScheduler.runOnce）；
 /// - 测试连接按钮；
 /// - 状态显示：上次同步时间 + 待推条数 + 最近错误。
@@ -10,7 +13,6 @@ library;
 
 import 'package:flutter/material.dart';
 
-import '../../core/id.dart';
 import '../../core/secret_store.dart';
 import '../../data/sync/sync_config.dart';
 import '../../data/sync/sync_outbox.dart';
@@ -39,8 +41,6 @@ class SyncSettingsSection extends StatefulWidget {
 
 class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   late final TextEditingController _url;
-  late final TextEditingController _token;
-  bool _obscure = true;
   int _pending = 0;
   int _failed = 0;
   String _status = 'idle';
@@ -49,7 +49,6 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   void initState() {
     super.initState();
     _url = TextEditingController(text: widget.config.baseUrl ?? '');
-    _token = TextEditingController();
     _status = widget.statusStore.status;
     _refreshCounters();
   }
@@ -57,7 +56,6 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   @override
   void dispose() {
     _url.dispose();
-    _token.dispose();
     super.dispose();
   }
 
@@ -72,22 +70,11 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     });
   }
 
+  /// 兜底保存：仅「无下发值」时可手动填 Base URL（任务 B）。
+  /// Token 一律不手输（由管理后台下发，本机 SecretStore 保存）。
   Future<void> _save() async {
     final url = _url.text.trim();
-    final token = _token.text.trim();
     await widget.config.setBaseUrl(url);
-    if (token.isNotEmpty) {
-      // 写新 token 到 SecretStore（新引用名）
-      final ref = 'sync_${newUlid()}';
-      await widget.secretStore.set(ref, token);
-      // 清旧 ref
-      final old = widget.config.tokenRef;
-      if (old != null && old != ref) {
-        await widget.secretStore.delete(old);
-      }
-      await widget.config.setTokenRef(ref);
-      _token.clear();
-    }
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('同步配置已保存（重启 App 后生效）。')),
@@ -111,7 +98,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   Future<void> _syncNow() async {
     if (!widget.config.isConfigured) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先填写 Base URL 和 Token。')),
+        const SnackBar(content: Text('尚未收到管理后台下发的同步配置。')),
       );
       return;
     }
@@ -132,7 +119,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   Future<void> _testConnection() async {
     if (!widget.config.isConfigured) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先填写 Base URL 和 Token。')),
+        const SnackBar(content: Text('尚未收到管理后台下发的同步配置。')),
       );
       return;
     }
@@ -155,6 +142,9 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
 
   @override
   Widget build(BuildContext context) {
+    final baseUrl = (widget.config.baseUrl ?? '').trim();
+    final hasBaseUrl = baseUrl.isNotEmpty;
+    final theme = Theme.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -170,42 +160,59 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              TextField(
-                controller: _url,
-                decoration: const InputDecoration(
-                  labelText: 'Base URL',
-                  helperText: '形如 https://xxx.supabase.co/functions/v1/ai-proxy',
-                ),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: _token,
-                obscureText: _obscure,
-                decoration: InputDecoration(
-                  labelText: 'Token（Bearer）',
-                  helperText: widget.config.tokenRef == null
-                      ? '首次填写后存入 SecretStore'
-                      : '已保存（引用名 ${widget.config.tokenRef}）',
-                  suffixIcon: IconButton(
-                    icon: Icon(_obscure ? Icons.visibility : Icons.visibility_off),
-                    onPressed: () => setState(() => _obscure = !_obscure),
+              // Base URL：有下发值 → 只读展示；无下发值 → 保留手动输入兜底。
+              if (hasBaseUrl)
+                _ReadOnlyField(
+                  label: 'Base URL',
+                  value: baseUrl,
+                  note: '由管理后台配置',
+                )
+              else
+                TextField(
+                  controller: _url,
+                  decoration: const InputDecoration(
+                    labelText: 'Base URL',
+                    helperText: '形如 https://xxx.supabase.co/functions/v1/ai-proxy',
                   ),
                 ),
-              ),
               const SizedBox(height: 8),
-              Row(
+              // Token：不手输，展示后台下发状态（本体在 SecretStore）。
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  FilledButton.tonal(
-                    onPressed: _save,
-                    child: const Text('保存配置'),
+                  const Text(
+                    'Token 由管理后台配置（本机 SecretStore 保存）',
+                    style: TextStyle(fontSize: 13),
                   ),
-                  const SizedBox(width: 8),
-                  OutlinedButton(
-                    onPressed: _testConnection,
-                    child: const Text('测试连接'),
+                  Text(
+                    widget.config.tokenRef == null
+                        ? '（未配置）'
+                        : '（已保存，引用名 ${widget.config.tokenRef}）',
+                    style: const TextStyle(color: Colors.grey, fontSize: 11),
                   ),
                 ],
               ),
+              const SizedBox(height: 8),
+              // 兜底模式才需要「保存配置」；只读模式下没有可手改的字段。
+              if (!hasBaseUrl)
+                Row(
+                  children: [
+                    FilledButton.tonal(
+                      onPressed: _save,
+                      child: const Text('保存配置'),
+                    ),
+                    const SizedBox(width: 8),
+                    OutlinedButton(
+                      onPressed: _testConnection,
+                      child: const Text('测试连接'),
+                    ),
+                  ],
+                )
+              else
+                OutlinedButton(
+                  onPressed: _testConnection,
+                  child: const Text('测试连接'),
+                ),
               const SizedBox(height: 8),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
@@ -237,16 +244,57 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
                 formatTime: _formatTime,
               ),
               const SizedBox(height: 8),
-              const Text(
+              Text(
+                '• Base URL / Token 由管理后台统一下发，本机不可修改；\n'
                 '• Token 仅本机 SecretStore 保存，不入 DB；\n'
                 '• 推送失败 5 次后告警；连续 3 次失败进入 5 分钟退避；\n'
                 '• 跨设备冲突用 LWW（version 大者赢），自回声自动过滤。',
-                style: TextStyle(color: Colors.grey, fontSize: 11, height: 1.6),
+                style: TextStyle(
+                  color: theme.disabledColor,
+                  fontSize: 11,
+                  height: 1.6,
+                ),
               ),
             ],
           ),
         ),
       ],
+    );
+  }
+}
+
+/// 只读字段（任务 B）：系统级配置由管理后台下发，本机只展示。
+class _ReadOnlyField extends StatelessWidget {
+  const _ReadOnlyField({
+    required this.label,
+    required this.value,
+    required this.note,
+  });
+
+  final String label;
+  final String value;
+  final String note;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        border: Border.all(color: theme.dividerColor),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: TextStyle(color: theme.hintColor, fontSize: 12)),
+          const SizedBox(height: 2),
+          Text(value, style: const TextStyle(fontSize: 13)),
+          const SizedBox(height: 2),
+          Text(note, style: TextStyle(color: theme.hintColor, fontSize: 11)),
+        ],
+      ),
     );
   }
 }

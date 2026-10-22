@@ -22,9 +22,12 @@ import 'dart:io';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../core/id.dart';
 import '../core/logger.dart';
+import '../core/secret_store.dart';
 import '../data/db/drift_database.dart';
 import '../data/repositories/settings_repository.dart';
+import '../data/sync/sync_config.dart';
 import 'clients/llm_server_client.dart';
 
 /// 下发配置来源（决定状态区怎么说话）。
@@ -42,17 +45,29 @@ enum AppConfigSource {
   unreachable,
 }
 
-/// 同步（Supabase）下发段。**只含布尔**，服务端绝不回传 token 明文（C3）。
+/// 同步（Supabase）下发段（契约 `GET /v1/app/config` 的 `sync` 对象：
+/// `{ base_url, enabled, token(可 null), token_set }`）。
+///
+/// - [token]：服务端下发的 token 明文。**只经 SecretStore 落本机**，绝不入
+///   prefs / DB；`null` = 服务端没有下发 token。
+/// - [tokenSet]：服务端是否已配置 token。`token` 为 null 但为 true 时，
+///   App **不动**本地已存 token（任务 B）。
+/// - [present]：响应里是否**真的有** `sync` 段。旧服务（无下发 / 404 降级 /
+///   内置默认快照）为 false —— 此时 App 绝不改写本地同步配置（优雅降级）。
 class SyncPush {
   const SyncPush({
     required this.baseUrl,
     required this.enabled,
     required this.tokenSet,
+    this.token,
+    this.present = false,
   });
 
   final String baseUrl;
   final bool enabled;
   final bool tokenSet;
+  final String? token;
+  final bool present;
 
   /// 服务端给空则「保留本地」：App 用 [baseUrl] 是否为空判断。
   bool get hasBaseUrl => baseUrl.trim().isNotEmpty;
@@ -196,13 +211,18 @@ class AppConfigService {
     }
 
     // sync：服务端恒返回 object（Q-C），这里仍做空态兜底。
+    // 契约形状：{ base_url, enabled, token(可 null), token_set }。
+    // present=false（无 sync 段）= 旧服务 → apply 时本地同步配置分毫不动。
     SyncPush sync = const SyncPush(baseUrl: '', enabled: false, tokenSet: false);
     final rawSync = map['sync'];
     if (rawSync is Map) {
       sync = SyncPush(
         baseUrl: (rawSync['base_url'] as String?) ?? '',
-        enabled: (rawSync['enabled'] as bool?) ?? false,
+        // 缺省 true：管理后台一旦下发 sync 段，默认即开启自动同步（任务 B）。
+        enabled: (rawSync['enabled'] as bool?) ?? true,
         tokenSet: (rawSync['token_set'] as bool?) ?? false,
+        token: rawSync['token'] as String?,
+        present: true,
       );
     }
 
@@ -323,10 +343,16 @@ class AppConfigService {
   ///
   /// 候选地址 = 已存的 `llm_server` 行 base_url（按出现顺序去重）
   /// + 内置 `kLlmServerDefaultBaseUrl` + 可选 `extraCandidates`（测试注入）。
+  ///
+  /// [syncConfig] / [secretStore]（任务 B）：消费下发 `sync` 段时使用；
+  /// 缺省走 [FileSecretStore] 默认实例（与 main.dart 同一个 secrets 文件，
+  /// `sync_<ulid>` ref 机制与设置页完全一致）。
   static Future<AppConfigSnapshot> fetchAndApply(
     SettingsRepository repo,
     SharedPreferences prefs, {
     List<String>? extraCandidates,
+    SyncConfig? syncConfig,
+    SecretStore? secretStore,
   }) async {
     try {
       final candidates = <String>[];
@@ -345,7 +371,12 @@ class AppConfigService {
       }
 
       await fetch(candidates: candidates);
-      await apply(repo, prefs);
+      await apply(
+        repo,
+        prefs,
+        syncConfig: syncConfig,
+        secretStore: secretStore,
+      );
     } on Object catch (e, s) {
       // 整体吞异常：配置拉取失败绝不能让 App 起不来（R2）。
       _log.e('fetchAndApply 失败（已降级为内置默认）', error: e, stackTrace: s);
@@ -355,10 +386,17 @@ class AppConfigService {
   }
 
   /// 幂等落库（AC-17）。只用 repository 现有的 4 个方法（C1）。
+  ///
+  /// 任务 B：响应含 `sync` 段时，顺带把系统级同步配置落到 SyncConfig / prefs /
+  /// SecretStore（增量、优雅降级：旧服务无 sync 段时本地值分毫不动）。
+  /// [syncConfig] / [secretStore] 供测试与设置页「重新连接」注入；缺省用
+  /// [FileSecretStore] 默认实例。
   static Future<void> apply(
     SettingsRepository repo,
-    SharedPreferences prefs,
-  ) async {
+    SharedPreferences prefs, {
+    SyncConfig? syncConfig,
+    SecretStore? secretStore,
+  }) async {
     final snap = last;
     if (snap == null) return;
     try {
@@ -385,6 +423,15 @@ class AppConfigService {
             '降级快照不落库，保留下发行');
         return;
       }
+
+      // 任务 B：消费下发的 sync 段。放在 sha1 幂等判断**之前** —— 老版本 App
+      // 可能落过相同 sha1 却从没消费过 sync，升级后必须补上，否则管理后台
+      // 下发的同步配置永远到不了本机。
+      await _applySyncConfig(
+        prefs,
+        syncConfig: syncConfig,
+        secretStore: secretStore,
+      );
 
       final backend = backendOf(snap.backend); // 唯一的白名单容错（C8）
       final model = snap.model.trim();
@@ -434,6 +481,55 @@ class AppConfigService {
           'base=$base backend=$backend model=$model');
     } on Object catch (e, s) {
       _log.e('落库失败（不影响启动）', error: e, stackTrace: s);
+    }
+  }
+
+  /// 任务 B：把下发 `sync` 段写进 SyncConfig / prefs / SecretStore。
+  ///
+  /// 规则（契约 + 降级口径）：
+  /// - **无 `sync` 段**（旧服务 / 内置默认快照）→ 什么都不写，本地值保留；
+  /// - `base_url` 非空 → 写 prefs（空则不覆盖本地已有值）；
+  /// - `enabled` → 写 `aimindtree.sync.enabled`（作为默认，用户随后仍可本地
+  ///   改；重启后回到管理后台下发的默认值）；
+  /// - `token` 非 null → 存 SecretStore 并设 `token_ref`（复用设置页同一
+  ///   `sync_<ulid>` ref 机制，旧 ref 删除）；`token` 为 null 但
+  ///   `token_set=true` → 不动本地 token。
+  ///
+  /// **永不抛异常**：写入失败只记日志，绝不影响 ai_providers 落库与启动。
+  static Future<void> _applySyncConfig(
+    SharedPreferences prefs, {
+    SyncConfig? syncConfig,
+    SecretStore? secretStore,
+  }) async {
+    final snap = last;
+    if (snap == null) return;
+    final push = snap.sync;
+    if (!push.present) return; // 旧服务无 sync 段：不回归、不动本地值
+    try {
+      final store = secretStore ?? await FileSecretStore.defaultInstance();
+      final cfg = syncConfig ?? SyncConfig(prefs: prefs, secretStore: store);
+
+      if (push.hasBaseUrl) {
+        await cfg.setBaseUrl(push.baseUrl.trim());
+      }
+      await cfg.setEnabled(push.enabled);
+
+      final token = push.token;
+      if (token != null && token.trim().isNotEmpty) {
+        // `sync_<ulid>` ref 机制（原设置页 _save() 的口径）：新 ref 写
+        // SecretStore，旧 ref 清理，prefs 只留引用名。
+        final ref = 'sync_${newUlid()}';
+        await store.set(ref, token);
+        final old = cfg.tokenRef;
+        if (old != null && old != ref) {
+          await store.delete(old);
+        }
+        await cfg.setTokenRef(ref);
+      }
+      _log.i('sync 段已消费：base=${cfg.baseUrl} enabled=${push.enabled} '
+          'tokenSet=${push.tokenSet} tokenRef=${cfg.tokenRef}');
+    } on Object catch (e, s) {
+      _log.e('sync 段消费失败（同步配置保持本地值）', error: e, stackTrace: s);
     }
   }
 
