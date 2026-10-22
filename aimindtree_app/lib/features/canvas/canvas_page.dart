@@ -8,6 +8,11 @@
 ///
 /// 兼容历史数据：笔记树的 id **等于 noteId**，所以早期按 noteId 存的位置记录天然
 /// 就是「这篇笔记的树」的成员；加载时会为每篇已有知识点的笔记补建笔记树并归集成员。
+///
+/// 顶部工具栏：左侧切换知识树；右侧动作归组为 4 个图标菜单（见 [_buildToolbarGroups]）：
+/// 知识树（新建 / 重命名 / 删除）、内容导入（笔记并入 / 已有知识点）、
+/// 布局视图（自动布局 / 框选重排 / 局部重排 / 框选移动）、
+/// AI 与作业（补前置 / 布置作业 / 作业历史 / 作业模式）。
 library;
 
 import 'package:flutter/material.dart';
@@ -1732,6 +1737,166 @@ class CanvasPageState extends State<CanvasPage> {
   String _titleOf(Note n) =>
       n.title.isEmpty ? n.contentMd.split('\n').first : n.title;
 
+  // ================= 工具栏分组 =================
+
+  /// 一个工具栏分组按钮：分组图标 + tooltip，点开弹出该组动作菜单。
+  ///
+  /// 分组按钮本身**不禁用**：「知识树」组的「新建知识树」在无树时也必须可用；
+  /// 各动作的禁用态由菜单项各自的 `enabled` 保留（与原平铺 IconButton 一致）。
+  Widget _toolbarGroupButton({
+    required IconData icon,
+    required String tooltip,
+    required List<PopupMenuEntry<int>> Function(BuildContext) itemBuilder,
+  }) {
+    return PopupMenuButton<int>(
+      icon: Icon(icon),
+      iconSize: 20,
+      tooltip: tooltip,
+      itemBuilder: itemBuilder,
+    );
+  }
+
+  /// 分组菜单里的一项：图标 + 文字。[enabled] 为 false 时保留禁用态。
+  PopupMenuItem<int> _toolbarMenuItem({
+    required IconData icon,
+    required String label,
+    required bool enabled,
+    required VoidCallback onTap,
+  }) {
+    return PopupMenuItem<int>(
+      enabled: enabled,
+      onTap: onTap,
+      child: Row(
+        children: <Widget>[
+          Icon(icon, size: 18),
+          const SizedBox(width: 10),
+          Text(label),
+        ],
+      ),
+    );
+  }
+
+  /// 工具栏右侧的 4 个分组按钮（由原来一排平铺图标归类而来）：
+  ///
+  /// 1. **知识树**（实体 CRUD）：新建知识树 / 重命名 / 删除知识树；
+  /// 2. **内容导入**：从笔记并入知识点 / 加入已有知识点；
+  /// 3. **布局视图**：自动布局 / 框选重排 / 局部重排 / 框选移动；
+  /// 4. **AI 与作业**：补前置 / 布置作业 / 作业历史 / 作业模式。
+  ///
+  /// 全部复用既有 handler；`tree == null` 时的禁用态与原实现逐项对应。
+  List<Widget> _buildToolbarGroups(KnowledgeTree? tree) {
+    final hasTree = tree != null;
+    return <Widget>[
+      // ① 知识树（实体 CRUD）
+      _toolbarGroupButton(
+        icon: Icons.account_tree,
+        tooltip: '知识树：新建 / 重命名 / 删除',
+        itemBuilder: (_) => <PopupMenuEntry<int>>[
+          _toolbarMenuItem(
+            icon: Icons.add,
+            label: '新建知识树',
+            enabled: true,
+            onTap: _newTree,
+          ),
+          _toolbarMenuItem(
+            icon: Icons.drive_file_rename_outline,
+            label: '重命名',
+            enabled: hasTree,
+            onTap: _renameTree,
+          ),
+          _toolbarMenuItem(
+            icon: Icons.delete_outline,
+            label: '删除知识树',
+            enabled: hasTree,
+            onTap: _deleteTree,
+          ),
+        ],
+      ),
+      // ② 内容导入
+      _toolbarGroupButton(
+        icon: Icons.playlist_add,
+        tooltip: '内容导入：并入笔记 / 已有知识点',
+        itemBuilder: (_) => <PopupMenuEntry<int>>[
+          _toolbarMenuItem(
+            icon: Icons.merge_type,
+            label: '从笔记并入知识点',
+            enabled: hasTree,
+            onTap: _mergeFromNote,
+          ),
+          _toolbarMenuItem(
+            icon: Icons.playlist_add,
+            label: '加入已有知识点',
+            enabled: hasTree,
+            onTap: _addKnowledgePoints,
+          ),
+        ],
+      ),
+      // ③ 布局视图
+      _toolbarGroupButton(
+        icon: Icons.dashboard_outlined,
+        tooltip: '布局视图：自动布局 / 框选重排 / 框选移动',
+        itemBuilder: (_) => <PopupMenuEntry<int>>[
+          _toolbarMenuItem(
+            icon: Icons.auto_fix_high,
+            label: '自动布局',
+            enabled: hasTree,
+            onTap: _autoLink,
+          ),
+          _toolbarMenuItem(
+            icon: _frameSelectMode ? Icons.deselect : Icons.highlight_alt,
+            label: _frameSelectMode ? '退出框选重排' : '框选重排',
+            enabled: hasTree,
+            onTap: _toggleFrameSelectMode,
+          ),
+          _toolbarMenuItem(
+            icon: Icons.schema,
+            label: '局部重排',
+            enabled: hasTree && _frameSelectMode && _selectedKpIds.isNotEmpty,
+            onTap: _relayoutSelected,
+          ),
+          _toolbarMenuItem(
+            icon: _frameMoveMode ? Icons.deselect : Icons.open_with,
+            label: _frameMoveMode ? '退出框选移动' : '框选移动',
+            enabled: hasTree,
+            onTap: _toggleFrameMoveMode,
+          ),
+        ],
+      ),
+      // ④ AI 与作业
+      _toolbarGroupButton(
+        icon: Icons.auto_awesome,
+        tooltip: 'AI 与作业：补前置 / 布置作业 / 作业历史',
+        itemBuilder: (_) => <PopupMenuEntry<int>>[
+          _toolbarMenuItem(
+            icon: Icons.lightbulb_outline,
+            label: '补前置',
+            enabled: hasTree,
+            onTap: _autoPrereq,
+          ),
+          _toolbarMenuItem(
+            icon: Icons.assignment,
+            label: '布置作业',
+            // 与作业模式条内的「布置作业」一致：未框选薄弱点时禁用。
+            enabled: hasTree && _selectedKpIds.isNotEmpty,
+            onTap: _openHomeworkPage,
+          ),
+          _toolbarMenuItem(
+            icon: Icons.history,
+            label: '作业历史',
+            enabled: hasTree,
+            onTap: _showHomeworkHistory,
+          ),
+          _toolbarMenuItem(
+            icon: _homeworkMode ? Icons.deselect : Icons.assignment_outlined,
+            label: _homeworkMode ? '退出作业模式' : '作业模式',
+            enabled: hasTree,
+            onTap: _toggleHomeworkMode,
+          ),
+        ],
+      ),
+    ];
+  }
+
   // ================= 构建 =================
 
   @override
@@ -1777,85 +1942,8 @@ class CanvasPageState extends State<CanvasPage> {
                   ),
                 ),
               ),
-              IconButton(
-                icon: const Icon(Icons.add),
-                iconSize: 20,
-                tooltip: '新建知识树',
-                onPressed: _newTree,
-              ),
-              IconButton(
-                icon: const Icon(Icons.drive_file_rename_outline),
-                iconSize: 20,
-                tooltip: '重命名',
-                onPressed: tree == null ? null : _renameTree,
-              ),
-              IconButton(
-                icon: const Icon(Icons.delete_outline),
-                iconSize: 20,
-                tooltip: '删除知识树',
-                onPressed: tree == null ? null : _deleteTree,
-              ),
-              IconButton(
-                icon: const Icon(Icons.merge_type),
-                iconSize: 20,
-                tooltip: '把某篇笔记的知识点并入当前树',
-                onPressed: tree == null ? null : _mergeFromNote,
-              ),
-              IconButton(
-                icon: const Icon(Icons.playlist_add),
-                iconSize: 20,
-                tooltip: '把已有知识点加入当前树',
-                onPressed: tree == null ? null : _addKnowledgePoints,
-              ),
-              IconButton(
-                icon: const Icon(Icons.auto_fix_high),
-                iconSize: 20,
-                tooltip: '自动连线：推断知识点之间的前置关系',
-                onPressed: tree == null ? null : _autoLink,
-              ),
-              IconButton(
-                icon: Icon(_homeworkMode
-                    ? Icons.deselect
-                    : Icons.assignment_outlined),
-                iconSize: 20,
-                tooltip: _homeworkMode
-                    ? '退出作业模式'
-                    : '作业模式：框选薄弱点布置作业',
-                onPressed: tree == null ? null : _toggleHomeworkMode,
-              ),
-              IconButton(
-                icon: Icon(_frameSelectMode
-                    ? Icons.deselect
-                    : Icons.highlight_alt),
-                iconSize: 20,
-                tooltip: _frameSelectMode
-                    ? '退出框选重排'
-                    : '框选重排：框选若干知识点后局部重排',
-                onPressed: tree == null ? null : _toggleFrameSelectMode,
-              ),
-              if (_frameSelectMode)
-                IconButton(
-                  icon: const Icon(Icons.schema),
-                  iconSize: 20,
-                  tooltip: _selectedKpIds.isEmpty
-                      ? '先框选要重排的知识点'
-                      : '局部重排：只重排选中的 ${_selectedKpIds.length} 个知识点',
-                  onPressed: _selectedKpIds.isEmpty ? null : _relayoutSelected,
-                ),
-              IconButton(
-                icon: Icon(_frameMoveMode ? Icons.deselect : Icons.open_with),
-                iconSize: 20,
-                tooltip: _frameMoveMode
-                    ? '退出框选移动'
-                    : '框选移动：框选若干知识点后拖动其中一个，整组一起移动',
-                onPressed: tree == null ? null : _toggleFrameMoveMode,
-              ),
-              IconButton(
-                icon: const Icon(Icons.lightbulb_outline),
-                iconSize: 20,
-                tooltip: '补充选中知识点的前置（先点选一个节点）',
-                onPressed: tree == null ? null : _autoPrereq,
-              ),
+              // 工具栏动作归组为 4 个分组图标菜单（详见 [_buildToolbarGroups]）。
+              ..._buildToolbarGroups(tree),
             ],
           ),
         ),
