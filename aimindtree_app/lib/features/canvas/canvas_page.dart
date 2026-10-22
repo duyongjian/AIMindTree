@@ -2005,38 +2005,34 @@ class CanvasPageState extends State<CanvasPage> {
         builder: (ctx, setSt) => AlertDialog(
           title: const Text('补前置入库：笔记归属'),
           content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                RadioListTile<_SupplementMode>(
-                  title: const Text('不新建笔记'),
-                  subtitle: const Text('直接以手动知识点入库，不做 T1 锚定校验'),
-                  value: _SupplementMode.manual,
-                  groupValue: selected,
-                  onChanged: (v) => setSt(() => selected = v!),
-                ),
-                RadioListTile<_SupplementMode>(
-                  title: const Text('并入同一份新笔记'),
-                  subtitle: const Text('拼成一篇 Markdown 走 T1 锚定（现状）'),
-                  value: _SupplementMode.newNote,
-                  groupValue: selected,
-                  onChanged: (v) => setSt(() => selected = v!),
-                ),
-                RadioListTile<_SupplementMode>(
-                  title: const Text('每条建议单独新建笔记'),
-                  subtitle: const Text('每条各自成笔记并分别锚定'),
-                  value: _SupplementMode.separateNotes,
-                  groupValue: selected,
-                  onChanged: (v) => setSt(() => selected = v!),
-                ),
-                RadioListTile<_SupplementMode>(
-                  title: const Text('追加进现有笔记'),
-                  subtitle: const Text('选一篇笔记，把建议追加进它的内容再锚定'),
-                  value: _SupplementMode.appendToNote,
-                  groupValue: selected,
-                  onChanged: (v) => setSt(() => selected = v!),
-                ),
-              ],
+            child: RadioGroup<_SupplementMode>(
+              groupValue: selected,
+              onChanged: (v) => setSt(() => selected = v ?? selected),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  RadioListTile<_SupplementMode>(
+                    title: const Text('不新建笔记'),
+                    subtitle: const Text('直接以手动知识点入库，不做 T1 锚定校验'),
+                    value: _SupplementMode.manual,
+                  ),
+                  RadioListTile<_SupplementMode>(
+                    title: const Text('并入同一份新笔记'),
+                    subtitle: const Text('拼成一篇 Markdown 走 T1 锚定（现状）'),
+                    value: _SupplementMode.newNote,
+                  ),
+                  RadioListTile<_SupplementMode>(
+                    title: const Text('每条建议单独新建笔记'),
+                    subtitle: const Text('每条各自成笔记并分别锚定'),
+                    value: _SupplementMode.separateNotes,
+                  ),
+                  RadioListTile<_SupplementMode>(
+                    title: const Text('追加进现有笔记'),
+                    subtitle: const Text('选一篇笔记，把建议追加进它的内容再锚定'),
+                    value: _SupplementMode.appendToNote,
+                  ),
+                ],
+              ),
             ),
           ),
           actions: [
