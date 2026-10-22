@@ -21,6 +21,7 @@ import 'package:aimindtree_app/data/db/drift_database.dart';
 import 'package:aimindtree_app/data/models/knowledge_point.dart';
 import 'package:aimindtree_app/data/repositories/group_repository.dart';
 import 'package:aimindtree_app/data/repositories/knowledge_repository.dart';
+import 'package:aimindtree_app/data/repositories/note_asset_repository.dart';
 import 'package:aimindtree_app/data/repositories/tree_repository.dart';
 import 'package:aimindtree_app/features/knowledge/knowledge_manage_page.dart';
 import 'package:aimindtree_app/main.dart';
@@ -53,6 +54,7 @@ void main() {
         groups: GroupRepository(db, deviceId: 'd'),
         jobs: AiJobService(baseUrl: 'http://127.0.0.1:8787'),
         ai: AiService(router: AiTaskRouter(providers: <String, AiProvider>{})),
+        assets: NoteAssetRepository(db, deviceId: 'd'),
       );
 
   group('仓储层：多选批软删的数据面', () {

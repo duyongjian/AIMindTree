@@ -3,6 +3,8 @@
 /// 标题 + Markdown 正文（分屏：左编辑 / 右预览），底部：
 /// - 保存到 Drift；
 /// - **提取知识点 (T1)** —— 一键跑通 T1 流水线。
+/// - **插入图片**（T05）：选本地图片 → 附件库（base64 唯一权威存储）
+///   → 正文插入 `aimindtree-asset://<id>` 引用 → 随笔记一起同步。
 library;
 
 import 'dart:typed_data';
@@ -13,8 +15,11 @@ import '../../ai/extraction_service.dart';
 import '../../core/result.dart';
 import '../../data/db/drift_database.dart';
 import '../../data/models/knowledge_point.dart';
+import '../../data/models/note_asset.dart';
 import '../../data/repositories/ai_session_repository.dart';
 import '../../features/teacher/teacher_page.dart';
+import 'image_source.dart';
+import 'markdown_actions.dart';
 import 'markdown_render.dart';
 import 'markdown_toolbar.dart';
 
@@ -109,9 +114,84 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
 
   /// 笔记内嵌图片 `aimindtree-asset://<assetId>` 的字节解析器。
   ///
-  /// 图片同步链路尚未接线（见后续「图片插入全链路」任务），当前一律返回 `null`
-  /// —— 渲染层会降级成「图片未同步」占位块，保证任何时候整篇笔记都能渲染出来。
-  Future<Uint8List?> _resolveAssetBytes(String assetId) async => null;
+  /// 走 [NoteAssetRepository.resolveBytes]（LRU → 库 → base64 解码 →
+  /// 回填缓存）；附件不存在（同步未到 / 已删）返回 null，渲染层降级成
+  /// 「图片未同步」占位块，保证任何时候整篇笔记都能渲染出来。
+  Future<Uint8List?> _resolveAssetBytes(String assetId) =>
+      widget.service.assets.resolveBytes(assetId);
+
+  /// 插入图片（T05 全链路）：
+  /// 1. 系统选图（取消 = 静默返回，失败 = 状态栏报错）；
+  /// 2. 新笔记先落盘一次拿 noteId（附件必须归属已存在的笔记，
+  ///    避免「附件行比笔记行先入同步批次」的乱序）；
+  /// 3. 附件入库（sha1 同笔记去重 / 2MB 上限，失败状态栏报错）；
+  /// 4. 正文光标处插入 `![name](aimindtree-asset://<id>)`；
+  /// 5. 立即再保存一次——引用随笔记一起落库，不留孤儿附件。
+  ///
+  /// [_busy] 在选图前就置起：系统对话框开着的时候不让重复点按钮
+  /// （会叠两个对话框），也不让保存 / 提取插队。
+  Future<void> _insertImage() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    final PickedImage? picked;
+    try {
+      picked = await pickImage();
+    } on Object catch (e) {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _status = '选图失败：$e';
+        });
+      }
+      return;
+    }
+    if (picked == null || !mounted) {
+      // 用户取消：静默恢复，不打扰。
+      if (mounted) setState(() => _busy = false);
+      return;
+    }
+    try {
+      setState(() => _status = '插入图片…');
+      // 2) 新笔记还没有 id：先按当前内容保存一次。
+      var noteId = _note?.id;
+      if (noteId == null) {
+        final id = await _save();
+        if (id.isEmpty || !mounted) return;
+        noteId = id;
+      }
+      // 3) 附件入库（去重 / 上限都在仓储层）。
+      final res = await widget.service.assets.putAsset(
+        noteId: noteId,
+        bytes: picked.bytes,
+        name: picked.name,
+        mime: picked.mime,
+      );
+      if (!mounted) return;
+      if (res is Failure<String>) {
+        setState(() => _status = '图片入库失败：${res.message}');
+        return;
+      }
+      final assetId = (res as Success<String>).value;
+      // 4) 插入引用（与工具栏同步动作同一套纯函数 + 写回口径）。
+      final r = insertImage(
+        _bodyCtrl.text,
+        _bodyCtrl.selection,
+        assetId,
+        picked.name,
+      );
+      _bodyCtrl.value = _bodyCtrl.value.copyWith(
+        text: r.text,
+        selection: r.selection,
+        composing: TextRange.empty,
+      );
+      _bodyFocus.requestFocus();
+      // 5) 立即保存：引用落库 + reconcile 顺带清理（理论无孤儿）。
+      //    保存成功/失败的状态由 _save() 自己写，这里不覆盖。
+      await _save();
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
 
   Future<String> _save() async {
     final id = _note?.id;
@@ -136,6 +216,15 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         _dirty = false;
         _status = '已保存';
       });
+      // 孤儿附件清理（T05）：正文引用是图片归属的唯一权威来源——
+      // 用户删掉某行 `![...](aimindtree-asset://id)` 后，对应附件在本次
+      // 保存时物理回收（删除意图经 hardDeleteNoteAssets 告诉同步对端）。
+      // 只在这里做：画布「补前置」等其它保存路径不编排图片引用，
+      // 误跑 reconcile 会把别人笔记里的插图删掉。
+      await widget.service.assets.reconcileForNote(
+        res.value.id,
+        extractAssetIds(content),
+      );
       return res.value.id;
     }
     setState(() => _status = '保存失败：${(res as Failure<Note>).message}');
@@ -254,7 +343,11 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
             ),
           ),
           const Divider(height: 1),
-          MarkdownToolbar(controller: _bodyCtrl, focusNode: _bodyFocus),
+          MarkdownToolbar(
+            controller: _bodyCtrl,
+            focusNode: _bodyFocus,
+            onInsertImage: _insertImage,
+          ),
           Expanded(
             child: Row(
               children: [

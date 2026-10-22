@@ -17,6 +17,7 @@ import '../data/db/drift_database.dart';
 import '../data/models/knowledge_point.dart';
 import '../data/repositories/group_repository.dart';
 import '../data/repositories/knowledge_repository.dart';
+import '../data/repositories/note_asset_repository.dart';
 import '../data/repositories/tree_repository.dart';
 import '../data/repositories/settings_repository.dart';
 import '../data/sync/sync_api.dart';
@@ -67,6 +68,7 @@ class ExtractionService {
     required this.trees,
     required this.groups,
     required this.jobs,
+    required this.assets,
   });
 
   final KnowledgeRepository repo;
@@ -76,6 +78,10 @@ class ExtractionService {
 
   /// AI 任务队列（/v1/jobs）：批量型 AI 功能走这里，提交即返回。
   final AiJobService jobs;
+
+  /// 笔记内嵌图片（`note_assets`）：编辑器插入图片 / 渲染解析 / 孤儿清理。
+  /// 与笔记分开同步，base64 唯一权威存储（见仓储头注释）。
+  final NoteAssetRepository assets;
 
   static final AppLog _log = AppLog('extraction');
 
@@ -377,7 +383,14 @@ class ExtractionService {
     );
 
     return (
-      ExtractionService(repo: repo, ai: ai, trees: trees, groups: groups, jobs: jobs),
+      ExtractionService(
+        repo: repo,
+        ai: ai,
+        trees: trees,
+        groups: groups,
+        jobs: jobs,
+        assets: NoteAssetRepository(database, deviceId: did),
+      ),
       database,
       router,
       settings,

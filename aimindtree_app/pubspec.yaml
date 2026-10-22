@@ -41,6 +41,10 @@ dependencies:
   logger: ^2.8.0
   path_provider: ^2.1.6
   shared_preferences: ^2.5.5
+  # 笔记内嵌图片：选文件（file_picker）+ 字节 SHA-1 去重（crypto）。
+  # 图片本体存 note_assets.data_base64（唯一权威存储），磁盘不做缓存。
+  crypto: ^3.0.6
+  file_picker: ^10.3.7
 
 dev_dependencies:
   flutter_test:

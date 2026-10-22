@@ -22,6 +22,7 @@ import 'package:aimindtree_app/data/models/knowledge_point.dart';
 import 'package:aimindtree_app/data/models/knowledge_tree.dart';
 import 'package:aimindtree_app/data/repositories/group_repository.dart';
 import 'package:aimindtree_app/data/repositories/knowledge_repository.dart';
+import 'package:aimindtree_app/data/repositories/note_asset_repository.dart';
 import 'package:aimindtree_app/data/repositories/tree_repository.dart';
 import 'package:aimindtree_app/features/canvas/canvas_page.dart';
 import 'package:drift/native.dart';
@@ -50,6 +51,7 @@ void main() {
         groups: GroupRepository(db, deviceId: 'd'),
         jobs: AiJobService(baseUrl: 'http://127.0.0.1:8787'),
         ai: AiService(router: AiTaskRouter(providers: <String, AiProvider>{})),
+        assets: NoteAssetRepository(db, deviceId: 'd'),
       );
 
   /// 整页 pump 画布页（生产环境挂在 Scaffold 下，测试保持一致）。

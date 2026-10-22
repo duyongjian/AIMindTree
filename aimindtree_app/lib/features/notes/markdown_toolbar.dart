@@ -5,8 +5,9 @@
 /// 2. 把结果写回 [TextEditingController]（正文 + 选区）；
 /// 3. 尽量把焦点还给输入框。
 ///
-/// **图片插入按钮不在本文件**（属于「图片插入全链路」任务，会复用底层的
-/// `insertImage` + `AssetResolver` 两个口子）。
+/// **图片插入是唯一异步动作**：选文件 → 入附件库 → 拿 id 拼引用，
+/// 所以它不走「同步纯函数」模式，而是由调用方通过 [onInsertImage]
+/// 注入整条流水线（见 `note_editor_page._insertImage`）。
 library;
 
 import 'package:flutter/material.dart';
@@ -19,6 +20,7 @@ class MarkdownToolbar extends StatelessWidget {
     super.key,
     required this.controller,
     this.focusNode,
+    this.onInsertImage,
     this.padding = const EdgeInsets.symmetric(horizontal: 4),
   });
 
@@ -27,6 +29,10 @@ class MarkdownToolbar extends StatelessWidget {
 
   /// 正文输入框焦点：传入后每次插入都会把焦点还给输入框。
   final FocusNode? focusNode;
+
+  /// 「插入图片」回调（选文件 + 入库 + 插入引用，异步）。
+  /// null = 不显示该按钮（调用方没接图片链路）。
+  final Future<void> Function()? onInsertImage;
 
   /// 工具栏左右留白。
   final EdgeInsetsGeometry padding;
@@ -112,6 +118,12 @@ class MarkdownToolbar extends StatelessWidget {
               tooltip: '链接（[链接文字](https://…)）',
               apply: () => insertLink(controller.text, controller.selection),
             ),
+            if (onInsertImage != null)
+              _toolButton(
+                icon: Icons.image_outlined,
+                tooltip: '插入图片（选本地图片，存入笔记附件）',
+                onPressedOverride: onInsertImage,
+              ),
             _toolButton(
               icon: Icons.table_chart,
               tooltip: '插入 2×2 表格',
@@ -131,7 +143,8 @@ class MarkdownToolbar extends StatelessWidget {
   Widget _toolButton({
     required IconData icon,
     required String tooltip,
-    required MarkdownEditResult Function() apply,
+    MarkdownEditResult Function()? apply,
+    Future<void> Function()? onPressedOverride,
   }) {
     return IconButton(
       iconSize: 20,
@@ -140,7 +153,9 @@ class MarkdownToolbar extends StatelessWidget {
       constraints: const BoxConstraints.tightFor(width: 36, height: 36),
       icon: Icon(icon, size: 20, color: Colors.grey.shade800),
       tooltip: tooltip,
-      onPressed: () => _apply(apply()),
+      // 异步动作（插入图片）直接透传回调；同步动作走「纯函数 → 写回」。
+      onPressed: onPressedOverride ??
+          (apply == null ? null : () => _apply(apply())),
     );
   }
 
