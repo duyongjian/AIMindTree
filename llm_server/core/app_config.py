@@ -5,7 +5,9 @@
 构造方式是「白名单逐字段抄」，**绝不** dump 整个 config，因此在结构上不可能
 把 ``api_key`` / Supabase token 带出去（R1 规避措施 ①）。
 
-``sync`` 只回 ``token_set`` 布尔（Q-H：明文 token **绝不**下发，C3）。
+**唯一例外**是 ``sync.token``（Supabase 同步令牌）：它经本端点明文下发给
+App —— 依赖「llm_server 仅绑 127.0.0.1（localhost，无外网暴露）」的安全
+假设，详见 :func:`build_app_config` 里 ``sync`` 段的注释（含重评条件）。
 """
 
 from __future__ import annotations
@@ -88,6 +90,11 @@ def _iso(mtime: float) -> str:
         return datetime.fromtimestamp(_STARTED).astimezone().isoformat(timespec='seconds')
 
 
+def _sync_token(sync: Mapping[str, Any]) -> str:
+    """取同步令牌（去首尾空白；空串 = 未设置）。"""
+    return str(sync.get('token') or '').strip()
+
+
 def build_app_config(
     config: Any,
     *,
@@ -128,11 +135,18 @@ def build_app_config(
         'console_url': console_url,
         'timeouts': timeouts,
         'task_backends': _task_backends_payload(config),
-        # Q-C：恒返回 object，App 不用判 null。token 明文永不出现（C3）。
+        # Q-C：恒返回 object，App 不用判 null。
+        # ⚠️ 安全假设（重评记录，2026-10）：llm_server 仅绑 127.0.0.1
+        # （localhost，无外网暴露，CORS 也只放行本机源），因此 sync.token
+        # （Supabase 同步令牌）随本端点明文下发是可接受的 —— App 需要它
+        # 直连 Supabase 做同步。**若服务端将来对非 localhost 暴露，必须
+        # 重评此处置**：要么改回只回 token_set（令牌改走其它通道分发），
+        # 要么给本端点加鉴权。改这里必须同步 App 侧 parse() 与 selftest。
         'sync': {
             'base_url': str(sync.get('base_url') or '').strip(),
-            'enabled': bool(sync.get('enabled', False)),
-            'token_set': bool(str(sync.get('token') or '').strip()),
+            'enabled': bool(sync.get('enabled', True)),
+            'token': _sync_token(sync) or None,
+            'token_set': bool(_sync_token(sync)),
         },
     }
     payload['config_sha1'] = config_sha1(payload)

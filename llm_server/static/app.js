@@ -1,5 +1,7 @@
-/* 应用壳：hash 路由 + 导航高亮 + 模块注册表 + 顶栏动作 + M8/M9 占位。
-   依赖 api.js（先加载）。 */
+/* 应用壳：hash 路由 + 导航高亮 + 模块注册表 + 顶栏动作 + M9 占位。
+   依赖 api.js（先加载）。
+   导航分三大区（见 index.html）：① 配置 m2/m3/m4/m5/m8 ·
+   ② 观测 m1/m7/m10/m6 · ③ 运维 m9。 */
 
 "use strict";
 
@@ -12,7 +14,7 @@ var MODULES = {
   m5: { title: '提示词管理', hint: '服务端 prompts/*.md 的在线编辑与热重载', render: renderPrompts },
   m6: { title: '任务调试台', hint: '按 inputs 逐个填值，跑一次真实任务看结果', render: renderPlayground },
   m7: { title: '运行日志', hint: '进程内日志环形缓冲：按级别 / 模块 / 关键字过滤，点击行看全文', render: renderLogs },
-  m8: { title: '同步（Supabase）', hint: 'P1：同步地址与令牌', render: renderPlaceholder },
+  m8: { title: '同步配置', hint: 'Supabase 同步地址 / 令牌 / 启用开关（settings.json · sync 段）', render: renderSync },
   m9: { title: '备份与系统信息', hint: 'P1：配置导出 / 导入', render: renderPlaceholder },
   m10: { title: '任务队列', hint: '批量型 AI 任务的实时队列：状态 / 进度 / 资源锁 / 取消（与 M7 日志互补）', render: renderJobs },
 };
@@ -58,20 +60,18 @@ function route() {
 /** 重新渲染当前页（顶栏「刷新」）。 */
 function refreshCurrent() { route(); }
 
-/* ---------------- M8 / M9 占位 ---------------- */
+/* ---------------- M9 占位 ---------------- */
 
 function renderPlaceholder(root) {
   var key = root.getAttribute('data-page');
   var plans = {
-    m8: 'P1（AC-29）：Supabase 同步配置。服务端 settings.sync 段（base_url / enabled / token）'
-      + '已落盘并只回显 token_set 布尔，本页接上表单即可；令牌明文永不下发给 App（C3）。',
     m9: 'P1（AC-23）：配置导出 / 导入。core/config.py 的 save_settings() 已支持任意段，'
       + '导出 settings.json + config.yaml 只读快照即可，不需要新的服务端接口。',
   };
   root.appendChild(makeEl('div', 'card',
     '<h2>本模块尚未实现（P1）</h2>' +
     '<p class="hint">' + esc(plans[key] || '') + '</p>' +
-    '<p class="muted small">当前 P0 范围是 M1–M6：配置收口、下发、路由、提示词、调试台。</p>'));
+    '<p class="muted small">配置 / 观测 / 运维三大区的其余模块均已实现。</p>'));
 }
 
 /* ---------------- 顶栏动作 ---------------- */

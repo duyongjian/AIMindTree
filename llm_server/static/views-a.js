@@ -345,7 +345,7 @@ function buildBackendCard(b, defaultBackend, forms) {
 
 function renderAppConfig(root) {
   var formCard = makeEl('div', 'card',
-    '<h2>下发配置</h2><p class="hint">写入 settings.json 的 app / sync 段（无任何密钥）</p>');
+    '<h2>下发配置</h2><p class="hint">写入 settings.json 的 app 段（无任何密钥；同步配置见「同步配置」页）</p>');
   formCard.appendChild(makeEl('div', 'spinner', '加载中…'));
   var previewCard = makeEl('div', 'card',
     '<h2>真实下发内容</h2><p class="hint">GET /v1/app/config —— App 启动时看到的就是这一段</p>');
@@ -361,10 +361,9 @@ function renderAppConfig(root) {
     var cfg = res[0] || {};
     var pushed = res[1] || {};
     var app = cfg.app || {};
-    var sync = cfg.sync || {};
     var timeouts = app.timeouts || {};
 
-    formCard.innerHTML = '<h2>下发配置</h2><p class="hint">写入 settings.json 的 app / sync 段（无任何密钥）</p>';
+    formCard.innerHTML = '<h2>下发配置</h2><p class="hint">写入 settings.json 的 app 段（无任何密钥；同步配置见「同步配置」页）</p>';
 
     var nameLabel = makeEl('label', '', '服务显示名');
     var nameInput = makeEl('input');
@@ -401,27 +400,6 @@ function renderAppConfig(root) {
     }
     formCard.appendChild(tRow);
 
-    var sRow = makeEl('div', 'row');
-    var sUrlCol = makeEl('div', '');
-    sUrlCol.appendChild(makeEl('label', '', '同步地址 sync.base_url（P1）'));
-    var sUrl = makeEl('input');
-    sUrl.type = 'text';
-    sUrl.value = sync.base_url || '';
-    sUrl.placeholder = 'https://xxx.supabase.co';
-    sUrlCol.appendChild(sUrl);
-    var sTokCol = makeEl('div', '');
-    sTokCol.appendChild(makeEl('label', '', '同步令牌 sync.token（只写不读）'));
-    var sTok = makeEl('input');
-    sTok.type = 'password';
-    sTok.placeholder = sync.token_set ? '（已设置，留空则不改）' : '（未设置）';
-    sTok.autocomplete = 'off';
-    sTokCol.appendChild(sTok);
-    sRow.appendChild(sUrlCol);
-    sRow.appendChild(sTokCol);
-    formCard.appendChild(sRow);
-    formCard.appendChild(makeEl('p', 'field-help',
-      '令牌只落盘、永不回显（只返回 token_set 布尔），也永不下发给 App —— 密钥边界 C3。'));
-
     var bar = makeEl('div', 'actions');
     var saveBtn = makeEl('button', 'btn', '保存');
     var msg = makeEl('span', 'msg');
@@ -440,9 +418,6 @@ function renderAppConfig(root) {
         if (!Object.prototype.hasOwnProperty.call(tInputs, key)) continue;
         body.app.timeouts[key] = Number(tInputs[key].value);
       }
-      var syncBody = { base_url: sUrl.value.trim() };
-      if (sTok.value) syncBody.token = sTok.value;
-      body.sync = syncBody;
       saveAdminConfig(body)
         .then(function () {
           msg.textContent = '已保存 ✅';
@@ -552,4 +527,130 @@ function renderSelfCheck(card, pushed, rawText) {
   }
   card.appendChild(box);
   card.appendChild(leakWrap);
+}
+
+/* ================================================================
+   M8 同步配置（Supabase）：base_url / token / enabled
+   GET/PUT /v1/admin/sync。语义：文本框留空 = 不修改已保存值；
+   「清空令牌」= 删除已保存令牌（token_set 变 false）。
+   ================================================================ */
+
+function renderSync(root) {
+  var formCard = makeEl('div', 'card',
+    '<h2>同步配置</h2><p class="hint">GET/PUT /v1/admin/sync —— 写入 settings.json 的 sync 段（config.yaml 永不被写入）</p>');
+  formCard.appendChild(makeEl('div', 'spinner', '加载中…'));
+  var previewCard = makeEl('div', 'card',
+    '<h2>App 实际收到的 sync 段</h2><p class="hint">GET /v1/app/config · sync —— App 启动时看到的就是这一段</p>');
+  previewCard.appendChild(makeEl('div', 'spinner', '加载中…'));
+  root.appendChild(formCard);
+  root.appendChild(previewCard);
+
+  Promise.all([adminSync(), appConfig()]).then(function (res) {
+    var sync = res[0] || {};
+    var pushed = (res[1] || {}).sync || {};
+
+    formCard.innerHTML = '<h2>同步配置</h2><p class="hint">GET/PUT /v1/admin/sync —— 写入 settings.json 的 sync 段（config.yaml 永不被写入）</p>';
+
+    var urlLabel = makeEl('label', '', '同步地址 base_url');
+    var urlInput = makeEl('input');
+    urlInput.type = 'text';
+    urlInput.value = sync.base_url || '';
+    urlInput.placeholder = 'https://<project>.supabase.co';
+    formCard.appendChild(urlLabel);
+    formCard.appendChild(urlInput);
+
+    var enWrap = makeEl('div', 'mt');
+    var enInput = makeEl('input');
+    enInput.type = 'checkbox';
+    enInput.id = 'syncEnabled';
+    enInput.checked = sync.enabled !== false; // 缺省/未传按 true
+    var enLabel = makeEl('label', 'small nowrap', '启用同步 enabled');
+    enLabel.htmlFor = 'syncEnabled';
+    enLabel.style.margin = '0';
+    enWrap.appendChild(enInput);
+    enWrap.appendChild(enLabel);
+    formCard.appendChild(enWrap);
+
+    var tokLabel = makeEl('label', '', '同步令牌 token');
+    var tokInput = makeEl('input');
+    tokInput.type = 'password';
+    tokInput.autocomplete = 'off';
+    tokInput.placeholder = sync.token_set
+      ? '已设置（' + (sync.token_masked || '') + '），留空 = 不修改'
+      : '（未设置）';
+    formCard.appendChild(tokLabel);
+    formCard.appendChild(tokInput);
+
+    formCard.appendChild(makeEl('p', 'field-help',
+      '语义：文本框留空 = 不修改已保存值；点「清空令牌」= 删除已保存令牌。' +
+      '令牌只写不读：管理接口永不回显明文（只有 token_set / token_masked）。'));
+
+    var bar = makeEl('div', 'actions');
+    var saveBtn = makeEl('button', 'btn', '保存');
+    var clearBtn = makeEl('button', 'btn ghost', '清空令牌');
+    var msg = makeEl('span', 'msg');
+    bar.appendChild(saveBtn);
+    bar.appendChild(clearBtn);
+    bar.appendChild(msg);
+    formCard.appendChild(bar);
+
+    saveBtn.addEventListener('click', function () {
+      saveBtn.disabled = true;
+      clearBtn.disabled = true;
+      msg.className = 'msg';
+      msg.textContent = '保存中…';
+      var body = { base_url: urlInput.value.trim(), enabled: enInput.checked };
+      if (tokInput.value) body.token = tokInput.value;
+      saveSync(body)
+        .then(function () {
+          msg.textContent = '已保存 ✅';
+          msg.className = 'msg ok';
+          refreshCurrent();
+        })
+        .catch(function (e) {
+          msg.textContent = humanizeError(e);
+          msg.className = 'msg err';
+        })
+        .then(function () { saveBtn.disabled = false; clearBtn.disabled = false; });
+    });
+
+    clearBtn.addEventListener('click', function () {
+      saveBtn.disabled = true;
+      clearBtn.disabled = true;
+      msg.className = 'msg';
+      msg.textContent = '清空中…';
+      saveSync({ token: '' })
+        .then(function () {
+          msg.textContent = '令牌已清空 ✅';
+          msg.className = 'msg ok';
+          refreshCurrent();
+        })
+        .catch(function (e) {
+          msg.textContent = humanizeError(e);
+          msg.className = 'msg err';
+        })
+        .then(function () { saveBtn.disabled = false; clearBtn.disabled = false; });
+    });
+
+    /* ---- App 实际收到的 sync 段（含 token 明文的真实下发内容） ---- */
+    previewCard.innerHTML = '<h2>App 实际收到的 sync 段</h2><p class="hint">GET /v1/app/config · sync —— App 启动时看到的就是这一段</p>';
+    var kv = makeEl('div', 'kv');
+    kv.innerHTML =
+      '<div><span class="k">base_url</span><span class="mono">' + esc(pushed.base_url || '（空）') + '</span></div>' +
+      '<div><span class="k">enabled</span>' + (pushed.enabled ? badge('ok', 'true') : badge('grey', 'false')) + '</div>' +
+      '<div><span class="k">token</span>' + (pushed.token
+        ? badge('warn', '明文随配置下发') + ' <span class="mono">' + esc(pushed.token) + '</span>'
+        : badge('grey', 'null（未设置）')) + '</div>' +
+      '<div><span class="k">token_set</span>' + (pushed.token_set ? badge('ok', 'true') : badge('grey', 'false')) + '</div>';
+    previewCard.appendChild(kv);
+    previewCard.appendChild(makeEl('pre', '', esc(JSON.stringify(pushed, null, 2))));
+    previewCard.appendChild(makeEl('p', 'field-help',
+      '安全假设：llm_server 仅绑 127.0.0.1（localhost，无外网暴露），sync.token 随配置明文下发；' +
+      '若服务端将来对非 localhost 暴露，需重评此处置（见 core/app_config.py 注释）。'));
+  }).catch(function (e) {
+    formCard.innerHTML = '<h2>同步配置</h2>';
+    cardError(formCard, e, function () { refreshCurrent(); });
+    previewCard.innerHTML = '<h2>App 实际收到的 sync 段</h2>';
+    cardError(previewCard, e, function () { refreshCurrent(); });
+  });
 }

@@ -5,6 +5,9 @@
 - ``GET  /v1/admin/config``   —— 当前生效配置摘要（含 per-backend base_url / app / sync）
 - ``POST /v1/admin/config``   —— 保存覆盖层（默认后端 / 默认模型 / minimax 协议 / key /
   per-backend 四字段 / app / sync / task_backends）
+- ``GET  /v1/admin/sync``     —— 同步配置（Supabase）：base_url / enabled / token_set /
+  token_masked（**无 token 明文**）
+- ``PUT  /v1/admin/sync``     —— 保存同步配置（空串 = 清空令牌；缺 key = 不修改）
 - ``GET  /v1/admin/models``   —— 某后端的可用模型列表（含兜底，允许前端自由输入）
 - ``GET  /v1/admin/balance``  —— MiniMax 余额 / 额度查询
 - ``GET  /v1/admin/routes``   —— 任务路由（AC-05）
@@ -13,7 +16,9 @@
 - ``GET  /v1/admin/logs``     —— 运行日志（M7：core/logbuf 环形缓冲查询）
 
 所有密钥一律**不回传明文**：只暴露 ``key_set``（是否设置）和 ``key_masked``（掩码）；
-``sync`` 只回 ``token_set`` 布尔。
+``sync`` 只回 ``token_set`` 布尔，专用端点最多多给 ``token_masked``。
+``/v1/app/config`` 的 ``sync.token`` 明文下发是唯一例外（依赖「服务端仅绑
+127.0.0.1」的安全假设，见 ``core/app_config.py`` 注释）。
 """
 
 from __future__ import annotations
@@ -105,7 +110,7 @@ def _config_summary(request: Request) -> dict:
         },
         'sync': {
             'base_url': str(sync.get('base_url') or ''),
-            'enabled': bool(sync.get('enabled', False)),
+            'enabled': bool(sync.get('enabled', True)),
             'token_set': bool(str(sync.get('token') or '').strip()),
         },
     }
@@ -128,7 +133,8 @@ async def post_admin_config(request: Request) -> JSONResponse:
         - ``minimax_api_key``：MiniMax 订阅 Key（写入 settings.json，不碰 config.yaml）
         - ``backends``：``{name: {base_url, protocol, default_model, models, api_key}}``
         - ``app``：``{service_name, console_url, timeouts}``（无密钥）
-        - ``sync``：``{base_url, enabled, token}``（token 落盘，永不回显）
+        - ``sync``：``{base_url, enabled, token}``（token 落盘；管理响应永不回显
+          明文，只回 token_set）
         - ``task_backends``：``{T1: 'ollama' | {backend, model} | null}``
     """
     state = request.app.state
@@ -188,6 +194,99 @@ async def post_admin_config(request: Request) -> JSONResponse:
 
     _log.info('管理后台已保存配置并热重载')
     return JSONResponse(_config_summary(request))
+
+
+# ---------------------------------------------------------------- 同步配置
+
+
+def _sync_payload(request: Request) -> dict:
+    """``GET / PUT /v1/admin/sync`` 的同构响应体（**无 token 明文**）。"""
+    config = request.app.state.config  # type: ignore[attr-defined]
+    sync = dict(config.sync or {})
+    token = str(sync.get('token') or '').strip()
+    return {
+        'base_url': str(sync.get('base_url') or '').strip(),
+        'enabled': bool(sync.get('enabled', True)),
+        'token_set': bool(token),
+        'token_masked': (config.mask(token) if token else None),
+    }
+
+
+@router.get('/v1/admin/sync')
+async def get_admin_sync(request: Request) -> JSONResponse:
+    """同步配置（Supabase）：``base_url`` / ``enabled`` / ``token_set`` / ``token_masked``。
+
+    与 ``GET /v1/admin/config`` 的 ``sync`` 段同源，但多给 ``token_masked``；
+    **任何管理接口都不回 token 明文**（C3）。
+    """
+    return JSONResponse(_sync_payload(request))
+
+
+@router.put('/v1/admin/sync')
+async def put_admin_sync(request: Request) -> JSONResponse:
+    """保存同步配置到 settings.json（``sync`` 段），热重载后返回同构响应。
+
+    body（均可选；**缺 key = 不修改该字段**）：
+        - ``base_url``：字符串（空串 = 清空地址）；
+        - ``enabled``：布尔值；
+        - ``token``：字符串，**空串（或纯空白 / null）= 清空已保存令牌**；
+          缺 key = 不修改。令牌只在保存时写入，任何响应都不回显明文。
+
+    落盘后经 ``config.load()`` 立即生效；``GET /v1/app/config`` 的 ``sync``
+    段会带上 ``token`` 明文（依赖「服务端仅绑 127.0.0.1」的安全假设，
+    见 ``core/app_config.py`` 注释）。
+    """
+    state = request.app.state
+    config = state.config  # type: ignore[attr-defined]
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise invalid_request(f'请求体不是合法 JSON（{exc}）') from exc
+    if not isinstance(body, dict):
+        raise invalid_request('body 必须是 JSON 对象')
+
+    canonical = _validate_sync_put(body)
+    if not canonical.get('sync'):
+        # 三个键都没传 → 视为「不修改」，直接返回当前值（与 routes 的口径一致）。
+        return JSONResponse(_sync_payload(request))
+
+    config.save_settings(canonical)  # type: ignore[attr-defined]
+    config.load()  # type: ignore[attr-defined]  # 立即把新覆盖层生效到内存
+    state.clear_backends()  # type: ignore[attr-defined]  # 旧后端实例（含旧 key）失效
+    _log.info(
+        '管理后台已保存同步配置（base_url=%s, enabled=%s）',
+        canonical['sync'].get('base_url'),
+        canonical['sync'].get('enabled'),
+    )
+    return JSONResponse(_sync_payload(request))
+
+
+def _validate_sync_put(body: dict) -> dict:
+    """校验 ``PUT /v1/admin/sync`` 的 body（扁平三字段，非嵌套）。
+
+    ``token`` 语义（写死，前端与文档都按此）：
+    **空串 / 纯空白 / null = 清空已保存令牌；缺 key = 不修改**。
+    """
+    out: dict[str, Any] = {}
+    base_url = body.get('base_url')
+    if base_url is not None:
+        if not isinstance(base_url, str):
+            raise invalid_request('sync.base_url 必须是字符串')
+        out['base_url'] = base_url.strip()
+    enabled = body.get('enabled')
+    if enabled is not None:
+        if not isinstance(enabled, bool):
+            raise invalid_request('sync.enabled 必须是布尔值')
+        out['enabled'] = enabled
+    if 'token' in body:
+        token = body.get('token')
+        if token is None:
+            out['token'] = ''  # null = 清空（与空串同义）
+        elif isinstance(token, str):
+            out['token'] = token if token.strip() else ''  # 空串/纯空白 = 清空
+        else:
+            raise invalid_request('sync.token 必须是字符串或 null')
+    return {'sync': out} if out else {}
 
 
 # ---------------------------------------------------------------- 校验器
@@ -281,7 +380,8 @@ def _validate_app(body: dict) -> dict:
 
 
 def _validate_sync(body: dict) -> dict:
-    """校验 ``sync: {base_url, enabled, token}``（token 落盘但**永不回显**）。"""
+    """校验 ``sync: {base_url, enabled, token}``（token 落盘；管理响应只回
+    ``token_set`` / ``token_masked``，**不回明文**）。"""
     raw = body.get('sync')
     if raw is None:
         return {}

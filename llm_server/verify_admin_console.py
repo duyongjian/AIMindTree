@@ -7,7 +7,9 @@
 覆盖：
 
 1. ``GET /health`` **结构逐字段不变**（C4 向后兼容）；
-2. ``GET /v1/app/config``：200 + 13 字段白名单 + **无鉴权**（C10）；
+2. ``GET /v1/app/config``：200 + 13 字段白名单 + **无鉴权**（C10）+
+   ``sync`` = ``{base_url, enabled, token, token_set}``（App 契约；token 明文
+   随配置下发是唯一例外，依赖「服务端仅绑 127.0.0.1」的安全假设）；
 3. ``GET /v1/admin/config``：既有字段一字不改 + 新增 5 个字段；
 4. **密钥零扩散**（C3，最高优先级）：把 ``.env`` 里每个疑似密钥（名含
    KEY/TOKEN/SECRET 且长度 ≥ 8）的真实值拿来做字符串级断言 —— 必须
@@ -19,6 +21,8 @@
 7b. 任务队列 ``POST/GET /v1/jobs``（202 提交 / 幂等去重 / 409 锁冲突 / 取消
     queued 即消 / running 检查点 / 终态环形保留 / M7 日志联动 / **密钥零泄露**）；
 8. 配置写入往返（``app`` / ``sync`` / per-backend / ``task_backends``）+ **还原**；
+8b. 同步配置端点 ``GET/PUT /v1/admin/sync``（形状 / 空串清空 / 缺 key 不修改 /
+    非法值 400 / 无 token 明文回显）+ **还原**；
 9. 静态资源挂载（``/admin``、``/static/*``）；
 10. 可选：真实链路 ``POST /v1/task/T1`` + ``POST /v1/chat``（blocking 与 SSE
     两条路径都要进埋点）（``--live``，需要本机 Ollama 在跑，约 60s）。
@@ -203,13 +207,14 @@ def check_app_config(c: TestClient, secrets: dict[str, str]) -> dict:
     )
     sync = body.get('sync')
     check(
-        isinstance(sync, dict) and set(sync) == {'base_url', 'enabled', 'token_set'},
-        'sync 恒为 object 且只含 base_url/enabled/token_set（Q-C, C3）',
+        isinstance(sync, dict) and set(sync) == {'base_url', 'enabled', 'token', 'token_set'},
+        'sync 恒为 object 且含 base_url/enabled/token/token_set（App 契约）',
         str(sync),
     )
     check(
-        isinstance(sync, dict) and 'token' not in sync and isinstance(sync.get('token_set'), bool),
-        'sync 里没有 token 明文（只有 token_set 布尔）',
+        isinstance(sync, dict) and isinstance(sync.get('token_set'), bool)
+        and (sync.get('token') is None or isinstance(sync.get('token'), str)),
+        'sync.token 为 string|null、token_set 为 bool',
         str(sync),
     )
     check(
@@ -644,7 +649,7 @@ def check_config_roundtrip(c: TestClient) -> None:
         r5 = c.post('/v1/admin/config', json={'sync': {'enabled': 'yes'}})
         check(r5.status_code == 400, 'sync.enabled 非 bool → 400', str(r5.status_code))
 
-        # 下发端能看到 app.service_name，且 sync 只回布尔
+        # 下发端能看到 app.service_name；sync 按新契约含 token 明文
         pushed = c.get('/v1/app/config').json()
         check(
             pushed.get('service_name') == '验收临时名',
@@ -652,14 +657,10 @@ def check_config_roundtrip(c: TestClient) -> None:
             str(pushed.get('service_name')),
         )
         check(
-            pushed.get('sync', {}).get('token_set') is True
-            and 'token' not in (pushed.get('sync') or {}),
-            '下发 sync 只有 token_set（无明文）',
+            pushed.get('sync', {}).get('token') == 'verify-temp-token-should-never-be-echoed'
+            and pushed.get('sync', {}).get('token_set') is True,
+            '下发 sync 含 token 明文 + token_set（新契约：localhost 假设下随配置下发）',
             str(sorted((pushed.get('sync') or {}).keys())),
-        )
-        check(
-            'verify-temp-token-should-never-be-echoed' not in json.dumps(pushed, ensure_ascii=False),
-            '临时 token 未出现在下发体',
         )
     finally:
         # 还原 settings.json（原本不存在则删除），保证仓库零污染
@@ -668,6 +669,100 @@ def check_config_roundtrip(c: TestClient) -> None:
         elif settings_path.is_file():
             settings_path.unlink()
         print('  ↩️  settings.json 已还原（C9：config.yaml 全程未被写入）')
+
+
+def check_sync_endpoints(c: TestClient, secrets: dict[str, str]) -> None:
+    print('\n[8b] GET/PUT /v1/admin/sync —— 同步配置端点（B-backend）')
+    settings_path = _HERE / 'settings.json'
+    original: str | None = None
+    existed = settings_path.is_file()
+    if existed:
+        original = settings_path.read_text(encoding='utf-8')
+
+    token = 'verify-sync-token-should-not-echo'
+    try:
+        r = c.get('/v1/admin/sync')
+        if not check(r.status_code == 200, 'GET 返回 200', f'实际 {r.status_code}'):
+            return
+        body = r.json()
+        check(
+            set(body) == {'base_url', 'enabled', 'token_set', 'token_masked'},
+            'GET 形状 = {base_url, enabled, token_set, token_masked}（无 token 明文）',
+            str(sorted(body)),
+        )
+
+        r2 = c.put('/v1/admin/sync', json={
+            'base_url': 'https://verify.supabase.co', 'enabled': True, 'token': token,
+        })
+        if not check(r2.status_code == 200, 'PUT 返回 200', f'{r2.status_code} {r2.text[:120]}'):
+            return
+        out = r2.json()
+        check(out.get('base_url') == 'https://verify.supabase.co', 'PUT 后 base_url 生效')
+        check(out.get('enabled') is True, 'PUT 后 enabled 生效')
+        check(out.get('token_set') is True, 'PUT 后 token_set=True')
+        check(
+            'token' not in out and token not in json.dumps(out, ensure_ascii=False),
+            'PUT 响应不含 token 明文（只有 token_masked）',
+            str(sorted(out)),
+        )
+
+        # /v1/app/config 契约：sync = {base_url, enabled, token, token_set}
+        psync = c.get('/v1/app/config').json().get('sync') or {}
+        check(
+            set(psync) == {'base_url', 'enabled', 'token', 'token_set'},
+            '下发 sync = {base_url, enabled, token, token_set}（App 契约）',
+            str(sorted(psync)),
+        )
+        check(
+            psync.get('token') == token and psync.get('token_set') is True,
+            '下发 sync.token 为明文（localhost 假设下随配置下发）',
+        )
+
+        # 空串 = 清空
+        r3 = c.put('/v1/admin/sync', json={'token': ''})
+        out3 = r3.json() if r3.status_code == 200 else {}
+        check(
+            r3.status_code == 200 and out3.get('token_set') is False
+            and out3.get('token_masked') is None,
+            'PUT token="" → 清空令牌',
+            str(out3),
+        )
+        psync = c.get('/v1/app/config').json().get('sync') or {}
+        check(
+            psync.get('token') is None and psync.get('token_set') is False,
+            '清空后下发 sync.token=None',
+            str(psync),
+        )
+
+        # 缺 key = 不修改
+        r4 = c.put('/v1/admin/sync', json={'enabled': False})
+        out4 = r4.json() if r4.status_code == 200 else {}
+        check(
+            out4.get('enabled') is False
+            and out4.get('base_url') == 'https://verify.supabase.co',
+            'PUT 只传 enabled → base_url 不修改（缺 key 语义）',
+            str(out4),
+        )
+
+        # 非法值 → 400 invalid_request
+        for field, value in (('base_url', 1), ('enabled', 'yes'), ('token', 5)):
+            rr = c.put('/v1/admin/sync', json={field: value})
+            check(
+                rr.status_code == 400
+                and rr.json().get('error', {}).get('code') == 'invalid_request',
+                f'PUT {field}={value!r} → 400 invalid_request',
+                str(rr.status_code),
+            )
+
+        # 密钥零扩散：.env 里的 LLM 密钥不得出现在本组任何响应里
+        assert_no_secret(r.text + r2.text + r3.text, secrets, '/v1/admin/sync')
+    finally:
+        # 还原 settings.json（原本不存在则删除），保证仓库零污染
+        if existed and original is not None:
+            settings_path.write_text(original, encoding='utf-8')
+        elif settings_path.is_file():
+            settings_path.unlink()
+        print('  ↩️  settings.json 已还原')
 
 
 def check_static(c: TestClient) -> None:
@@ -681,7 +776,7 @@ def check_static(c: TestClient) -> None:
     check('<html' in r.text.lower(), '/admin 返回 HTML 骨架')
     r2 = c.get('/')
     check(r2.status_code == 200, 'GET / → 200', f'实际 {r2.status_code}')
-    for name in ('app.css', 'api.js', 'app.js', 'views-a.js', 'views-b.js', 'views-c.js'):
+    for name in ('app.css', 'api.js', 'app.js', 'views-a.js', 'views-b.js', 'views-c.js', 'views-d.js'):
         path = _HERE / 'static' / name
         if not path.is_file():
             skip(f'/static/{name} → 200', '文件尚未创建')
@@ -796,6 +891,7 @@ def main(argv: list[str] | None = None) -> int:
         check_logs(c, secrets)
         check_jobs(c, secrets)
         check_config_roundtrip(c)
+        check_sync_endpoints(c, secrets)
         check_static(c)
         if live:
             check_live_t1(c)

@@ -95,6 +95,10 @@ function apiPut(path, body) { return _request('PUT', path, body || {}); }
 function health() { return apiGet('/health'); }
 function adminConfig() { return apiGet('/v1/admin/config'); }
 function saveAdminConfig(body) { return apiPost('/v1/admin/config', body); }
+/* 同步配置（Supabase）：GET 只回 token_set / token_masked，无明文；
+   PUT 语义：文本框留空 = 不修改，token 空串 = 清空。 */
+function adminSync() { return apiGet('/v1/admin/sync'); }
+function saveSync(body) { return apiPut('/v1/admin/sync', body); }
 function adminModels(backend) {
   return apiGet('/v1/admin/models?backend=' + encodeURIComponent(backend || ''));
 }

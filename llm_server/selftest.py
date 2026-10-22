@@ -15,6 +15,14 @@
     14 个任务的 structured / json_output / output_key / inputs 必须与 App 侧
     解析器契约一致（字段名逐字对齐）。已加载的逐个校验，未加载的列为 INFO。
 
+**C. App 端 inputs ↔ front-matter inputs 双向对账**（防静默丢弃）
+
+**D. 管理后台**（settings 覆盖层往返 + balance 结构化）
+
+**E. 同步配置**（``GET/PUT /v1/admin/sync`` + ``/v1/app/config`` 的 sync 段：
+    4 键契约 / 空串清空 / 缺 key 不修改 / 400 校验 / settings.json 落盘。
+    TestClient 进程内 + 临时目录，不污染仓库）。
+
 用法::
 
     python llm_server/selftest.py
@@ -24,6 +32,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
@@ -436,6 +445,157 @@ async def _check_balance_structured() -> int:
     return failures
 
 
+# ---------------------------------------------------------------- E. 同步配置
+
+
+def run_sync_checks() -> tuple[int, int]:
+    """E. 同步配置自检：``GET/PUT /v1/admin/sync`` + ``/v1/app/config`` 的 sync 段。
+
+    覆盖（App 契约 + 管理接口语义）：
+    1. ``GET /v1/admin/sync`` 形状 = ``{base_url, enabled, token_set, token_masked}``，
+       初始无 token、**无 token 明文**；
+    2. ``PUT`` 保存后 ``token_set=True``、回显仍无明文；
+    3. ``sync`` 段落盘 ``settings.json``；
+    4. ``/v1/app/config`` 的 ``sync`` = ``{base_url, enabled, token, token_set}``，
+       且 ``token`` 为明文（localhost 假设下随配置下发，唯一例外）；
+    5. ``token`` 空串 = 清空；缺 key = 不修改；
+    6. 类型错误 → 400 ``invalid_request``；
+    7. 重载 ``Config`` 后 sync 段仍生效。
+
+    全程 TestClient 进程内 + 临时目录（config.yaml / settings.json 都写在
+    临时目录），**不污染仓库**。返回 ``(failures, total)``。
+    """
+    import tempfile
+
+    from fastapi.testclient import TestClient
+
+    from core.config import Config
+    from server import create_app
+
+    state = {'total': 0, 'fail': 0}
+
+    def expect(cond: bool, name: str, detail: str = '') -> None:
+        state['total'] += 1
+        if cond:
+            print(f'  ✅ {name}' + (f'  —— {detail}' if detail else ''))
+        else:
+            state['fail'] += 1
+            print(f'  ❌ {name}' + (f'\n      {detail}' if detail else ''))
+
+    d = tempfile.mkdtemp(prefix='aimindtree_sync_')
+    cfg_path = Path(d) / 'config.yaml'
+    cfg_path.write_text(_SAMPLE_CONFIG_YAML, encoding='utf-8')
+    settings_path = Path(d) / 'settings.json'
+    token = 'sync-selftest-token-abcdef'
+
+    app = create_app(cfg_path)
+    with TestClient(app) as c:
+        # ① GET 初始形状（无 token）
+        r = c.get('/v1/admin/sync')
+        expect(r.status_code == 200, 'GET /v1/admin/sync 返回 200', f'实际 {r.status_code}')
+        body = r.json() if r.status_code == 200 else {}
+        expect(
+            set(body) == {'base_url', 'enabled', 'token_set', 'token_masked'},
+            'GET 形状 = {base_url, enabled, token_set, token_masked}',
+            str(sorted(body)),
+        )
+        expect(
+            body.get('token_set') is False and body.get('token_masked') is None
+            and 'token' not in body,
+            '初始无 token：token_set=False、token_masked=None、无明文',
+            str(body),
+        )
+
+        # ② PUT 保存（含 token）
+        r = c.put('/v1/admin/sync', json={
+            'base_url': 'https://demo.supabase.co', 'enabled': True, 'token': token,
+        })
+        expect(r.status_code == 200, 'PUT /v1/admin/sync 返回 200', f'实际 {r.status_code}')
+        body = r.json() if r.status_code == 200 else {}
+        expect(
+            body.get('base_url') == 'https://demo.supabase.co' and body.get('enabled') is True,
+            'PUT 回显 base_url / enabled 已生效',
+            str(body),
+        )
+        expect(
+            body.get('token_set') is True and 'token' not in body
+            and bool(body.get('token_masked')),
+            'PUT 回显 token_set=True + token_masked，无 token 明文',
+            str(sorted(body)),
+        )
+
+        # ③ settings.json 落盘（sync 段）
+        expect(
+            settings_path.is_file()
+            and (json.loads(settings_path.read_text(encoding='utf-8'))
+                 .get('sync', {}).get('token') == token),
+            'sync 段已写入 settings.json（token 只落盘）',
+        )
+
+        # ④ /v1/app/config 契约：{base_url, enabled, token, token_set}
+        psync = c.get('/v1/app/config').json().get('sync') or {}
+        expect(
+            set(psync) == {'base_url', 'enabled', 'token', 'token_set'},
+            '下发 sync 键集合 = {base_url, enabled, token, token_set}（App 契约）',
+            str(sorted(psync)),
+        )
+        expect(
+            psync.get('token') == token and psync.get('token_set') is True
+            and psync.get('enabled') is True
+            and psync.get('base_url') == 'https://demo.supabase.co',
+            '下发 sync 内容与保存值一致（token 明文随配置下发）',
+            str(psync.get('base_url')),
+        )
+
+        # ⑤ 空串 = 清空
+        r = c.put('/v1/admin/sync', json={'token': ''})
+        body = r.json() if r.status_code == 200 else {}
+        expect(
+            r.status_code == 200 and body.get('token_set') is False
+            and body.get('token_masked') is None,
+            'PUT token="" → 清空（token_set=False）',
+            str(body),
+        )
+        psync = c.get('/v1/app/config').json().get('sync') or {}
+        expect(
+            psync.get('token') is None and psync.get('token_set') is False,
+            '清空后下发 sync.token=None、token_set=False',
+            str(psync),
+        )
+
+        # ⑥ 缺 key = 不修改（只传 enabled，base_url 应保持）
+        r = c.put('/v1/admin/sync', json={'enabled': False})
+        body = r.json() if r.status_code == 200 else {}
+        expect(
+            body.get('enabled') is False
+            and body.get('base_url') == 'https://demo.supabase.co',
+            'PUT 只传 enabled → base_url 不修改（缺 key 语义）',
+            str(body),
+        )
+
+        # ⑦ 类型错误 → 400 invalid_request
+        for field, value in (('base_url', 123), ('enabled', 'yes'), ('token', 5)):
+            rr = c.put('/v1/admin/sync', json={field: value})
+            expect(
+                rr.status_code == 400
+                and rr.json().get('error', {}).get('code') == 'invalid_request',
+                f'PUT {field} 非预期类型（{value!r}）→ 400 invalid_request',
+                f'{rr.status_code} {rr.text[:80]}',
+            )
+
+        # ⑧ 持久化：重新加载 Config 后 sync 仍生效（enabled=False 已落盘）
+        reloaded = Config(cfg_path)
+        expect(
+            reloaded.sync.get('enabled') is False
+            and reloaded.sync.get('base_url') == 'https://demo.supabase.co'
+            and reloaded.sync.get('token') == '',
+            '重载 Config：sync 段从 settings.json 恢复（enabled=False, token 已清空）',
+            str(reloaded.sync),
+        )
+
+    return state['fail'], state['total']
+
+
 # ---------------------------------------------------------------- main
 
 def main(argv: list[str] | None = None) -> int:
@@ -467,6 +627,12 @@ def main(argv: list[str] | None = None) -> int:
     admin_failures = run_admin_checks()
 
     print()
+    print('=' * 72)
+    print('E. 同步配置（GET/PUT /v1/admin/sync + /v1/app/config 的 sync 段）')
+    print('=' * 72)
+    sync_failures, sync_total = run_sync_checks()
+
+    print()
     print('-' * 72)
     print(f'提示词目录：{store.dir}')
     print(f'已加载 {store.count()} 个，跳过 {len(store.skipped)}，错误 {len(store.errors)}')
@@ -480,7 +646,8 @@ def main(argv: list[str] | None = None) -> int:
         f'App 对账 {len(APP_INPUTS) - unwired - app_failures}'
         f'/{len(APP_INPUTS) - unwired} 通过（未接线 {unwired}），'
         f'管理后台 {_ADMIN_TOTAL - admin_failures}'
-        f'/{_ADMIN_TOTAL} 通过'
+        f'/{_ADMIN_TOTAL} 通过，'
+        f'同步配置 {sync_total - sync_failures}/{sync_total} 通过'
     )
     print(f'耗时 {time.time() - started:.2f}s')
 
@@ -490,6 +657,7 @@ def main(argv: list[str] | None = None) -> int:
         or app_failures
         or store.errors
         or admin_failures
+        or sync_failures
     ):
         print('❌ selftest FAILED')
         print(f'   反例提醒：截断样本绝不能产出 {_ANTI_INNER_FRAGMENT} 这种内层片段。')
