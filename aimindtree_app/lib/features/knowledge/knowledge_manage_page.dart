@@ -37,10 +37,10 @@ class KnowledgeManagePage extends StatefulWidget {
   final ValueChanged<KnowledgePoint>? onOpenTeacher;
 
   @override
-  State<KnowledgeManagePage> createState() => _KnowledgeManagePageState();
+  State<KnowledgeManagePage> createState() => KnowledgeManagePageState();
 }
 
-class _KnowledgeManagePageState extends State<KnowledgeManagePage> {
+class KnowledgeManagePageState extends State<KnowledgeManagePage> {
   KnowledgeRepository get _repo => widget.service.repo;
   TreeRepository get _trees => widget.service.trees;
 
@@ -106,6 +106,9 @@ class _KnowledgeManagePageState extends State<KnowledgeManagePage> {
         ..addAll({for (final n in notes) n.id: n.title});
     });
   }
+
+  /// 供 AppShell 切 Tab 时调用（本页在 IndexedStack 常驻，返回不会自动重建）。
+  Future<void> refresh() => _reload();
 
   String _sourceLabel(KnowledgePoint kp) {
     if (kp.origin == 'user_manual') return '手动';

@@ -263,10 +263,10 @@ class AgentPage extends StatefulWidget {
   final List<AgentDetectedItem>? debugSeedDetected;
 
   @override
-  State<AgentPage> createState() => _AgentPageState();
+  State<AgentPage> createState() => AgentPageState();
 }
 
-class _AgentPageState extends State<AgentPage> {
+class AgentPageState extends State<AgentPage> {
   static final AppLog _log = AppLog('agent_page');
 
   final _input = TextEditingController();
@@ -329,6 +329,10 @@ class _AgentPageState extends State<AgentPage> {
       }
     });
   }
+
+  /// 供 AppShell 切 Tab 时调用：重查知识树列表，让别处刚删/建的树及时反映。
+  /// （本页在 IndexedStack 常驻，initState 只跑一次，必须外部触发刷新。）
+  Future<void> refresh() => _loadTrees();
 
   @override
   void dispose() {

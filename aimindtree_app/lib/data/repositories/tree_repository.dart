@@ -31,8 +31,14 @@ class TreeRepository {
 
   // ============ 查询 ============
 
+  /// 列出所有知识树。
+  ///
+  /// tombstone 行（软删 / 同步删除标记，deletedAt 非空）不进列表——
+  /// 软删铁律要求所有列表查询过滤（§11）。
   Future<List<KnowledgeTree>> listTrees() async {
-    final rows = await _db.select(_db.canvases).get();
+    final rows = await (_db.select(_db.canvases)
+          ..where((t) => t.deletedAt.isNull()))
+        .get();
     return rows.map(_treeFromRow).toList();
   }
 

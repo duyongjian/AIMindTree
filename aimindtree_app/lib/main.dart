@@ -96,6 +96,10 @@ class _AppShellState extends State<AppShell> {
   final _notesKey = GlobalKey<NotesListPageState>();
   // 设置页 key（用于添加 provider 后重载）
   final _settingsKey = GlobalKey<SettingsPageState>();
+  // 知识点页 key（切进入时刷新列表）
+  final _kpKey = GlobalKey<KnowledgeManagePageState>();
+  // AI 助手 Tab key（切进入时刷新其知识树下拉列表）
+  final _agentKey = GlobalKey<AgentPageState>();
 
   @override
   void initState() {
@@ -134,14 +138,20 @@ class _AppShellState extends State<AppShell> {
         service: widget.service,
         db: widget.db,
         onJumpToCanvas: () {
-          setState(() => _index = 2);
+          setState(() => _index = 3);
           _canvasKey.currentState?.refresh();
         },
       ),
       KnowledgeManagePage(
+        key: _kpKey,
         service: widget.service,
         db: widget.db,
         onOpenTeacher: _openTeacher,
+      ),
+      AgentPage(
+        key: _agentKey,
+        service: widget.service,
+        db: widget.db,
       ),
       CanvasPage(
         key: _canvasKey,
@@ -165,7 +175,6 @@ class _AppShellState extends State<AppShell> {
           ));
         },
       ),
-      AgentPage(service: widget.service, db: widget.db),
     ];
     return Scaffold(
       // 任务托盘置顶（方案 §5.2）：折叠 4px 细条不挡内容，5 Tab 常驻可见。
@@ -179,37 +188,67 @@ class _AppShellState extends State<AppShell> {
         selectedIndex: _index,
         onDestinationSelected: (i) {
           setState(() => _index = i);
-          // 知识树 Tab：页面被 IndexedStack 常驻，不会重建，必须显式刷新
-          // 才能看到「提取」页刚写入的知识点。
-          if (i == 2) _canvasKey.currentState?.refresh();
+          // IndexedStack 常驻不重建：每次进入都显式刷新对应页，
+          // 让别处（提取 / AI 助手入树 / 回收站恢复 / 后台改动）写入的数据
+          // 立刻可见，不需要用户手动刷新。
+          switch (i) {
+            case 0:
+              _notesKey.currentState?.reload();
+            case 1:
+              _kpKey.currentState?.refresh();
+            case 2:
+              _agentKey.currentState?.refresh();
+            case 3:
+              _canvasKey.currentState?.refresh();
+          }
         },
-        destinations: const [
+        destinations: [
           NavigationDestination(
-            icon: Icon(Icons.edit_note_outlined),
-            selectedIcon: Icon(Icons.edit_note),
+            icon: const Icon(Icons.edit_note_outlined),
+            selectedIcon: const Icon(Icons.edit_note),
             label: '笔记',
           ),
           NavigationDestination(
-            icon: Icon(Icons.lightbulb_outline),
-            selectedIcon: Icon(Icons.lightbulb),
+            icon: const Icon(Icons.lightbulb_outline),
+            selectedIcon: const Icon(Icons.lightbulb),
             label: '知识点',
           ),
           NavigationDestination(
-            icon: Icon(Icons.account_tree_outlined),
-            selectedIcon: Icon(Icons.account_tree),
+            icon: _agentDestinationIcon(Icons.assistant_outlined, selected: false),
+            selectedIcon: _agentDestinationIcon(Icons.assistant, selected: true),
+            label: 'AI 助手',
+          ),
+          NavigationDestination(
+            icon: const Icon(Icons.account_tree_outlined),
+            selectedIcon: const Icon(Icons.account_tree),
             label: '知识树',
           ),
           NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            selectedIcon: Icon(Icons.settings),
+            icon: const Icon(Icons.settings_outlined),
+            selectedIcon: const Icon(Icons.settings),
             label: '设置',
           ),
-          NavigationDestination(
-            icon: Icon(Icons.assistant_outlined),
-            selectedIcon: Icon(Icons.assistant),
-            label: 'AI 助手',
-          ),
         ],
+      ),
+    );
+  }
+
+  /// AI 助手 Tab 的突出标识：渐变底色圆角方块 + 白图标，
+  /// 未选中时不透明度略低、选中时不透明，与其它单色图标 Tab 区分开。
+  Widget _agentDestinationIcon(IconData icon, {required bool selected}) {
+    return Opacity(
+      opacity: selected ? 1.0 : 0.85,
+      child: Container(
+        padding: const EdgeInsets.all(6),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            colors: [Color(0xFF7C4DFF), Color(0xFF448AFF)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Icon(icon, color: Colors.white),
       ),
     );
   }
