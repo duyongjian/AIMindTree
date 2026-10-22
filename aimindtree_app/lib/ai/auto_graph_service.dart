@@ -133,7 +133,13 @@ class AutoGraphService {
   // ============ 自动连线（T3） ============
 
   /// 自动连线（**同步路径**，开关关闭时用）：取点 → 调 T3 → 落库。
-  Future<Result<AutoLinkResult>> autoLink(String treeId) async {
+  ///
+  /// [restrictToIds] 非 null 时只应用两端都在集合内的边（应用侧过滤，见
+  /// [linkFromParsed]）；配合 [linkInputsFor] 的全树 inputs 实现「局部连线」。
+  Future<Result<AutoLinkResult>> autoLink(
+    String treeId, {
+    Set<String>? restrictToIds,
+  }) async {
     try {
       final kpIds = await trees.memberPointIds(treeId);
       final points = await repo.pointsByIds(kpIds);
@@ -160,7 +166,11 @@ class AutoGraphService {
         return Failure(StateError(why));
       }
       // 只接受工作流结果；AI 没给出边就返回空（不再本地启发式兜底）。
-      return await _finishLink(points, aiRes.value.parsed);
+      return await _finishLink(
+        points,
+        aiRes.value.parsed,
+        restrictToIds: restrictToIds,
+      );
     } on Object catch (e, s) {
       _log.e('自动连线失败', error: e, stackTrace: s);
       return Failure(e, s);
@@ -177,10 +187,15 @@ class AutoGraphService {
   }
 
   /// 队列路径 · 完成时：把 T3 job 的 ``parsed`` 落库（去重 / 防环 / 单后继）。
+  ///
+  /// [restrictToIds] 非 null 时，**只应用 from、to 都在集合内**的边，其余忽略
+  /// （不报错）。注意：T3 的 inputs 仍用**全树**上下文（[linkInputsFor]），因为模型
+  /// 需要全树信息才推断得准；过滤只发生在**应用侧**（这里），决策见需求 ②。
   Future<Result<AutoLinkResult>> linkFromParsed(
     String treeId,
-    Object? parsed,
-  ) async {
+    Object? parsed, {
+    Set<String>? restrictToIds,
+  }) async {
     try {
       final kpIds = await trees.memberPointIds(treeId);
       final points = await repo.pointsByIds(kpIds);
@@ -193,7 +208,11 @@ class AutoGraphService {
           note: '知识点不足 2 个，无法自动连线',
         ));
       }
-      return await _finishLink(points, parsed);
+      return await _finishLink(
+        points,
+        parsed,
+        restrictToIds: restrictToIds,
+      );
     } on Object catch (e, s) {
       _log.e('自动连线失败', error: e, stackTrace: s);
       return Failure(e, s);
@@ -215,11 +234,23 @@ class AutoGraphService {
       };
 
   /// 解析 AI 边 + 合并去重防环落库，返回连线结果。
+  ///
+  /// [restrictToIds] 非 null 时只保留两端都在集合内的边（局部连线场景：模型用全树
+  /// 上下文推断，但只落库子集内部的边）。
   Future<Result<AutoLinkResult>> _finishLink(
     List<KnowledgePoint> points,
-    Object? parsed,
-  ) async {
-    final edges = _parsePrereqEdges(parsed, points);
+    Object? parsed, {
+    Set<String>? restrictToIds,
+  }) async {
+    var edges = _parsePrereqEdges(parsed, points);
+    if (restrictToIds != null) {
+      edges = <PrerequisiteEdge>[
+        for (final e in edges)
+          if (restrictToIds.contains(e.fromKpId) &&
+              restrictToIds.contains(e.toKpId))
+            e,
+      ];
+    }
     final created = await _mergeAndPersist(points, edges);
     return Success(AutoLinkResult(
       created: created,

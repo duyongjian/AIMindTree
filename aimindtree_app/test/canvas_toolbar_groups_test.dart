@@ -14,6 +14,7 @@ import 'package:aimindtree_app/ai/ai_job_service.dart';
 import 'package:aimindtree_app/ai/ai_provider.dart';
 import 'package:aimindtree_app/ai/ai_service.dart';
 import 'package:aimindtree_app/ai/ai_task_router.dart';
+import 'package:aimindtree_app/ai/auto_graph_service.dart';
 import 'package:aimindtree_app/ai/extraction_service.dart';
 import 'package:aimindtree_app/core/result.dart';
 import 'package:aimindtree_app/data/db/drift_database.dart';
@@ -153,26 +154,41 @@ void main() {
       expect(itemEnabled(tester, '加入已有知识点'), isTrue);
     });
 
-    testWidgets('③ 布局视图组：自动布局 / 框选重排 / 局部重排 / 框选移动',
+    testWidgets(
+        '③ 布局与连线组：重新布局 / 框选重排 / 局部重排 / 框选移动 / 自动连线 / 局部连线',
         (tester) async {
       await pumpCanvasWithTree(tester);
 
       final labels = await openGroup(tester, Icons.dashboard_outlined);
-      expect(labels, <String>['自动布局', '框选重排', '局部重排', '框选移动']);
-      expect(itemEnabled(tester, '自动布局'), isTrue);
+      expect(labels, <String>[
+        '重新布局',
+        '框选重排',
+        '局部重排',
+        '框选移动',
+        '自动连线',
+        '局部连线',
+      ]);
+      // 防回归：旧的「自动布局」label 不应再出现（已改名「自动连线」）。
+      expect(labels, isNot(contains('自动布局')));
+      expect(itemEnabled(tester, '重新布局'), isTrue);
+      expect(itemEnabled(tester, '自动连线'), isTrue);
       expect(itemEnabled(tester, '框选重排'), isTrue);
       expect(itemEnabled(tester, '框选移动'), isTrue);
-      // 未进入框选重排、也没有框选时，「局部重排」保持禁用（与原 schema 图标一致）。
       expect(itemEnabled(tester, '局部重排'), isFalse);
+      // 少于 2 个框选知识点时「局部连线」禁用（需至少 2 个点才连得起来）。
+      expect(itemEnabled(tester, '局部连线'), isFalse);
     });
 
-    testWidgets('④ AI 与作业组：补前置 / 布置作业 / 作业历史 / 作业模式',
+    testWidgets('④ AI 与作业组：批量补前置 / 布置作业 / 作业历史 / 作业模式',
         (tester) async {
       await pumpCanvasWithTree(tester);
 
       final labels = await openGroup(tester, Icons.auto_awesome);
-      expect(labels, <String>['补前置', '布置作业', '作业历史', '作业模式']);
-      expect(itemEnabled(tester, '补前置'), isTrue);
+      expect(labels, <String>['批量补前置', '布置作业', '作业历史', '作业模式']);
+      // 防回归：旧的「补前置」label 不应再出现（已改名「批量补前置」）。
+      expect(labels, isNot(contains('补前置')));
+      // 无框选、无单点选中 → 批量补前置 禁用。
+      expect(itemEnabled(tester, '批量补前置'), isFalse);
       expect(itemEnabled(tester, '作业历史'), isTrue);
       expect(itemEnabled(tester, '作业模式'), isTrue);
       // 未框选薄弱点时「布置作业」禁用（与作业模式条内按钮一致）。
@@ -220,16 +236,96 @@ void main() {
       expect(itemEnabled(tester, '加入已有知识点'), isFalse);
 
       labels = await openGroup(tester, Icons.dashboard_outlined);
-      expect(labels, <String>['自动布局', '框选重排', '局部重排', '框选移动']);
-      for (final l in const <String>['自动布局', '框选重排', '局部重排', '框选移动']) {
+      expect(labels, <String>[
+        '重新布局',
+        '框选重排',
+        '局部重排',
+        '框选移动',
+        '自动连线',
+        '局部连线',
+      ]);
+      for (final l in const <String>[
+        '重新布局',
+        '框选重排',
+        '局部重排',
+        '框选移动',
+        '自动连线',
+        '局部连线',
+      ]) {
         expect(itemEnabled(tester, l), isFalse, reason: '无树时应禁用：$l');
       }
 
       labels = await openGroup(tester, Icons.auto_awesome);
-      expect(labels, <String>['补前置', '布置作业', '作业历史', '作业模式']);
-      for (final l in const <String>['补前置', '布置作业', '作业历史', '作业模式']) {
+      expect(labels, <String>['批量补前置', '布置作业', '作业历史', '作业模式']);
+      for (final l in const <String>[
+        '批量补前置',
+        '布置作业',
+        '作业历史',
+        '作业模式',
+      ]) {
         expect(itemEnabled(tester, l), isFalse, reason: '无树时应禁用：$l');
       }
+    });
+  });
+
+  group('菜单改名防回归（需求①②③④）', () {
+    testWidgets('③ 含 重新布局/自动连线/局部连线，不含 自动布局', (tester) async {
+      await pumpCanvasWithTree(tester);
+      final labels = await openGroup(tester, Icons.dashboard_outlined);
+      expect(labels, contains('重新布局'));
+      expect(labels, contains('自动连线'));
+      expect(labels, contains('局部连线'));
+      expect(labels, isNot(contains('自动布局')));
+    });
+
+    testWidgets('④ 含 批量补前置，不含 补前置', (tester) async {
+      await pumpCanvasWithTree(tester);
+      final labels = await openGroup(tester, Icons.auto_awesome);
+      expect(labels, contains('批量补前置'));
+      expect(labels, isNot(contains('补前置')));
+    });
+  });
+
+  group('T3 局部连线：linkFromParsed 的 restrictToIds 过滤', () {
+    test('restrictToIds 只保留两端都在集合内的边', () async {
+      final treeRes = await trees.createTree('连线树');
+      final tree = (treeRes as Success<KnowledgeTree>).value;
+      final a = (await repo.createManualKnowledgePoint(name: 'A'))
+          as Success<KnowledgePoint>;
+      final b = (await repo.createManualKnowledgePoint(name: 'B'))
+          as Success<KnowledgePoint>;
+      final c = (await repo.createManualKnowledgePoint(name: 'C'))
+          as Success<KnowledgePoint>;
+      await trees.addPoints(tree.id, [a.value.id, b.value.id, c.value.id]);
+
+      final auto = AutoGraphService(
+        ai: AiService(router: AiTaskRouter(providers: <String, AiProvider>{})),
+        repo: repo,
+        trees: trees,
+      );
+      final parsed = <String, dynamic>{
+        'prerequisites': [
+          {
+            'from': a.value.id,
+            'to': b.value.id,
+          }, // 两端都在集合内 → 保留
+          {
+            'from': a.value.id,
+            'to': c.value.id,
+          }, // 一端(c)不在集合 → 过滤掉
+          {
+            'from': 'x-out',
+            'to': 'y-out',
+          }, // 两端都不在树/集合 → 解析阶段跳过
+        ]
+      };
+      final res = await auto.linkFromParsed(
+        tree.id,
+        parsed,
+        restrictToIds: {a.value.id, b.value.id},
+      );
+      expect(res, isA<Success<AutoLinkResult>>());
+      expect((res as Success<AutoLinkResult>).value.created, 1);
     });
   });
 }

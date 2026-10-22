@@ -11,8 +11,8 @@
 ///
 /// 顶部工具栏：左侧切换知识树；右侧动作归组为 4 个图标菜单（见 [_buildToolbarGroups]）：
 /// 知识树（新建 / 重命名 / 删除）、内容导入（笔记并入 / 已有知识点）、
-/// 布局视图（自动布局 / 框选重排 / 局部重排 / 框选移动）、
-/// AI 与作业（补前置 / 布置作业 / 作业历史 / 作业模式）。
+/// 布局与连线（重新布局 / 框选重排 / 局部重排 / 框选移动 / 自动连线 / 局部连线）、
+/// AI 与作业（批量补前置 / 布置作业 / 作业历史 / 作业模式）。
 library;
 
 import 'package:flutter/material.dart';
@@ -37,6 +37,18 @@ import '../../data/repositories/homework_repository.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
 import '../../features/homework/homework_page.dart';
+
+/// 补前置入库「笔记归属」四选项（默认 [manual]，见 [_pickSupplementMode]）。
+enum _SupplementMode {
+  /// 1. 不新建笔记：直接以手动知识点入库（user_manual 豁免，不做 T1 锚定）。
+  manual,
+  /// 2. 并入同一份新笔记：拼成一篇 Markdown 走 T1 锚定（现状路径）。
+  newNote,
+  /// 3. 每条建议单独新建笔记：每条各自成笔记并分别锚定。
+  separateNotes,
+  /// 4. 追加进现有笔记：选一篇笔记，把建议追加进它的内容再锚定。
+  appendToNote,
+}
 
 class CanvasPage extends StatefulWidget {
   const CanvasPage({
@@ -698,6 +710,110 @@ class CanvasPageState extends State<CanvasPage> {
     await loading.catchError((_) {});
   }
 
+  /// 局部连线（B2 局部版「自动连线」）：只对当前框选（[_selectedKpIds]）的知识点推断
+  /// 前置关系，其余知识点视为不存在——过滤只发生在**应用侧**（[AutoGraphService.linkFromParsed]
+  /// 的 restrictToIds 参数），不在 [AutoGraphService.linkInputsFor] 的输入里裁剪。
+  ///
+  /// 决策：T3 的 inputs 仍用**全树**上下文（[AutoGraphService.linkInputsFor]），因为模型
+  /// 需要全树信息才推断得准；只在落库时过滤两端都在集合内的边（需求 ②）。
+  Future<void> _autoLinkSelected() async {
+    final tree = _selectedTree;
+    if (tree == null) return;
+    if (_selectedKpIds.length < 2) {
+      _toast('请先框选至少 2 个知识点（框选重排 / 框选移动模式）再局部连线');
+      return;
+    }
+    final ids = <String>{..._selectedKpIds};
+    if (!kAiJobQueueEnabled) {
+      await _autoLinkSelectedSync(tree, ids);
+      return;
+    }
+    if (_blockedByJob('局部连线')) return;
+    // 队列提交的 inputs 用全树上下文（模型需要全树信息），过滤在 onDone 应用侧做。
+    final inputs = await _auto.linkInputsFor(tree.id);
+    if (inputs == null) {
+      _toast('知识点不足 2 个，无法自动连线');
+      return;
+    }
+    try {
+      final job = await widget.service.jobs.submit(
+        task: AiTask.t3Prerequisite.code,
+        resourceKey: 'tree:${tree.id}',
+        label: '局部连线《${tree.name}》',
+        inputs: inputs,
+        onDone: (j) async {
+          final res = await _auto.linkFromParsed(
+            tree.id,
+            j.result?['parsed'],
+            restrictToIds: ids,
+          );
+          if (!mounted) return;
+          res.fold(
+            (r) {
+              j.doneMessage = r.created > 0
+                  ? '已局部建立 ${r.created} 条前置关系（AI）'
+                  : (r.note.isNotEmpty
+                      ? r.note
+                      : '没有可自动连接的新关系（可能已全部连好）');
+              // 连完新线不再自动重排（用户要求）：只刷新让新边显示。
+              _loadForTree(tree.id);
+            },
+            (e, _) => _toast('局部连线失败：$e'),
+          );
+        },
+      );
+      if (job == null) {
+        _toast('这棵树有 AI 任务正在进行，完成后再试');
+        widget.service.jobs.requestExpandTray();
+      }
+    } on Object {
+      _toast('AI 服务连接失败，改用同步处理');
+      await _autoLinkSelectedSync(tree, ids);
+    }
+  }
+
+  /// 局部连线 · 同步路径（开关关闭 / 服务不可达兜底）。
+  ///
+  /// 改动最小的方案：复用 [_auto.autoLink]（已加 restrictToIds 透传），由它内部走
+  /// 「全树 inputs → LLM → 应用侧过滤」的组合。
+  Future<void> _autoLinkSelectedSync(KnowledgeTree tree, Set<String> ids) async {
+    final loading = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Expanded(child: Text('正在分析选中知识点的前置关系…')),
+          ],
+        ),
+      ),
+    );
+    final res = await _auto.autoLink(tree.id, restrictToIds: ids);
+    if (mounted) {
+      Navigator.of(context, rootNavigator: true).pop();
+    } else {
+      return;
+    }
+    res.fold(
+      (r) {
+        if (r.created > 0) {
+          // 仅 AI（T3 失败即 Failure，无本地启发式兜底，见决策 15）。
+          _toast('已局部建立 ${r.created} 条前置关系（AI）');
+          // 连完新线不再自动重排（用户要求）：只刷新让新边显示。
+          _loadForTree(tree.id);
+        } else {
+          _toast(r.note.isNotEmpty
+              ? r.note
+              : '没有可自动连接的新关系（可能已全部连好）');
+        }
+      },
+      (e, _) => _toast('局部连线失败：$e'),
+    );
+    await loading.catchError((_) {});
+  }
+
   /// 节点点选回调：记录选中态并弹出操作浮层（标记掌握 / 连接前置 / 补充前置知识）。
   void _onKpTap(KnowledgePoint p) {
     setState(() => _selectedPoint = p);
@@ -992,13 +1108,83 @@ class CanvasPageState extends State<CanvasPage> {
     await loading.catchError((_) {});
   }
 
-  /// 工具栏「补前置」按钮：有选中点 → 对该点跑深度补前置；无选中点 → 提示先点选。
+  /// 工具栏「批量补前置」按钮。
+  ///
+  /// - 有框选（[_selectedKpIds] 非空）→ 对每个选中点**依次**提交 T4 job
+  ///   （资源键 `kp:{id}` 互不相同不会互锁；队列 concurrency=1 会顺序执行）。
+  ///   某次提交返回 null（资源被占）→ toast「有 AI 任务正在进行，已提交前 N 个」
+  ///   + 展开托盘并停止提交剩余。
+  /// - 无框选但有单点选中（[_selectedPoint]）→ 保持现行为（弹深度选择器对该点跑）。
+  /// - 都为空 → 提示先框选若干知识点，或点选一个知识点。
+  ///
+  /// 偏离规格说明：批量提交的深度统一用 [PrereqDepth.medium]（规格未指定逐点深度 UI），
+  /// 单点路径仍走 [_openDepthSheet] 由用户自选。
   Future<void> _autoPrereq() async {
+    final tree = _selectedTree;
+    if (tree == null) return;
+
+    // 1) 有框选 → 批量依次提交 T4（每个 kp 独立资源键，互不互锁）。
+    if (_selectedKpIds.isNotEmpty) {
+      var submitted = 0;
+      for (final id in _selectedKpIds) {
+        KnowledgePoint? kp;
+        for (final p in _points) {
+          if (p.id == id) {
+            kp = p;
+            break;
+          }
+        }
+        if (kp == null) continue;
+
+        // 队列关闭 → 同步兜底：逐个串行跑单点 T4。
+        if (!kAiJobQueueEnabled) {
+          await _runPrereqSync(kp, PrereqDepth.medium, null);
+          submitted++;
+          continue;
+        }
+        try {
+          final job = await widget.service.jobs.submit(
+            task: AiTask.t4GapAnalysis.code,
+            resourceKey: 'kp:$id', // 与整树锁区分：互不互锁，队列顺序执行
+            label: '补前置：${kp.name}',
+            inputs: <String, dynamic>{
+              'target': {
+                'name': kp.name,
+                'type': kp.type.label,
+                'definition': kp.definition,
+              },
+              'depth': PrereqDepth.medium.code,
+            },
+            onDone: (j) => _onPrereqDone(j),
+          );
+          if (job == null) {
+            // 资源被占（该 kp 已有进行中的任务）→ 停剩余。
+            _toast('有 AI 任务正在进行，已提交前 $submitted 个');
+            widget.service.jobs.requestExpandTray();
+            return;
+          }
+          submitted++;
+        } on Object {
+          _toast('AI 服务连接失败，已提交前 $submitted 个');
+          widget.service.jobs.requestExpandTray();
+          return;
+        }
+      }
+      if (submitted > 0) {
+        _toast('已提交 $submitted 个知识点的「补前置」任务');
+        widget.service.jobs.requestExpandTray();
+      }
+      return;
+    }
+
+    // 2) 无框选但有单点 → 保持现行为。
     if (_selectedPoint != null) {
       _openDepthSheet(_selectedPoint!);
-    } else {
-      _toast('请先在画布上点选一个知识点，再补充它的前置知识');
+      return;
     }
+
+    // 3) 都为空 → 提示。
+    _toast('请先框选若干知识点（框选重排 / 框选移动模式），或点选一个知识点');
   }
 
   // ============ 作业模式（框选薄弱点 → 布置作业 / 历史）============
@@ -1486,19 +1672,19 @@ class CanvasPageState extends State<CanvasPage> {
     );
   }
 
-  /// 把勾选的补前置建议直接并入目标树（B2：默认走队列复合链，方案 §11.1）。
+  /// 把勾选的补前置建议并入目标树。
   ///
-  /// 锚点铁律：建议本身没有可逐字锚定的原文，不能直接 `new KnowledgePoint` 入库。
-  /// 把它们拼成一篇 Markdown 笔记 → T1 负责锚点校验、剔除无出处的幻觉点，
-  /// 再把真正落库的知识点 addPoints 进树，最后同锁跑 T3 自动连线。
-  /// 取消任一段回滚半成品（Q6）；T3 失败保留 T1 成果。
+  /// 入口先弹「笔记归属」选项（默认 1：不新建笔记），四种路径见下方各 `_supplement*`
+  /// 方法。锚点铁律仍贯穿：除选项 1（用户勾选=人工担保，§4.2 user_manual 豁免）外，
+  /// 其余路径都经过 T1 锚定校验，绝不凭空 `new KnowledgePoint` 入库。
   Future<void> _supplementIntoTree(
     List<SuggestedPrerequisite> items,
     KnowledgeTree tree,
   ) async {
     if (items.isEmpty) return;
 
-    // 1) 拼成一篇 Markdown 笔记：每条建议一个 `# 标题` + 定义段落。
+    // 拼成一篇 Markdown 笔记：每条建议一个 `# 标题` + 定义段落。
+    // 路径 2（并入同一份新笔记）直接用；路径 4（追加现有笔记）复用此 md。
     final buffer = StringBuffer();
     for (final s in items) {
       buffer
@@ -1509,8 +1695,61 @@ class CanvasPageState extends State<CanvasPage> {
     }
     final md = buffer.toString().trim();
 
+    // 先让用户选「笔记归属」方式（默认 1：不新建笔记，直接以手动知识点入库）。
+    final mode = await _pickSupplementMode();
+    if (mode == null) return; // 取消
+
+    switch (mode) {
+      case _SupplementMode.manual:
+        await _supplementManual(tree, items);
+        break;
+      case _SupplementMode.newNote:
+        await _supplementViaNewNote(tree, md);
+        break;
+      case _SupplementMode.separateNotes:
+        await _supplementViaSeparateNotes(tree, items);
+        break;
+      case _SupplementMode.appendToNote:
+        await _supplementViaAppend(tree, md);
+        break;
+    }
+  }
+
+  /// 补前置入库 · 选「1. 不新建笔记」：逐条以手动知识点入库（origin=user_manual，
+  /// 豁免锚点铁律），再并入树、自动落位、走 [_autoLink] 队列/同步双路径连线。
+  ///
+  /// 锚点铁律 §4.2 user_manual 豁免：用户已在建议面板勾选这些知识点，等于人工担保
+  /// 其正确性，故直接落库为手动知识点、不做 T1 原文锚定校验（也无需可锚定的原文）。
+  Future<void> _supplementManual(
+    KnowledgeTree tree,
+    List<SuggestedPrerequisite> items,
+  ) async {
+    final ids = <String>[];
+    for (final s in items) {
+      final res = await _repo.createManualKnowledgePoint(
+        name: s.name,
+        definition: s.definition,
+      );
+      if (res is Success<KnowledgePoint>) ids.add(res.value.id);
+    }
+    if (ids.isEmpty) {
+      _toast('没有可入库的知识点');
+      return;
+    }
+    // 公共尾：addPoints → 自动落位 → T3 连线（走 [_autoLink] 双路径）→ toast → 刷新。
+    await _finalizeSupplement(tree, ids, () async {
+      await _autoLink();
+      return null;
+    });
+  }
+
+  /// 补前置入库 · 选「2. 并入同一份新笔记」（现状路径，完全不动）。
+  ///
+  /// 默认走队列复合链（T1 建笔记 → 锚定校验 → 入树 → T3 连线）；队列不可达时落到
+  /// [_supplementIntoTreeSync] 的同步阻塞流程。
+  Future<void> _supplementViaNewNote(KnowledgeTree tree, String md) async {
     if (!kAiJobQueueEnabled) {
-      await _supplementIntoTreeSync(items, tree, md);
+      await _supplementIntoTreeSync(<SuggestedPrerequisite>[], tree, md);
       return;
     }
 
@@ -1538,10 +1777,286 @@ class CanvasPageState extends State<CanvasPage> {
       _toast('保存笔记失败：$e');
       return;
     }
-    await _supplementIntoTreeSync(items, tree, md, existingNote: note);
+    await _supplementIntoTreeSync(<SuggestedPrerequisite>[], tree, md,
+        existingNote: note);
+  }
+
+  /// 补前置入库 · 选「3. 每条建议单独新建笔记」：每条建议各自存一篇笔记 →
+  /// 同步 T1 锚定 → 收集落库 id，最后统一并入树 + 自动落位 + T3 连线。
+  Future<void> _supplementViaSeparateNotes(
+    KnowledgeTree tree,
+    List<SuggestedPrerequisite> items,
+  ) async {
+    final ids = <String>[];
+    if (!mounted) return;
+    final progress = ValueNotifier<String>('正在逐条通过 T1 锚定知识点…');
+    final loading = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        content: Row(
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(width: 16),
+            Expanded(
+              child: ValueListenableBuilder<String>(
+                valueListenable: progress,
+                builder: (_, msg, __) => Text(msg),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    for (final s in items) {
+      // extract 内部即 stageSaveNote + T1，等价于「逐篇 saveNote → 同步 T1」。
+      final singleMd = '# ${s.name}\n\n${s.definition}';
+      final ext = await widget.service.extract(singleMd);
+      if (!mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+        await loading.catchError((_) {});
+        return;
+      }
+      if (ext is Success<ExtractionSaveResult>) {
+        ids.addAll(ext.value.saved.map((k) => k.id));
+      }
+    }
+    if (mounted) Navigator.of(context, rootNavigator: true).pop();
+    await loading.catchError((_) {});
+    if (!mounted) return;
+    if (ids.isEmpty) {
+      _toast('没有可锚定的知识点被收录（建议缺少原文出处）。'
+          '可改用「不新建笔记」手动收录。');
+      return;
+    }
+    await _finalizeSupplement(tree, ids, _syncLinkConnect(tree));
+  }
+
+  /// 补前置入库 · 选「4. 追加进现有笔记」：选一篇现有笔记 → 把建议 md 追加到其正文 →
+  /// 同步 T1 锚定 → 收集落库 id，最后统一并入树 + 落位 + T3 连线。
+  Future<void> _supplementViaAppend(KnowledgeTree tree, String md) async {
+    final notes = await _repo.listNotes();
+    if (!mounted) return;
+    if (notes.isEmpty) {
+      _toast('还没有笔记可追加');
+      return;
+    }
+    final picked = await showDialog<Note>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('追加进哪篇笔记？'),
+        children: [
+          for (final n in notes)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, n),
+              child: Text(
+                n.title.isEmpty ? '(无标题)' : n.title,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消', style: TextStyle(color: Colors.grey)),
+          ),
+        ],
+      ),
+    );
+    if (picked == null) return;
+
+    if (!mounted) return;
+    final updated = picked.copyWith(
+      contentMd: '${picked.contentMd}\n\n$md',
+      updatedAt: DateTime.now().toUtc(),
+    );
+    final saveRes = await _repo.saveNote(updated);
+    if (!mounted) return;
+    if (saveRes is Failure<Note>) {
+      _toast('更新笔记失败：${saveRes.error}');
+      return;
+    }
+
+    if (!mounted) return;
+    final progress = ValueNotifier<String>('正在通过 T1 锚定知识点…');
+    final loading = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        content: Row(
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(width: 16),
+            Expanded(
+              child: ValueListenableBuilder<String>(
+                valueListenable: progress,
+                builder: (_, msg, __) => Text('$msg\n并入「${tree.name}」'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    // 与 1572-1578 行用法一致：content 用拼好的 md，T1 仅分析新增建议部分；
+    // 知识点归属到更新后的笔记（已含原文 + 追加建议）。
+    final ext = await ExtractIntoTreeChain.extractWithExistingNote(
+      widget.service,
+      updated,
+      md,
+    );
+    if (!mounted) {
+      Navigator.of(context, rootNavigator: true).pop();
+      await loading.catchError((_) {});
+      return;
+    }
+    if (ext is Failure<ExtractionSaveResult>) {
+      Navigator.of(context, rootNavigator: true).pop();
+      await loading.catchError((_) {});
+      _toast('T1 锚定失败：${ext.error}');
+      return;
+    }
+    final ids = (ext as Success<ExtractionSaveResult>)
+        .value
+        .saved
+        .map((k) => k.id)
+        .toList();
+    if (mounted) Navigator.of(context, rootNavigator: true).pop();
+    await loading.catchError((_) {});
+    if (!mounted) return;
+    if (ids.isEmpty) {
+      _toast('没有可锚定的知识点被收录（建议缺少原文出处）。'
+          '可改用「不新建笔记」手动收录。');
+      return;
+    }
+    await _finalizeSupplement(tree, ids, _syncLinkConnect(tree));
+  }
+
+  /// 四条补前置入库路径的公共收尾：把已落库知识点并入树、自动落位，再跑 T3 连线、
+  /// toast、刷新。
+  ///
+  /// [connect] 封装「T3 连线」这一步并返回连线结果文案（null = 无额外信息）：
+  /// - 路径 1：走 [_autoLink] 队列/同步双路径；
+  /// - 路径 3/4：走 [_syncLinkConnect] 同步阻塞（带进度对话框）。
+  Future<void> _finalizeSupplement(
+    KnowledgeTree tree,
+    List<String> ids,
+    Future<String?> Function() connect,
+  ) async {
+    if (ids.isEmpty) {
+      _toast('没有可入库的知识点');
+      return;
+    }
+    final existing = await _treesRepo.memberPointIds(tree.id);
+    final newIds = ids.where((id) => !existing.contains(id)).toList();
+    final addRes = await _treesRepo.addPoints(tree.id, ids);
+    if (!mounted) return;
+    final added = addRes.valueOrNull ?? 0;
+    if (addRes is Failure<int>) {
+      _toast('并入失败：${addRes.error}');
+      return;
+    }
+    // 新并入的点默认 x/y=0，会被布局引擎当成「放在原点」→ 用布局引擎铺开坐标。
+    await _autoPlaceNewPoints(tree.id, newIds);
+    final linkMsg = await connect();
+    if (!mounted) return;
+    _toast('已补充进「${tree.name}」：$added 个知识点${linkMsg ?? ''}');
+    await _load();
+  }
+
+  /// 同步阻塞路径的「T3 连线」封装：带进度对话框跑 [_auto.autoLink]，返回连线文案。
+  Future<String?> Function() _syncLinkConnect(KnowledgeTree tree) {
+    return () async {
+      final loading = showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const AlertDialog(
+          content: Row(
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(width: 16),
+              Expanded(child: Text('正在自动连线（T3）…')),
+            ],
+          ),
+        ),
+      );
+      final linkRes = await _auto.autoLink(tree.id);
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+      await loading.catchError((_) {});
+      if (!mounted) return null;
+      var linkNote = '';
+      linkRes.fold(
+        (r) {
+          if (r.created > 0) linkNote = '；已自动建立 ${r.created} 条前置关系';
+        },
+        (e, _) {
+          linkNote = '（自动连线未完成：$e，可稍后手动点「自动连线」）';
+        },
+      );
+      return linkNote;
+    };
+  }
+
+  /// 补前置入库「笔记归属」选项对话框（默认 1：不新建笔记）。
+  Future<_SupplementMode?> _pickSupplementMode() async {
+    var selected = _SupplementMode.manual; // 默认 1：不新建笔记
+    return showDialog<_SupplementMode>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSt) => AlertDialog(
+          title: const Text('补前置入库：笔记归属'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                RadioListTile<_SupplementMode>(
+                  title: const Text('不新建笔记'),
+                  subtitle: const Text('直接以手动知识点入库，不做 T1 锚定校验'),
+                  value: _SupplementMode.manual,
+                  groupValue: selected,
+                  onChanged: (v) => setSt(() => selected = v!),
+                ),
+                RadioListTile<_SupplementMode>(
+                  title: const Text('并入同一份新笔记'),
+                  subtitle: const Text('拼成一篇 Markdown 走 T1 锚定（现状）'),
+                  value: _SupplementMode.newNote,
+                  groupValue: selected,
+                  onChanged: (v) => setSt(() => selected = v!),
+                ),
+                RadioListTile<_SupplementMode>(
+                  title: const Text('每条建议单独新建笔记'),
+                  subtitle: const Text('每条各自成笔记并分别锚定'),
+                  value: _SupplementMode.separateNotes,
+                  groupValue: selected,
+                  onChanged: (v) => setSt(() => selected = v!),
+                ),
+                RadioListTile<_SupplementMode>(
+                  title: const Text('追加进现有笔记'),
+                  subtitle: const Text('选一篇笔记，把建议追加进它的内容再锚定'),
+                  value: _SupplementMode.appendToNote,
+                  groupValue: selected,
+                  onChanged: (v) => setSt(() => selected = v!),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, selected),
+              child: const Text('确定'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   /// 补充进树 · 同步路径（开关关闭 / 服务不可达兜底）：原阻塞流程。
+  ///
+  /// 现状路径（选项 2）走这里：T1 锚定 → 收集落库 id → 公共尾 [_finalizeSupplement]。
   Future<void> _supplementIntoTreeSync(
     List<SuggestedPrerequisite> items,
     KnowledgeTree tree,
@@ -1591,72 +2106,15 @@ class CanvasPageState extends State<CanvasPage> {
       Navigator.of(context, rootNavigator: true).pop();
       await loading.catchError((_) {});
       _toast('没有可锚定的知识点被收录（${res.rejectedCount} 条因缺少原文出处被剔除）。'
-          '可改用「新建笔记」手动收录。');
+          '可改用「不新建笔记」手动收录。');
       return;
     }
 
-    // 3) 把锚定后的知识点并入目标树，并立刻用布局引擎给新点铺开坐标。
-    // 先取已有成员，避免「已在该树的点」被重新摆位（addPoints 幂等跳过，
-    // 但布局引擎若覆盖其坐标会把它从用户摆好的位置拽走）。
-    final existing = await _treesRepo.memberPointIds(tree.id);
-    final newIds = ids.where((id) => !existing.contains(id)).toList();
-    final addRes = await widget.service.trees.addPoints(tree.id, ids);
-    if (mounted) {
-      Navigator.of(context, rootNavigator: true).pop();
-    } else {
-      return;
-    }
+    // T1 进度框关闭，落库/连线交给公共尾（它内部会再弹 T3 进度框）。
+    if (mounted) Navigator.of(context, rootNavigator: true).pop();
     await loading.catchError((_) {});
     if (!mounted) return;
-    await addRes.fold(
-      (added) async {
-        // 新并入的点默认 x/y=0，会被布局引擎当成「放在原点」→ 全挤在 (0,0) 且拖不动。
-        // 这里用布局引擎给它们算不重叠坐标并写回（已手动摆过的旧节点不动）。
-        await _autoPlaceNewPoints(tree.id, newIds);
-
-        // 新点落位后，立刻为它们补上前置关系：复用 T3「自动连线」这条**仅 AI** 的路径
-        // （无本地启发式兜底，符合决策 15）。连线失败不阻断「补充进树」——用户仍可稍后
-        // 手动点「自动连线」重试。
-        if (!mounted) return;
-        final linkLoading = showDialog<void>(
-          context: context,
-          barrierDismissible: false,
-          builder: (_) => const AlertDialog(
-            content: Row(
-              children: [
-                CircularProgressIndicator(),
-                SizedBox(width: 16),
-                Expanded(child: Text('正在自动连线（T3）…')),
-              ],
-            ),
-          ),
-        );
-        final linkRes = await _auto.autoLink(tree.id);
-        if (mounted) {
-          Navigator.of(context, rootNavigator: true).pop();
-        }
-        await linkLoading.catchError((_) {});
-        if (!mounted) return;
-        var linkNote = '';
-        linkRes.fold(
-          (r) {
-            if (r.created > 0) {
-              linkNote = '；已自动建立 ${r.created} 条前置关系';
-            }
-          },
-          (e, _) {
-            linkNote = '（自动连线未完成：$e，可稍后手动点「自动连线」）';
-          },
-        );
-        if (!mounted) return;
-        _toast('已补充进「${tree.name}」：$added 个知识点'
-            '${res.rejectedCount > 0 ? '（${res.rejectedCount} 条无出处未入库）' : ''}'
-            '$linkNote');
-        // 刷新树列表（点数可能变了）；当前显示的树若不是目标树也一并更新。
-        await _load();
-      },
-      (e, _) async => _toast('并入失败：$e'),
-    );
+    await _finalizeSupplement(tree, ids, _syncLinkConnect(tree));
   }
 
   /// P2-1：把单条补前置建议直接落成一条笔记（**不是**知识点）。
@@ -1780,8 +2238,10 @@ class CanvasPageState extends State<CanvasPage> {
   ///
   /// 1. **知识树**（实体 CRUD）：新建知识树 / 重命名 / 删除知识树；
   /// 2. **内容导入**：从笔记并入知识点 / 加入已有知识点；
-  /// 3. **布局视图**：自动布局 / 框选重排 / 局部重排 / 框选移动；
-  /// 4. **AI 与作业**：补前置 / 布置作业 / 作业历史 / 作业模式。
+  /// 3. **布局与连线**（布局系列 + 连线系列，用分隔线分开）：
+  ///    - 布局系列：重新布局（全量重排）/ 框选重排 / 局部重排 / 框选移动；
+  ///    - 连线系列：自动连线（原「自动布局」，实为 T3 前置连线）/ 局部连线（仅对框选子集连线）；
+  /// 4. **AI 与作业**：批量补前置 / 布置作业 / 作业历史 / 作业模式。
   ///
   /// 全部复用既有 handler；`tree == null` 时的禁用态与原实现逐项对应。
   List<Widget> _buildToolbarGroups(KnowledgeTree? tree) {
@@ -1831,16 +2291,18 @@ class CanvasPageState extends State<CanvasPage> {
           ),
         ],
       ),
-      // ③ 布局视图
+      // ③ 布局与连线（布局系列 + 连线系列，PopupMenuDivider 分隔）
       _toolbarGroupButton(
         icon: Icons.dashboard_outlined,
-        tooltip: '布局视图：自动布局 / 框选重排 / 框选移动',
+        tooltip:
+            '布局与连线：重新布局 / 框选重排 / 局部重排 / 框选移动 / 自动连线 / 局部连线',
         itemBuilder: (_) => <PopupMenuEntry<int>>[
+          // —— 布局系列 ——
           _toolbarMenuItem(
-            icon: Icons.auto_fix_high,
-            label: '自动布局',
+            icon: Icons.grid_view,
+            label: '重新布局',
             enabled: hasTree,
-            onTap: _autoLink,
+            onTap: _onRelayout,
           ),
           _toolbarMenuItem(
             icon: _frameSelectMode ? Icons.deselect : Icons.highlight_alt,
@@ -1860,6 +2322,22 @@ class CanvasPageState extends State<CanvasPage> {
             enabled: hasTree,
             onTap: _toggleFrameMoveMode,
           ),
+          // —— 连线系列（与布局系列分隔）——
+          const PopupMenuDivider(),
+          _toolbarMenuItem(
+            icon: Icons.auto_fix_high,
+            // 原「自动布局」仅改 label；其 onTap 实为 _autoLink（T3 前置连线）。
+            label: '自动连线',
+            enabled: hasTree,
+            onTap: _autoLink,
+          ),
+          _toolbarMenuItem(
+            icon: Icons.hub_outlined,
+            label: '局部连线',
+            // 少于 2 个点无从连线（需至少 2 个框选知识点）。
+            enabled: hasTree && _selectedKpIds.length >= 2,
+            onTap: _autoLinkSelected,
+          ),
         ],
       ),
       // ④ AI 与作业
@@ -1869,8 +2347,9 @@ class CanvasPageState extends State<CanvasPage> {
         itemBuilder: (_) => <PopupMenuEntry<int>>[
           _toolbarMenuItem(
             icon: Icons.lightbulb_outline,
-            label: '补前置',
-            enabled: hasTree,
+            label: '批量补前置',
+            enabled: hasTree &&
+                (_selectedKpIds.isNotEmpty || _selectedPoint != null),
             onTap: _autoPrereq,
           ),
           _toolbarMenuItem(
