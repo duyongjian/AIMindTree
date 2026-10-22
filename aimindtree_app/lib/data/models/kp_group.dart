@@ -12,6 +12,14 @@ library;
 
 import 'dart:convert';
 
+/// 全局作用域：知识点管理页的分组统一用 '' 作 canvasId
+///（kp_groups.canvas_id NOT NULL，用空串哨兵绕开，**零 schema 变更**）。
+///
+/// 知识点管理页的「分组」不属于某棵知识树（它跨树统筹所有知识点），但
+/// `canvas_id` 是非空列且改动代价高；约定 '' = 全局作用域，与 UI 层的
+/// `sourceNoteId = ''` 哨兵（手动知识点无来源笔记）是同一套手法。
+const String kGlobalGroupScope = '';
+
 /// 一个分组。
 class KpGroup {
   const KpGroup({

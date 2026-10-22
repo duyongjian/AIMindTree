@@ -158,23 +158,7 @@ class KnowledgeRepository {
       );
 
       try {
-        await _db.into(_db.knowledgePoints).insert(KnowledgePointsCompanion(
-              id: Value(kp.id),
-              notebookId: Value(kp.notebookId),
-              name: Value(kp.name),
-              type: Value(kp.type.name),
-              definition: Value(kp.definition),
-              sourceNoteId: Value(kp.sourceNoteId),
-              sourceStart: Value(kp.sourceStart),
-              sourceEnd: Value(kp.sourceEnd),
-              sourceQuote: Value(kp.sourceQuote),
-              origin: Value(kp.origin),
-              confidence: Value(kp.confidence),
-              updatedAt: Value(kp.updatedAt),
-              version: Value(kp.version),
-              deviceId: Value(kp.deviceId),
-              deletedAt: Value(kp.deletedAt),
-            ));
+        await _db.into(_db.knowledgePoints).insert(_kpInsertCompanion(kp));
         saved.add(kp);
         await _sync.upsertKnowledgePoint(kp.id);
       } on Object catch (e, s) {
@@ -748,22 +732,7 @@ class KnowledgeRepository {
         origin: 'user_manual',
         deviceId: deviceId,
       );
-      await _db.into(_db.knowledgePoints).insert(KnowledgePointsCompanion(
-            id: Value(kp.id),
-            notebookId: Value(kp.notebookId),
-            name: Value(kp.name),
-            type: Value(kp.type.name),
-            definition: Value(kp.definition),
-            sourceNoteId: Value(kp.sourceNoteId),
-            sourceStart: Value(kp.sourceStart),
-            sourceEnd: Value(kp.sourceEnd),
-            sourceQuote: Value(kp.sourceQuote),
-            origin: Value(kp.origin),
-            confidence: Value(kp.confidence),
-            updatedAt: Value(kp.updatedAt),
-            version: Value(kp.version),
-            deviceId: Value(kp.deviceId),
-          ));
+      await _db.into(_db.knowledgePoints).insert(_kpInsertCompanion(kp));
       await _sync.upsertKnowledgePoint(kp.id);
       _log.i('手动新建知识点 ${kp.name}（origin=user_manual）');
       return Success(kp);
@@ -973,6 +942,32 @@ class KnowledgeRepository {
 
   // ============ 内部实现 ============
 
+  /// 新建知识点 → 待插入行的**唯一**转换入口。
+  ///
+  /// 收敛成一处是为了 `createdAt`：该列 v5 才加、且是 nullable（历史行由迁移
+  /// 回填 `updated_at`），新行必须在**入库时**显式写入，否则「新数据反而没有
+  /// 创建时间」。放在这里，任何写路径都不会漏。
+  KnowledgePointsCompanion _kpInsertCompanion(KnowledgePoint kp) =>
+      KnowledgePointsCompanion(
+        id: Value(kp.id),
+        notebookId: Value(kp.notebookId),
+        name: Value(kp.name),
+        type: Value(kp.type.name),
+        definition: Value(kp.definition),
+        sourceNoteId: Value(kp.sourceNoteId),
+        sourceStart: Value(kp.sourceStart),
+        sourceEnd: Value(kp.sourceEnd),
+        sourceQuote: Value(kp.sourceQuote),
+        origin: Value(kp.origin),
+        confidence: Value(kp.confidence),
+        pinned: Value(kp.pinned),
+        createdAt: Value(kp.createdAt ?? DateTime.now().toUtc()),
+        updatedAt: Value(kp.updatedAt),
+        version: Value(kp.version),
+        deviceId: Value(kp.deviceId),
+        deletedAt: Value(kp.deletedAt),
+      );
+
   /// 在原文中定位 quote，返回 [start, end) 字符区间；未找到返回 null。
   ({int start, int end})? _locateQuote(String content, String quote) {
     if (quote.isEmpty || content.isEmpty) return null;
@@ -1058,6 +1053,8 @@ class KnowledgeRepository {
         version: row.version,
         deviceId: row.deviceId,
         deletedAt: row.deletedAt,
+        pinned: row.pinned,
+        createdAt: row.createdAt,
       );
 
   static String _preview(String s) =>

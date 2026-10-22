@@ -49,6 +49,23 @@ class Notes extends Table with SyncMeta {
   TextColumn get contentHash => text().named('content_hash').withDefault(const Constant(''))();
 }
 
+/// 笔记附件（图片）——与笔记分开同步，避免笔记 payload 被 base64 撑爆。
+@DataClassName('NoteAssetRow')
+class NoteAssets extends Table with SyncMeta {
+  TextColumn get noteId => text().named('note_id')();
+  TextColumn get name => text().named('name').withDefault(const Constant(''))();
+  TextColumn get mime => text().named('mime').withDefault(const Constant('image/png'))();
+
+  /// 原图字节的 SHA-1，用于**同一笔记内**去重。
+  TextColumn get sha1 => text().named('sha1').withDefault(const Constant(''))();
+
+  /// 原图字节数（插入时上限校验用）。
+  IntColumn get bytes => integer().named('bytes').withDefault(const Constant(0))();
+
+  /// base64 正文（唯一权威存储；磁盘只做可选缓存）。
+  TextColumn get dataBase64 => text().named('data_base64')();
+}
+
 /// 知识点（★产品强约束：必带来源锚点，无锚点视为幻觉禁止入库）。
 @DataClassName('KnowledgePointRow')
 class KnowledgePoints extends Table with SyncMeta {
@@ -70,6 +87,13 @@ class KnowledgePoints extends Table with SyncMeta {
   TextColumn get origin => text().named('origin').withDefault(const Constant('ai_extract'))();
 
   RealColumn get confidence => real().named('confidence').withDefault(const Constant(0.0))();
+
+  /// 置顶：true 的知识点恒排在列表最前（用户诉求：控制哪些知识点排在上面）。
+  BoolColumn get pinned =>
+      boolean().named('pinned').withDefault(const Constant(false))();
+
+  /// 创建时间（nullable：历史行由 v5 迁移回填为 updated_at，读取时兜底 createdAt ?? updatedAt）。
+  DateTimeColumn get createdAt => dateTime().named('created_at').nullable()();
 }
 
 /// 前置关系边（知识点之间的依赖，构成前置知识树/图）。

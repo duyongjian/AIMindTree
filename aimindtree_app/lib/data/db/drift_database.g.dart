@@ -1085,6 +1085,658 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
   }
 }
 
+class $NoteAssetsTable extends NoteAssets
+    with TableInfo<$NoteAssetsTable, NoteAssetRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $NoteAssetsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _versionMeta = const VerificationMeta(
+    'version',
+  );
+  @override
+  late final GeneratedColumn<int> version = GeneratedColumn<int>(
+    'version',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(1),
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _deviceIdMeta = const VerificationMeta(
+    'deviceId',
+  );
+  @override
+  late final GeneratedColumn<String> deviceId = GeneratedColumn<String>(
+    'device_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _deletedAtMeta = const VerificationMeta(
+    'deletedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> deletedAt = GeneratedColumn<DateTime>(
+    'deleted_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _noteIdMeta = const VerificationMeta('noteId');
+  @override
+  late final GeneratedColumn<String> noteId = GeneratedColumn<String>(
+    'note_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _nameMeta = const VerificationMeta('name');
+  @override
+  late final GeneratedColumn<String> name = GeneratedColumn<String>(
+    'name',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(''),
+  );
+  static const VerificationMeta _mimeMeta = const VerificationMeta('mime');
+  @override
+  late final GeneratedColumn<String> mime = GeneratedColumn<String>(
+    'mime',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('image/png'),
+  );
+  static const VerificationMeta _sha1Meta = const VerificationMeta('sha1');
+  @override
+  late final GeneratedColumn<String> sha1 = GeneratedColumn<String>(
+    'sha1',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(''),
+  );
+  static const VerificationMeta _bytesMeta = const VerificationMeta('bytes');
+  @override
+  late final GeneratedColumn<int> bytes = GeneratedColumn<int>(
+    'bytes',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _dataBase64Meta = const VerificationMeta(
+    'dataBase64',
+  );
+  @override
+  late final GeneratedColumn<String> dataBase64 = GeneratedColumn<String>(
+    'data_base64',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    version,
+    updatedAt,
+    deviceId,
+    deletedAt,
+    noteId,
+    name,
+    mime,
+    sha1,
+    bytes,
+    dataBase64,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'note_assets';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<NoteAssetRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('version')) {
+      context.handle(
+        _versionMeta,
+        version.isAcceptableOrUnknown(data['version']!, _versionMeta),
+      );
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    if (data.containsKey('device_id')) {
+      context.handle(
+        _deviceIdMeta,
+        deviceId.isAcceptableOrUnknown(data['device_id']!, _deviceIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_deviceIdMeta);
+    }
+    if (data.containsKey('deleted_at')) {
+      context.handle(
+        _deletedAtMeta,
+        deletedAt.isAcceptableOrUnknown(data['deleted_at']!, _deletedAtMeta),
+      );
+    }
+    if (data.containsKey('note_id')) {
+      context.handle(
+        _noteIdMeta,
+        noteId.isAcceptableOrUnknown(data['note_id']!, _noteIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_noteIdMeta);
+    }
+    if (data.containsKey('name')) {
+      context.handle(
+        _nameMeta,
+        name.isAcceptableOrUnknown(data['name']!, _nameMeta),
+      );
+    }
+    if (data.containsKey('mime')) {
+      context.handle(
+        _mimeMeta,
+        mime.isAcceptableOrUnknown(data['mime']!, _mimeMeta),
+      );
+    }
+    if (data.containsKey('sha1')) {
+      context.handle(
+        _sha1Meta,
+        sha1.isAcceptableOrUnknown(data['sha1']!, _sha1Meta),
+      );
+    }
+    if (data.containsKey('bytes')) {
+      context.handle(
+        _bytesMeta,
+        bytes.isAcceptableOrUnknown(data['bytes']!, _bytesMeta),
+      );
+    }
+    if (data.containsKey('data_base64')) {
+      context.handle(
+        _dataBase64Meta,
+        dataBase64.isAcceptableOrUnknown(data['data_base64']!, _dataBase64Meta),
+      );
+    } else if (isInserting) {
+      context.missing(_dataBase64Meta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  NoteAssetRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return NoteAssetRow(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      version: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}version'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at'],
+      )!,
+      deviceId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}device_id'],
+      )!,
+      deletedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}deleted_at'],
+      ),
+      noteId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}note_id'],
+      )!,
+      name: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}name'],
+      )!,
+      mime: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}mime'],
+      )!,
+      sha1: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}sha1'],
+      )!,
+      bytes: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}bytes'],
+      )!,
+      dataBase64: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}data_base64'],
+      )!,
+    );
+  }
+
+  @override
+  $NoteAssetsTable createAlias(String alias) {
+    return $NoteAssetsTable(attachedDatabase, alias);
+  }
+}
+
+class NoteAssetRow extends DataClass implements Insertable<NoteAssetRow> {
+  /// ULID 主键。
+  final String id;
+
+  /// 本地递增版本号，服务端接管后用于 LWW 冲突判定。
+  final int version;
+  final DateTime updatedAt;
+
+  /// 产生该次变更的设备，用于同步自回声过滤。
+  final String deviceId;
+
+  /// tombstone 软删除：非空即删除，删除靠它传播，不物理删（§11）。
+  final DateTime? deletedAt;
+  final String noteId;
+  final String name;
+  final String mime;
+
+  /// 原图字节的 SHA-1，用于**同一笔记内**去重。
+  final String sha1;
+
+  /// 原图字节数（插入时上限校验用）。
+  final int bytes;
+
+  /// base64 正文（唯一权威存储；磁盘只做可选缓存）。
+  final String dataBase64;
+  const NoteAssetRow({
+    required this.id,
+    required this.version,
+    required this.updatedAt,
+    required this.deviceId,
+    this.deletedAt,
+    required this.noteId,
+    required this.name,
+    required this.mime,
+    required this.sha1,
+    required this.bytes,
+    required this.dataBase64,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['version'] = Variable<int>(version);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    map['device_id'] = Variable<String>(deviceId);
+    if (!nullToAbsent || deletedAt != null) {
+      map['deleted_at'] = Variable<DateTime>(deletedAt);
+    }
+    map['note_id'] = Variable<String>(noteId);
+    map['name'] = Variable<String>(name);
+    map['mime'] = Variable<String>(mime);
+    map['sha1'] = Variable<String>(sha1);
+    map['bytes'] = Variable<int>(bytes);
+    map['data_base64'] = Variable<String>(dataBase64);
+    return map;
+  }
+
+  NoteAssetsCompanion toCompanion(bool nullToAbsent) {
+    return NoteAssetsCompanion(
+      id: Value(id),
+      version: Value(version),
+      updatedAt: Value(updatedAt),
+      deviceId: Value(deviceId),
+      deletedAt: deletedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(deletedAt),
+      noteId: Value(noteId),
+      name: Value(name),
+      mime: Value(mime),
+      sha1: Value(sha1),
+      bytes: Value(bytes),
+      dataBase64: Value(dataBase64),
+    );
+  }
+
+  factory NoteAssetRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return NoteAssetRow(
+      id: serializer.fromJson<String>(json['id']),
+      version: serializer.fromJson<int>(json['version']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+      deviceId: serializer.fromJson<String>(json['deviceId']),
+      deletedAt: serializer.fromJson<DateTime?>(json['deletedAt']),
+      noteId: serializer.fromJson<String>(json['noteId']),
+      name: serializer.fromJson<String>(json['name']),
+      mime: serializer.fromJson<String>(json['mime']),
+      sha1: serializer.fromJson<String>(json['sha1']),
+      bytes: serializer.fromJson<int>(json['bytes']),
+      dataBase64: serializer.fromJson<String>(json['dataBase64']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'version': serializer.toJson<int>(version),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+      'deviceId': serializer.toJson<String>(deviceId),
+      'deletedAt': serializer.toJson<DateTime?>(deletedAt),
+      'noteId': serializer.toJson<String>(noteId),
+      'name': serializer.toJson<String>(name),
+      'mime': serializer.toJson<String>(mime),
+      'sha1': serializer.toJson<String>(sha1),
+      'bytes': serializer.toJson<int>(bytes),
+      'dataBase64': serializer.toJson<String>(dataBase64),
+    };
+  }
+
+  NoteAssetRow copyWith({
+    String? id,
+    int? version,
+    DateTime? updatedAt,
+    String? deviceId,
+    Value<DateTime?> deletedAt = const Value.absent(),
+    String? noteId,
+    String? name,
+    String? mime,
+    String? sha1,
+    int? bytes,
+    String? dataBase64,
+  }) => NoteAssetRow(
+    id: id ?? this.id,
+    version: version ?? this.version,
+    updatedAt: updatedAt ?? this.updatedAt,
+    deviceId: deviceId ?? this.deviceId,
+    deletedAt: deletedAt.present ? deletedAt.value : this.deletedAt,
+    noteId: noteId ?? this.noteId,
+    name: name ?? this.name,
+    mime: mime ?? this.mime,
+    sha1: sha1 ?? this.sha1,
+    bytes: bytes ?? this.bytes,
+    dataBase64: dataBase64 ?? this.dataBase64,
+  );
+  NoteAssetRow copyWithCompanion(NoteAssetsCompanion data) {
+    return NoteAssetRow(
+      id: data.id.present ? data.id.value : this.id,
+      version: data.version.present ? data.version.value : this.version,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      deviceId: data.deviceId.present ? data.deviceId.value : this.deviceId,
+      deletedAt: data.deletedAt.present ? data.deletedAt.value : this.deletedAt,
+      noteId: data.noteId.present ? data.noteId.value : this.noteId,
+      name: data.name.present ? data.name.value : this.name,
+      mime: data.mime.present ? data.mime.value : this.mime,
+      sha1: data.sha1.present ? data.sha1.value : this.sha1,
+      bytes: data.bytes.present ? data.bytes.value : this.bytes,
+      dataBase64: data.dataBase64.present
+          ? data.dataBase64.value
+          : this.dataBase64,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('NoteAssetRow(')
+          ..write('id: $id, ')
+          ..write('version: $version, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('deviceId: $deviceId, ')
+          ..write('deletedAt: $deletedAt, ')
+          ..write('noteId: $noteId, ')
+          ..write('name: $name, ')
+          ..write('mime: $mime, ')
+          ..write('sha1: $sha1, ')
+          ..write('bytes: $bytes, ')
+          ..write('dataBase64: $dataBase64')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    version,
+    updatedAt,
+    deviceId,
+    deletedAt,
+    noteId,
+    name,
+    mime,
+    sha1,
+    bytes,
+    dataBase64,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is NoteAssetRow &&
+          other.id == this.id &&
+          other.version == this.version &&
+          other.updatedAt == this.updatedAt &&
+          other.deviceId == this.deviceId &&
+          other.deletedAt == this.deletedAt &&
+          other.noteId == this.noteId &&
+          other.name == this.name &&
+          other.mime == this.mime &&
+          other.sha1 == this.sha1 &&
+          other.bytes == this.bytes &&
+          other.dataBase64 == this.dataBase64);
+}
+
+class NoteAssetsCompanion extends UpdateCompanion<NoteAssetRow> {
+  final Value<String> id;
+  final Value<int> version;
+  final Value<DateTime> updatedAt;
+  final Value<String> deviceId;
+  final Value<DateTime?> deletedAt;
+  final Value<String> noteId;
+  final Value<String> name;
+  final Value<String> mime;
+  final Value<String> sha1;
+  final Value<int> bytes;
+  final Value<String> dataBase64;
+  final Value<int> rowid;
+  const NoteAssetsCompanion({
+    this.id = const Value.absent(),
+    this.version = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.deviceId = const Value.absent(),
+    this.deletedAt = const Value.absent(),
+    this.noteId = const Value.absent(),
+    this.name = const Value.absent(),
+    this.mime = const Value.absent(),
+    this.sha1 = const Value.absent(),
+    this.bytes = const Value.absent(),
+    this.dataBase64 = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  NoteAssetsCompanion.insert({
+    required String id,
+    this.version = const Value.absent(),
+    required DateTime updatedAt,
+    required String deviceId,
+    this.deletedAt = const Value.absent(),
+    required String noteId,
+    this.name = const Value.absent(),
+    this.mime = const Value.absent(),
+    this.sha1 = const Value.absent(),
+    this.bytes = const Value.absent(),
+    required String dataBase64,
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       updatedAt = Value(updatedAt),
+       deviceId = Value(deviceId),
+       noteId = Value(noteId),
+       dataBase64 = Value(dataBase64);
+  static Insertable<NoteAssetRow> custom({
+    Expression<String>? id,
+    Expression<int>? version,
+    Expression<DateTime>? updatedAt,
+    Expression<String>? deviceId,
+    Expression<DateTime>? deletedAt,
+    Expression<String>? noteId,
+    Expression<String>? name,
+    Expression<String>? mime,
+    Expression<String>? sha1,
+    Expression<int>? bytes,
+    Expression<String>? dataBase64,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (version != null) 'version': version,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (deviceId != null) 'device_id': deviceId,
+      if (deletedAt != null) 'deleted_at': deletedAt,
+      if (noteId != null) 'note_id': noteId,
+      if (name != null) 'name': name,
+      if (mime != null) 'mime': mime,
+      if (sha1 != null) 'sha1': sha1,
+      if (bytes != null) 'bytes': bytes,
+      if (dataBase64 != null) 'data_base64': dataBase64,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  NoteAssetsCompanion copyWith({
+    Value<String>? id,
+    Value<int>? version,
+    Value<DateTime>? updatedAt,
+    Value<String>? deviceId,
+    Value<DateTime?>? deletedAt,
+    Value<String>? noteId,
+    Value<String>? name,
+    Value<String>? mime,
+    Value<String>? sha1,
+    Value<int>? bytes,
+    Value<String>? dataBase64,
+    Value<int>? rowid,
+  }) {
+    return NoteAssetsCompanion(
+      id: id ?? this.id,
+      version: version ?? this.version,
+      updatedAt: updatedAt ?? this.updatedAt,
+      deviceId: deviceId ?? this.deviceId,
+      deletedAt: deletedAt ?? this.deletedAt,
+      noteId: noteId ?? this.noteId,
+      name: name ?? this.name,
+      mime: mime ?? this.mime,
+      sha1: sha1 ?? this.sha1,
+      bytes: bytes ?? this.bytes,
+      dataBase64: dataBase64 ?? this.dataBase64,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (version.present) {
+      map['version'] = Variable<int>(version.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (deviceId.present) {
+      map['device_id'] = Variable<String>(deviceId.value);
+    }
+    if (deletedAt.present) {
+      map['deleted_at'] = Variable<DateTime>(deletedAt.value);
+    }
+    if (noteId.present) {
+      map['note_id'] = Variable<String>(noteId.value);
+    }
+    if (name.present) {
+      map['name'] = Variable<String>(name.value);
+    }
+    if (mime.present) {
+      map['mime'] = Variable<String>(mime.value);
+    }
+    if (sha1.present) {
+      map['sha1'] = Variable<String>(sha1.value);
+    }
+    if (bytes.present) {
+      map['bytes'] = Variable<int>(bytes.value);
+    }
+    if (dataBase64.present) {
+      map['data_base64'] = Variable<String>(dataBase64.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('NoteAssetsCompanion(')
+          ..write('id: $id, ')
+          ..write('version: $version, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('deviceId: $deviceId, ')
+          ..write('deletedAt: $deletedAt, ')
+          ..write('noteId: $noteId, ')
+          ..write('name: $name, ')
+          ..write('mime: $mime, ')
+          ..write('sha1: $sha1, ')
+          ..write('bytes: $bytes, ')
+          ..write('dataBase64: $dataBase64, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 class $KnowledgePointsTable extends KnowledgePoints
     with TableInfo<$KnowledgePointsTable, KnowledgePointRow> {
   @override
@@ -1252,6 +1904,30 @@ class $KnowledgePointsTable extends KnowledgePoints
     requiredDuringInsert: false,
     defaultValue: const Constant(0.0),
   );
+  static const VerificationMeta _pinnedMeta = const VerificationMeta('pinned');
+  @override
+  late final GeneratedColumn<bool> pinned = GeneratedColumn<bool>(
+    'pinned',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("pinned" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+    'created_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -1269,6 +1945,8 @@ class $KnowledgePointsTable extends KnowledgePoints
     sourceQuote,
     origin,
     confidence,
+    pinned,
+    createdAt,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -1396,6 +2074,18 @@ class $KnowledgePointsTable extends KnowledgePoints
         confidence.isAcceptableOrUnknown(data['confidence']!, _confidenceMeta),
       );
     }
+    if (data.containsKey('pinned')) {
+      context.handle(
+        _pinnedMeta,
+        pinned.isAcceptableOrUnknown(data['pinned']!, _pinnedMeta),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    }
     return context;
   }
 
@@ -1465,6 +2155,14 @@ class $KnowledgePointsTable extends KnowledgePoints
         DriftSqlType.double,
         data['${effectivePrefix}confidence'],
       )!,
+      pinned: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}pinned'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}created_at'],
+      ),
     );
   }
 
@@ -1502,6 +2200,12 @@ class KnowledgePointRow extends DataClass
   /// 来源：ai_extract / user_manual / tutor 等。
   final String origin;
   final double confidence;
+
+  /// 置顶：true 的知识点恒排在列表最前（用户诉求：控制哪些知识点排在上面）。
+  final bool pinned;
+
+  /// 创建时间（nullable：历史行由 v5 迁移回填为 updated_at，读取时兜底 createdAt ?? updatedAt）。
+  final DateTime? createdAt;
   const KnowledgePointRow({
     required this.id,
     required this.version,
@@ -1518,6 +2222,8 @@ class KnowledgePointRow extends DataClass
     required this.sourceQuote,
     required this.origin,
     required this.confidence,
+    required this.pinned,
+    this.createdAt,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1541,6 +2247,10 @@ class KnowledgePointRow extends DataClass
     map['source_quote'] = Variable<String>(sourceQuote);
     map['origin'] = Variable<String>(origin);
     map['confidence'] = Variable<double>(confidence);
+    map['pinned'] = Variable<bool>(pinned);
+    if (!nullToAbsent || createdAt != null) {
+      map['created_at'] = Variable<DateTime>(createdAt);
+    }
     return map;
   }
 
@@ -1565,6 +2275,10 @@ class KnowledgePointRow extends DataClass
       sourceQuote: Value(sourceQuote),
       origin: Value(origin),
       confidence: Value(confidence),
+      pinned: Value(pinned),
+      createdAt: createdAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(createdAt),
     );
   }
 
@@ -1589,6 +2303,8 @@ class KnowledgePointRow extends DataClass
       sourceQuote: serializer.fromJson<String>(json['sourceQuote']),
       origin: serializer.fromJson<String>(json['origin']),
       confidence: serializer.fromJson<double>(json['confidence']),
+      pinned: serializer.fromJson<bool>(json['pinned']),
+      createdAt: serializer.fromJson<DateTime?>(json['createdAt']),
     );
   }
   @override
@@ -1610,6 +2326,8 @@ class KnowledgePointRow extends DataClass
       'sourceQuote': serializer.toJson<String>(sourceQuote),
       'origin': serializer.toJson<String>(origin),
       'confidence': serializer.toJson<double>(confidence),
+      'pinned': serializer.toJson<bool>(pinned),
+      'createdAt': serializer.toJson<DateTime?>(createdAt),
     };
   }
 
@@ -1629,6 +2347,8 @@ class KnowledgePointRow extends DataClass
     String? sourceQuote,
     String? origin,
     double? confidence,
+    bool? pinned,
+    Value<DateTime?> createdAt = const Value.absent(),
   }) => KnowledgePointRow(
     id: id ?? this.id,
     version: version ?? this.version,
@@ -1645,6 +2365,8 @@ class KnowledgePointRow extends DataClass
     sourceQuote: sourceQuote ?? this.sourceQuote,
     origin: origin ?? this.origin,
     confidence: confidence ?? this.confidence,
+    pinned: pinned ?? this.pinned,
+    createdAt: createdAt.present ? createdAt.value : this.createdAt,
   );
   KnowledgePointRow copyWithCompanion(KnowledgePointsCompanion data) {
     return KnowledgePointRow(
@@ -1675,6 +2397,8 @@ class KnowledgePointRow extends DataClass
       confidence: data.confidence.present
           ? data.confidence.value
           : this.confidence,
+      pinned: data.pinned.present ? data.pinned.value : this.pinned,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
     );
   }
 
@@ -1695,7 +2419,9 @@ class KnowledgePointRow extends DataClass
           ..write('sourceEnd: $sourceEnd, ')
           ..write('sourceQuote: $sourceQuote, ')
           ..write('origin: $origin, ')
-          ..write('confidence: $confidence')
+          ..write('confidence: $confidence, ')
+          ..write('pinned: $pinned, ')
+          ..write('createdAt: $createdAt')
           ..write(')'))
         .toString();
   }
@@ -1717,6 +2443,8 @@ class KnowledgePointRow extends DataClass
     sourceQuote,
     origin,
     confidence,
+    pinned,
+    createdAt,
   );
   @override
   bool operator ==(Object other) =>
@@ -1736,7 +2464,9 @@ class KnowledgePointRow extends DataClass
           other.sourceEnd == this.sourceEnd &&
           other.sourceQuote == this.sourceQuote &&
           other.origin == this.origin &&
-          other.confidence == this.confidence);
+          other.confidence == this.confidence &&
+          other.pinned == this.pinned &&
+          other.createdAt == this.createdAt);
 }
 
 class KnowledgePointsCompanion extends UpdateCompanion<KnowledgePointRow> {
@@ -1755,6 +2485,8 @@ class KnowledgePointsCompanion extends UpdateCompanion<KnowledgePointRow> {
   final Value<String> sourceQuote;
   final Value<String> origin;
   final Value<double> confidence;
+  final Value<bool> pinned;
+  final Value<DateTime?> createdAt;
   final Value<int> rowid;
   const KnowledgePointsCompanion({
     this.id = const Value.absent(),
@@ -1772,6 +2504,8 @@ class KnowledgePointsCompanion extends UpdateCompanion<KnowledgePointRow> {
     this.sourceQuote = const Value.absent(),
     this.origin = const Value.absent(),
     this.confidence = const Value.absent(),
+    this.pinned = const Value.absent(),
+    this.createdAt = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   KnowledgePointsCompanion.insert({
@@ -1790,6 +2524,8 @@ class KnowledgePointsCompanion extends UpdateCompanion<KnowledgePointRow> {
     required String sourceQuote,
     this.origin = const Value.absent(),
     this.confidence = const Value.absent(),
+    this.pinned = const Value.absent(),
+    this.createdAt = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        updatedAt = Value(updatedAt),
@@ -1816,6 +2552,8 @@ class KnowledgePointsCompanion extends UpdateCompanion<KnowledgePointRow> {
     Expression<String>? sourceQuote,
     Expression<String>? origin,
     Expression<double>? confidence,
+    Expression<bool>? pinned,
+    Expression<DateTime>? createdAt,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1834,6 +2572,8 @@ class KnowledgePointsCompanion extends UpdateCompanion<KnowledgePointRow> {
       if (sourceQuote != null) 'source_quote': sourceQuote,
       if (origin != null) 'origin': origin,
       if (confidence != null) 'confidence': confidence,
+      if (pinned != null) 'pinned': pinned,
+      if (createdAt != null) 'created_at': createdAt,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1854,6 +2594,8 @@ class KnowledgePointsCompanion extends UpdateCompanion<KnowledgePointRow> {
     Value<String>? sourceQuote,
     Value<String>? origin,
     Value<double>? confidence,
+    Value<bool>? pinned,
+    Value<DateTime?>? createdAt,
     Value<int>? rowid,
   }) {
     return KnowledgePointsCompanion(
@@ -1872,6 +2614,8 @@ class KnowledgePointsCompanion extends UpdateCompanion<KnowledgePointRow> {
       sourceQuote: sourceQuote ?? this.sourceQuote,
       origin: origin ?? this.origin,
       confidence: confidence ?? this.confidence,
+      pinned: pinned ?? this.pinned,
+      createdAt: createdAt ?? this.createdAt,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1924,6 +2668,12 @@ class KnowledgePointsCompanion extends UpdateCompanion<KnowledgePointRow> {
     if (confidence.present) {
       map['confidence'] = Variable<double>(confidence.value);
     }
+    if (pinned.present) {
+      map['pinned'] = Variable<bool>(pinned.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1948,6 +2698,8 @@ class KnowledgePointsCompanion extends UpdateCompanion<KnowledgePointRow> {
           ..write('sourceQuote: $sourceQuote, ')
           ..write('origin: $origin, ')
           ..write('confidence: $confidence, ')
+          ..write('pinned: $pinned, ')
+          ..write('createdAt: $createdAt, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -9890,6 +10642,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
   late final $NotebooksTable notebooks = $NotebooksTable(this);
   late final $NotesTable notes = $NotesTable(this);
+  late final $NoteAssetsTable noteAssets = $NoteAssetsTable(this);
   late final $KnowledgePointsTable knowledgePoints = $KnowledgePointsTable(
     this,
   );
@@ -9917,6 +10670,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   List<DatabaseSchemaEntity> get allSchemaEntities => [
     notebooks,
     notes,
+    noteAssets,
     knowledgePoints,
     prerequisiteEdges,
     masteryRecords,
@@ -10478,6 +11232,329 @@ typedef $$NotesTableProcessedTableManager =
       NoteRow,
       PrefetchHooks Function()
     >;
+typedef $$NoteAssetsTableCreateCompanionBuilder = NoteAssetsCompanion Function({
+  required String id,
+  Value<int> version,
+  required DateTime updatedAt,
+  required String deviceId,
+  Value<DateTime?> deletedAt,
+  required String noteId,
+  Value<String> name,
+  Value<String> mime,
+  Value<String> sha1,
+  Value<int> bytes,
+  required String dataBase64,
+  Value<int> rowid,
+});
+typedef $$NoteAssetsTableUpdateCompanionBuilder = NoteAssetsCompanion Function({
+  Value<String> id,
+  Value<int> version,
+  Value<DateTime> updatedAt,
+  Value<String> deviceId,
+  Value<DateTime?> deletedAt,
+  Value<String> noteId,
+  Value<String> name,
+  Value<String> mime,
+  Value<String> sha1,
+  Value<int> bytes,
+  Value<String> dataBase64,
+  Value<int> rowid,
+});
+
+class $$NoteAssetsTableFilterComposer
+    extends Composer<_$AppDatabase, $NoteAssetsTable> {
+  $$NoteAssetsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get version => $composableBuilder(
+    column: $table.version,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get deviceId => $composableBuilder(
+    column: $table.deviceId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get deletedAt => $composableBuilder(
+    column: $table.deletedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get noteId => $composableBuilder(
+    column: $table.noteId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get mime => $composableBuilder(
+    column: $table.mime,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sha1 => $composableBuilder(
+    column: $table.sha1,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get bytes => $composableBuilder(
+    column: $table.bytes,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get dataBase64 => $composableBuilder(
+    column: $table.dataBase64,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$NoteAssetsTableOrderingComposer
+    extends Composer<_$AppDatabase, $NoteAssetsTable> {
+  $$NoteAssetsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get version => $composableBuilder(
+    column: $table.version,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get deviceId => $composableBuilder(
+    column: $table.deviceId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get deletedAt => $composableBuilder(
+    column: $table.deletedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get noteId => $composableBuilder(
+    column: $table.noteId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get mime => $composableBuilder(
+    column: $table.mime,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get sha1 => $composableBuilder(
+    column: $table.sha1,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get bytes => $composableBuilder(
+    column: $table.bytes,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get dataBase64 => $composableBuilder(
+    column: $table.dataBase64,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$NoteAssetsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $NoteAssetsTable> {
+  $$NoteAssetsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<int> get version =>
+      $composableBuilder(column: $table.version, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get deviceId =>
+      $composableBuilder(column: $table.deviceId, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get deletedAt =>
+      $composableBuilder(column: $table.deletedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get noteId =>
+      $composableBuilder(column: $table.noteId, builder: (column) => column);
+
+  GeneratedColumn<String> get name =>
+      $composableBuilder(column: $table.name, builder: (column) => column);
+
+  GeneratedColumn<String> get mime =>
+      $composableBuilder(column: $table.mime, builder: (column) => column);
+
+  GeneratedColumn<String> get sha1 =>
+      $composableBuilder(column: $table.sha1, builder: (column) => column);
+
+  GeneratedColumn<int> get bytes =>
+      $composableBuilder(column: $table.bytes, builder: (column) => column);
+
+  GeneratedColumn<String> get dataBase64 => $composableBuilder(
+    column: $table.dataBase64,
+    builder: (column) => column,
+  );
+}
+
+class $$NoteAssetsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $NoteAssetsTable,
+          NoteAssetRow,
+          $$NoteAssetsTableFilterComposer,
+          $$NoteAssetsTableOrderingComposer,
+          $$NoteAssetsTableAnnotationComposer,
+          $$NoteAssetsTableCreateCompanionBuilder,
+          $$NoteAssetsTableUpdateCompanionBuilder,
+          (
+            NoteAssetRow,
+            BaseReferences<_$AppDatabase, $NoteAssetsTable, NoteAssetRow>,
+          ),
+          NoteAssetRow,
+          PrefetchHooks Function()
+        > {
+  $$NoteAssetsTableTableManager(_$AppDatabase db, $NoteAssetsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$NoteAssetsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$NoteAssetsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$NoteAssetsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<int> version = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<String> deviceId = const Value.absent(),
+                Value<DateTime?> deletedAt = const Value.absent(),
+                Value<String> noteId = const Value.absent(),
+                Value<String> name = const Value.absent(),
+                Value<String> mime = const Value.absent(),
+                Value<String> sha1 = const Value.absent(),
+                Value<int> bytes = const Value.absent(),
+                Value<String> dataBase64 = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => NoteAssetsCompanion(
+                id: id,
+                version: version,
+                updatedAt: updatedAt,
+                deviceId: deviceId,
+                deletedAt: deletedAt,
+                noteId: noteId,
+                name: name,
+                mime: mime,
+                sha1: sha1,
+                bytes: bytes,
+                dataBase64: dataBase64,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                Value<int> version = const Value.absent(),
+                required DateTime updatedAt,
+                required String deviceId,
+                Value<DateTime?> deletedAt = const Value.absent(),
+                required String noteId,
+                Value<String> name = const Value.absent(),
+                Value<String> mime = const Value.absent(),
+                Value<String> sha1 = const Value.absent(),
+                Value<int> bytes = const Value.absent(),
+                required String dataBase64,
+                Value<int> rowid = const Value.absent(),
+              }) => NoteAssetsCompanion.insert(
+                id: id,
+                version: version,
+                updatedAt: updatedAt,
+                deviceId: deviceId,
+                deletedAt: deletedAt,
+                noteId: noteId,
+                name: name,
+                mime: mime,
+                sha1: sha1,
+                bytes: bytes,
+                dataBase64: dataBase64,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$NoteAssetsTable, NoteAssetRow>(table),
+                  BaseReferences<_$AppDatabase, $NoteAssetsTable, NoteAssetRow>(
+                    db,
+                    table,
+                    e,
+                  ),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$NoteAssetsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $NoteAssetsTable,
+      NoteAssetRow,
+      $$NoteAssetsTableFilterComposer,
+      $$NoteAssetsTableOrderingComposer,
+      $$NoteAssetsTableAnnotationComposer,
+      $$NoteAssetsTableCreateCompanionBuilder,
+      $$NoteAssetsTableUpdateCompanionBuilder,
+      (
+        NoteAssetRow,
+        BaseReferences<_$AppDatabase, $NoteAssetsTable, NoteAssetRow>,
+      ),
+      NoteAssetRow,
+      PrefetchHooks Function()
+    >;
 typedef $$KnowledgePointsTableCreateCompanionBuilder =
     KnowledgePointsCompanion Function({
       required String id,
@@ -10495,6 +11572,8 @@ typedef $$KnowledgePointsTableCreateCompanionBuilder =
       required String sourceQuote,
       Value<String> origin,
       Value<double> confidence,
+      Value<bool> pinned,
+      Value<DateTime?> createdAt,
       Value<int> rowid,
     });
 typedef $$KnowledgePointsTableUpdateCompanionBuilder =
@@ -10514,6 +11593,8 @@ typedef $$KnowledgePointsTableUpdateCompanionBuilder =
       Value<String> sourceQuote,
       Value<String> origin,
       Value<double> confidence,
+      Value<bool> pinned,
+      Value<DateTime?> createdAt,
       Value<int> rowid,
     });
 
@@ -10598,6 +11679,16 @@ class $$KnowledgePointsTableFilterComposer
 
   ColumnFilters<double> get confidence => $composableBuilder(
     column: $table.confidence,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get pinned => $composableBuilder(
+    column: $table.pinned,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -10685,6 +11776,16 @@ class $$KnowledgePointsTableOrderingComposer
     column: $table.confidence,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<bool> get pinned => $composableBuilder(
+    column: $table.pinned,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$KnowledgePointsTableAnnotationComposer
@@ -10752,6 +11853,12 @@ class $$KnowledgePointsTableAnnotationComposer
     column: $table.confidence,
     builder: (column) => column,
   );
+
+  GeneratedColumn<bool> get pinned =>
+      $composableBuilder(column: $table.pinned, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
 }
 
 class $$KnowledgePointsTableTableManager
@@ -10806,6 +11913,8 @@ class $$KnowledgePointsTableTableManager
                 Value<String> sourceQuote = const Value.absent(),
                 Value<String> origin = const Value.absent(),
                 Value<double> confidence = const Value.absent(),
+                Value<bool> pinned = const Value.absent(),
+                Value<DateTime?> createdAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => KnowledgePointsCompanion(
                 id: id,
@@ -10823,6 +11932,8 @@ class $$KnowledgePointsTableTableManager
                 sourceQuote: sourceQuote,
                 origin: origin,
                 confidence: confidence,
+                pinned: pinned,
+                createdAt: createdAt,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -10842,6 +11953,8 @@ class $$KnowledgePointsTableTableManager
                 required String sourceQuote,
                 Value<String> origin = const Value.absent(),
                 Value<double> confidence = const Value.absent(),
+                Value<bool> pinned = const Value.absent(),
+                Value<DateTime?> createdAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => KnowledgePointsCompanion.insert(
                 id: id,
@@ -10859,6 +11972,8 @@ class $$KnowledgePointsTableTableManager
                 sourceQuote: sourceQuote,
                 origin: origin,
                 confidence: confidence,
+                pinned: pinned,
+                createdAt: createdAt,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
@@ -14859,6 +15974,8 @@ class $AppDatabaseManager {
       $$NotebooksTableTableManager(_db, _db.notebooks);
   $$NotesTableTableManager get notes =>
       $$NotesTableTableManager(_db, _db.notes);
+  $$NoteAssetsTableTableManager get noteAssets =>
+      $$NoteAssetsTableTableManager(_db, _db.noteAssets);
   $$KnowledgePointsTableTableManager get knowledgePoints =>
       $$KnowledgePointsTableTableManager(_db, _db.knowledgePoints);
   $$PrerequisiteEdgesTableTableManager get prerequisiteEdges =>

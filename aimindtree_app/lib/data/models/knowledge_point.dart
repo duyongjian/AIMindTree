@@ -146,6 +146,8 @@ class KnowledgePoint {
     this.version = 1,
     this.deviceId = '',
     this.deletedAt,
+    this.pinned = false,
+    this.createdAt,
   })  : id = id ?? newUlid(),
         updatedAt = updatedAt ?? DateTime.now().toUtc();
 
@@ -172,6 +174,15 @@ class KnowledgePoint {
   final String deviceId;
   final DateTime? deletedAt;
 
+  /// 置顶：true 的知识点恒排在列表最前（用户诉求：控制哪些知识点排在上面）。
+  final bool pinned;
+
+  /// 创建时间；历史行可能为 null（v5 迁移已用 `updated_at` 回填，但仍保留兜底）。
+  final DateTime? createdAt;
+
+  /// 展示 / 排序统一走这个值：null 时回落到 [updatedAt]（历史数据兜底）。
+  DateTime get effectiveCreatedAt => createdAt ?? updatedAt;
+
   KnowledgePoint copyWith({
     String? name,
     KnowledgePointType? type,
@@ -180,6 +191,8 @@ class KnowledgePoint {
     double? confidence,
     String? sourceNoteId,
     DateTime? updatedAt,
+    bool? pinned,
+    DateTime? createdAt,
   }) =>
       KnowledgePoint(
         id: id,
@@ -198,6 +211,8 @@ class KnowledgePoint {
         version: version,
         deviceId: deviceId,
         deletedAt: deletedAt,
+        pinned: pinned ?? this.pinned,
+        createdAt: createdAt ?? this.createdAt,
       );
 }
 

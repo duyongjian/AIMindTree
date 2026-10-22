@@ -16,6 +16,7 @@ part 'drift_database.g.dart';
   tables: [
     Notebooks,
     Notes,
+    NoteAssets,
     KnowledgePoints,
     PrerequisiteEdges,
     MasteryRecords,
@@ -37,7 +38,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase([QueryExecutor? executor]) : super(executor ?? _openConnection());
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -56,6 +57,17 @@ class AppDatabase extends _$AppDatabase {
           // 非空布尔带默认值，drift 的 addColumn 会自动回填历史行。
           if (from < 4) {
             await m.addColumn(canvasNodes, canvasNodes.pinned);
+          }
+          // v4 → v5：知识点「置顶 + 创建时间」+ 笔记附件表（富文本图片）。
+          if (from < 5) {
+            await m.addColumn(knowledgePoints, knowledgePoints.pinned);
+            await m.addColumn(knowledgePoints, knowledgePoints.createdAt);
+            // 历史行没有创建时间：用「当时已知的更新时间」近似（比 epoch 1970 合理得多）。
+            // ⚠️ 这是不可逆的近似值，真实创建时间无法还原。
+            await m.database.customStatement(
+              'UPDATE knowledge_points SET created_at = updated_at WHERE created_at IS NULL',
+            );
+            await m.createTable(noteAssets);
           }
         },
       );
