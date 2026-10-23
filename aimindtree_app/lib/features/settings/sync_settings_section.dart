@@ -219,10 +219,19 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
       final root = Uri.parse(url.endsWith('/') ? url : '$url/');
       final req = await client.getUrl(root).timeout(_kTestTimeout);
       final resp = await req.close().timeout(_kTestTimeout);
+      final status = resp.statusCode;
+      // 拿到**任意** HTTP 状态码就说明链路已通（DNS/TLS/代理全部正常）——
+      // 三个中继都不保证根路径 200：CF Worker 对 `/` 固定返 404，CN/Vercel 返 200。
+      // 只有超时 / 连接错误才算不可达，别把 404 误报成失败。
+      final verdict = switch (status) {
+        200 => '已连通',
+        404 => '已连通（CF Worker 无根路径健康检查，404 即链路通）',
+        _ => '服务器有响应',
+      };
       if (!mounted) return;
       setState(
         () => _testResult =
-            'HTTP ${resp.statusCode}（${sw.elapsedMilliseconds}ms）',
+            'HTTP $status（${sw.elapsedMilliseconds}ms）$verdict',
       );
     } on TimeoutException catch (e) {
       if (!mounted) return;
