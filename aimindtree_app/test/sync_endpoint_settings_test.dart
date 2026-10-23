@@ -20,6 +20,11 @@ import 'package:aimindtree_app/data/sync/sync_config.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+/// 「没设用户代理时」syncFindProxy 的回落值：本环境通常没有自动探测结果 →
+/// DIRECT；万一探测到了就是 PROXY $detectedSystemProxy（测试要两者都对）。
+String _fallback() =>
+    detectedSystemProxy == null ? 'DIRECT' : 'PROXY $detectedSystemProxy';
+
 void main() {
   group('SyncConfig.cfProxy 读写', () {
     late SharedPreferences prefs;
@@ -207,6 +212,93 @@ void main() {
         throwsA(anything),
       );
       client.close(force: true);
+    });
+  });
+
+  group('启动时从 prefs 还原用户代理（bootstrap 重放）', () {
+    setUp(() => setUserProxy(null));
+    tearDown(() => setUserProxy(null));
+
+    test('prefs 里有 cf_proxy → 还原后外网走该代理，回环仍直连', () async {
+      // 模拟「用户上次配了代理，然后重启了 App」。
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'aimindtree.sync.cf_proxy': '127.0.0.1:7890',
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final cfg = SyncConfig(prefs: prefs, secretStore: InMemorySecretStore());
+
+      // bootstrap 里那一行（extraction_service.dart）
+      setUserProxy(cfg.cfProxy);
+
+      expect(userProxyOverride, '127.0.0.1:7890');
+      expect(
+        syncFindProxy(Uri.parse('https://aimindtree-sync-relay.tuanx.workers.dev/')),
+        'PROXY 127.0.0.1:7890',
+      );
+      expect(
+        syncFindProxy(Uri.parse('https://example.com/')),
+        'PROXY 127.0.0.1:7890',
+      );
+      // 回环优先级最高：本机 llm_server 不能被代理拐走。
+      expect(syncFindProxy(Uri.parse('http://127.0.0.1:8787/')), 'DIRECT');
+      expect(syncFindProxy(Uri.parse('http://localhost:8787/')), 'DIRECT');
+    });
+
+    test('prefs 里的值带空白 → 还原后被 trim 成干净的 host:port', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'aimindtree.sync.cf_proxy': '  http://proxy.home:8080  ',
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final cfg = SyncConfig(prefs: prefs, secretStore: InMemorySecretStore());
+
+      setUserProxy(cfg.cfProxy);
+      expect(userProxyOverride, 'proxy.home:8080');
+      expect(
+        syncFindProxy(Uri.parse('https://example.com/')),
+        'PROXY proxy.home:8080',
+      );
+    });
+
+    test('prefs 里没有该 key：读到 null → 已有覆盖被清掉，回落到原逻辑', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final prefs = await SharedPreferences.getInstance();
+      final cfg = SyncConfig(prefs: prefs, secretStore: InMemorySecretStore());
+
+      // 先假装进程里残留着上一次会话的覆盖。
+      setUserProxy('127.0.0.1:7890');
+      expect(userProxyOverride, '127.0.0.1:7890');
+      expect(syncFindProxy(Uri.parse('https://example.com/')), 'PROXY 127.0.0.1:7890');
+
+      setUserProxy(cfg.cfProxy); // prefs 未设置 → null
+      expect(userProxyOverride, isNull);
+      expect(syncFindProxy(Uri.parse('https://example.com/')), _fallback());
+      expect(syncFindProxy(Uri.parse('http://127.0.0.1:8787/')), 'DIRECT');
+    });
+
+    test('prefs 里是空白串（等价于未设置）→ 同样回落，不会变成 PROXY 空串',
+        () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'aimindtree.sync.cf_proxy': '   ',
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final cfg = SyncConfig(prefs: prefs, secretStore: InMemorySecretStore());
+
+      setUserProxy(cfg.cfProxy);
+      expect(userProxyOverride, isNull);
+      // 关键：绝不能出现 'PROXY ' 这种让 HttpClient 直接崩掉的脏值。
+      expect(syncFindProxy(Uri.parse('https://example.com/')), _fallback());
+    });
+
+    test('装配守卫：bootstrap 在拿到 prefs 后、发包前重放代理', () {
+      final source = File('lib/ai/extraction_service.dart').readAsStringSync();
+      expect(source, contains('setUserProxy(syncConfig.cfProxy)'));
+      // 顺序要求：重放必须早于任何会建 HttpClient 的动作（这里是最早的下发
+      // 拉取），否则那部分请求仍会漏掉用户代理。
+      final replay = source.indexOf('setUserProxy(syncConfig.cfProxy)');
+      final firstHttp = source.indexOf('AppConfigService.fetchAndApply');
+      expect(replay, greaterThan(0));
+      expect(firstHttp, greaterThan(0));
+      expect(replay, lessThan(firstHttp));
     });
   });
 

@@ -20,6 +20,7 @@ import '../data/repositories/knowledge_repository.dart';
 import '../data/repositories/note_asset_repository.dart';
 import '../data/repositories/tree_repository.dart';
 import '../data/repositories/settings_repository.dart';
+import '../data/sync/http_proxy.dart';
 import '../data/sync/sync_api.dart';
 import '../data/sync/sync_config.dart';
 import '../data/sync/sync_context.dart';
@@ -241,6 +242,16 @@ class ExtractionService {
     // 放在 seedFromLocalIfEmpty 之前：下发的地址/后端/模型先落库，seed 才会
     // 发现「已有 llm_server 行」而不再塞一条内置默认行。
     final prefs = await SharedPreferences.getInstance();
+    // prefs 已在上面取过（bootstrap 前置的下发拉取也用它存 sha1），此处复用。
+    final syncConfig = SyncConfig(prefs: prefs, secretStore: store);
+    // === 用户手动代理：必须在任何 HttpClient 建出来之前灌回 http_proxy ===
+    // `initSystemProxy()`（main.dart 里启动时探测一次）不知道用户在设置页手
+    // 动填的代理——那个值只存在 prefs 里。不在这里重放，`syncFindProxy` 会
+    // 静默回落到「直连/自动探测」，表现为「设置里填了代理，重启后似乎没生效」，
+    // 这类问题在用户侧极难自查。放在这里（而不是更靠下的 Sync 装配处）是因为
+    // 紧接着的下发拉取也会发 HTTP 请求，同样需要走代理；且这里是 bootstrap
+    // 里最早能拿到 prefs 的位置，路径上没有任何提前 return。
+    setUserProxy(syncConfig.cfProxy);
     await AppConfigService.fetchAndApply(settings, prefs);
 
     await settings.seedFromLocalIfEmpty(config);
@@ -329,9 +340,7 @@ class ExtractionService {
     // AiSessionRepository）写完本地库后就用它入队，实现「本地 → 服务端」
     // 上行同步。测试里默认为 null → 仓储不入队、也不崩。
     SyncOutboxRepo.current = outbox;
-    // prefs 已在上面取过（bootstrap 前置的下发拉取也用它存 sha1），此处复用。
     final statusStore = SyncStatusStore(prefs);
-    final syncConfig = SyncConfig(prefs: prefs, secretStore: store);
 
     SyncApi api;
     if (syncConfig.isConfigured) {
