@@ -89,3 +89,9 @@ llm_server/.m10_fixture.json
 
 # 方案 A 本地同步中继的运行时 SQLite（可随时重建）
 llm_server/sync_relay.db
+
+# Vercel CLI 本地安装（327MB，可用 npm i --prefix .vcli vercel 重建）
+.vcli/
+
+# CloudBase 云函数部署目录内的依赖（23MB，进目录 npm ci 可重建）
+cloudbase/functions/*/node_modules/

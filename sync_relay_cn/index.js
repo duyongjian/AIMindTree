@@ -195,11 +195,19 @@ function bearerToken(headers) {
 
 // ---------------- 业务处理 ----------------
 
-/** 统一处理一个 HTTP 请求；store 由调用方注入（便于本地用内存 mock 自测）。 */
-async function handle(store, event) {
+/**
+ * 统一处理一个 HTTP 请求。
+ *
+ * 第一个参数可以是 store 对象（本地自测直接传），也可以是「返回 store 的工厂」
+ * （云端入口传 ``getStore``）。用工厂是为了把 SDK 初始化推迟到真正需要数据库的
+ * 分支：``GET /`` 健康检查因此完全不碰数据库，「SDK / 数据库没起来」与「业务
+ * 逻辑出错」能在响应体里区分开，排查时不用猜。
+ */
+async function handle(storeOrFactory, event) {
   const method = ((event && event.httpMethod) || 'GET').toUpperCase();
   const headers = normalizeHeaders(event && event.headers);
   const path = stripBasePath(normalizePath(event && event.path));
+  const store = typeof storeOrFactory === 'function' ? storeOrFactory : () => storeOrFactory;
 
   try {
     if (method === 'OPTIONS') {
@@ -209,14 +217,24 @@ async function handle(store, event) {
     // 根路径健康检查：App 设置页的「测试连接」会 GET 根路径，CF 版在这里返回 404，
     // 用户没法一眼判断是否真的连上了，本版改为 200 + 服务标识。
     if (method === 'GET' && path === '/') {
-      return respond({ ok: true, service: SERVICE_NAME, version: SERVICE_VERSION });
+      return respond({
+        ok: true,
+        service: SERVICE_NAME,
+        version: SERVICE_VERSION,
+        // 运行期自描述：确认云端跑在哪个 Node、Web 标准全局对象是否可用
+        // （决定入口走 Web Response 分支还是集成响应分支）。
+        runtime: {
+          node: process.version,
+          web_globals: typeof Response === 'function' && typeof Headers === 'function',
+        },
+      });
     }
 
     if (method === 'POST' && path.endsWith('/auth/register')) {
-      return await handleRegister(store, event);
+      return await handleRegister(store(), event);
     }
     if (method === 'POST' && path.endsWith('/auth/login')) {
-      return await handleLogin(store, event);
+      return await handleLogin(store(), event);
     }
 
     const needsAuth =
@@ -224,16 +242,16 @@ async function handle(store, event) {
       (method === 'GET' && path.endsWith('/sync/manifest'));
     if (needsAuth) {
       const token = bearerToken(headers);
-      const ownerId = token ? await store.resolveToken(token) : null;
+      const ownerId = token ? await store().resolveToken(token) : null;
       if (!ownerId) return respond({ error: 'unauthorized' }, 401);
 
       if (method === 'POST' && path.endsWith('/sync/push')) {
-        return await handlePush(store, event, ownerId);
+        return await handlePush(store(), event, ownerId);
       }
       if (method === 'POST' && path.endsWith('/sync/pull')) {
-        return await handlePull(store, event, ownerId);
+        return await handlePull(store(), event, ownerId);
       }
-      return await handleManifest(store, ownerId);
+      return await handleManifest(store(), ownerId);
     }
 
     return respond({ error: 'not found' }, 404);
@@ -379,9 +397,148 @@ function getStore() {
   return cachedStore;
 }
 
-// CloudBase HTTP 访问服务入口：event 里是 HTTP 请求，返回值是集成响应。
-exports.main = async (event, context) => await handle(getStore(), event);
+// ---------------- CloudBase 云函数入口 ----------------
+//
+// CloudBase 的 HTTP 访问服务把请求转给云函数时有**两种**投递形态，两者要求的
+// 返回值形状正好相反，搞错就是「400 + 空 body + content-disposition: attachment」：
+//
+//   1) 事件函数：event 是 API 网关风格的普通对象
+//      （{httpMethod, path, headers, body, isBase64Encoded}），
+//      必须返回集成响应 {statusCode, headers, body}；
+//   2) Web 函数：event 是 Web 标准 Request 对象，必须返回 Response 对象。
+//
+// 2026-10-24 实测记录：本函数的网关路由 ``upstreamResourceType=WEB_SCF``，
+// 云端按 Web 函数形态投递；而当时的入口按事件函数写、返回普通对象，网关一律回
+// 400（响应头 ``x-cloudbase-upstream-status-code: 400``、``content-length: 0``）。
+// 注意：**把返回值裁剪成 {statusCode, body} 两字段也依然是 400** —— 所以根因不是
+// 「多带了 headers / isBase64Encoded」，而是整个返回形状不被识别。
+//
+// 因此这里按 ``isWebRequest(event)`` 自动分流：收到 Request 就回 Response，
+// 收到普通对象就回集成响应。两种形态都覆盖，将来改路由配置、换运行时版本都不用
+// 再动入口。
+
+/** 判断入参是不是 Web 标准 Request（真 Request 的 headers 才有 .get 方法）。 */
+function isWebRequest(ev) {
+  if (!ev || typeof ev !== 'object') return false;
+  if (typeof ev.url !== 'string' || typeof ev.method !== 'string') return false;
+  const h = ev.headers;
+  return !!h && typeof h.get === 'function';
+}
+
+/** Web Request → 事件函数风格的 event（复用同一套 handle 业务逻辑）。 */
+async function webRequestToEvent(req) {
+  const u = new URL(req.url);
+  const headers = {};
+  if (req.headers && typeof req.headers.forEach === 'function') {
+    req.headers.forEach((v, k) => {
+      headers[k] = v;
+    });
+  }
+  let body = '';
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    body = await req.text();
+  }
+  return {
+    httpMethod: req.method,
+    path: u.pathname + u.search,
+    headers,
+    body,
+    isBase64Encoded: false,
+  };
+}
+
+/** 集成响应 → Web 标准 Response（Web 函数形态的返回值）。 */
+function toWebResponse(r) {
+  const h = new Headers(r.headers || {});
+  if (!h.has('content-type')) h.set('content-type', 'application/json; charset=utf-8');
+  return new Response(r.body == null ? '' : String(r.body), {
+    status: r.statusCode || 200,
+    headers: h,
+  });
+}
+
+/** 兜底：handle 意外返回了不带 statusCode 的东西，也别让网关看到空响应。 */
+function normalizeIntegrated(r) {
+  if (r && typeof r.statusCode === 'number') return r;
+  return respond({ error: 'internal: handler returned no statusCode' }, 500);
+}
+
+/**
+ * 看门狗超时：``handle`` 可能因为 SDK 初始化 / 数据库连接卡住（云端
+ * ``invokeFunction`` 实测出现过 "Invoking task timed out after 3 seconds"）。
+ * 超时就回 504 + 诊断信息，而不是让网关干等到函数 timeout——
+ * 「卡住」和「报错」在响应体里一眼可分。
+ */
+const HANDLER_TIMEOUT_MS = 25000;
+
+/**
+ * 数据层工厂：默认是真实的 ``getStore``（懒加载 @cloudbase/node-sdk + PostgreSQL）。
+ *
+ * 云端入口用的是模块级这一个引用，测试可以用 ``__setStoreFactoryForTest`` 换成
+ * 内存 store，从而在**不联网、不装腾讯云凭据**的前提下把 ``exports.main``
+ * 的双形态分流逻辑也跑进断言——正是 2026-10-24 400 事故里唯一没被覆盖的那段。
+ */
+let storeFactory = getStore;
+
+/** 仅供本地自测替换数据层工厂；传非函数即恢复默认。 */
+function setStoreFactoryForTest(fn) {
+  storeFactory = typeof fn === 'function' ? fn : getStore;
+  cachedStore = null; // 顺手清掉缓存，避免上一个用例的 store 漏到下一个
+  return storeFactory;
+}
+
+exports.main = async (event, context) => {
+  const web = isWebRequest(event);
+
+  let ev = event;
+  if (web) {
+    try {
+      ev = await webRequestToEvent(event);
+    } catch (e) {
+      return toWebResponse(
+        respond({ error: 'bad request', detail: e && e.message ? e.message : String(e) }, 400)
+      );
+    }
+  } else if (typeof event === 'string') {
+    // 有些调用方会把 event 序列化成 JSON 字符串投递。
+    try {
+      ev = JSON.parse(event);
+    } catch {
+      ev = {};
+    }
+  }
+
+  let r;
+  let timer = null;
+  const watchdog = new Promise((resolve) => {
+    timer = setTimeout(
+      () => resolve(respond({ error: 'handler timeout', ms: HANDLER_TIMEOUT_MS }, 504)),
+      HANDLER_TIMEOUT_MS
+    );
+  });
+  try {
+    r = await Promise.race([Promise.resolve(handle(storeFactory, ev || {})), watchdog]);
+  } catch (e) {
+    r = respond(
+      {
+        error: 'handler failed',
+        detail: e && e.message ? e.message : String(e),
+        stack: e && e.stack ? String(e.stack).split('\n').slice(0, 4) : null,
+      },
+      500
+    );
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+
+  r = normalizeIntegrated(r);
+  // Web 函数形态必须回 Response 对象；事件函数形态回集成响应。
+  // （官方示例只回 {statusCode, body} 两字段；旧版网关上多带字段行为不确定，
+  //  保守起见事件形态只回这两字段，CORS 头交给网关与调用方。）
+  return web ? toWebResponse(r) : { statusCode: r.statusCode, body: r.body };
+};
 
 // 导出供本地自测直接驱动（不联网、不需要腾讯云账号）。
 exports.handle = handle;
 exports.makeStore = makeStore;
+exports.setStoreFactoryForTest = setStoreFactoryForTest;

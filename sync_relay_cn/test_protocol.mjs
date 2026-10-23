@@ -30,7 +30,7 @@
 import relay from './index.js';
 import { DatabaseSync } from 'node:sqlite';
 
-const { handle, makeStore } = relay;
+const { handle, makeStore, main, setStoreFactoryForTest } = relay;
 
 // node:sqlite 在 Node 22 仍是实验特性，屏蔽它的 ExperimentalWarning 噪音，
 // 避免淹没测试输出（不影响逻辑与退出码；其余 warning 照常打印）。
@@ -670,6 +670,135 @@ async function run() {
     const pull = await post(fresh, '/sync/pull', { device_id: 'd1', since: null }, token);
     assert(pull.body.envelopes[0].entity_id === dottedId, 'entity_id 原样返回给 App');
     assert(pull.body.envelopes[0].payload.v === 2, '复合主键 upsert 仍然覆盖了最新态');
+  }
+
+  // --- 24) 云函数入口 · 事件函数形态 ---
+  // 2026-10-24 线上事故：网关路由 upstreamResourceType=WEB_SCF，云端按 Web 函数
+  // 投递，而入口按事件函数写、返回普通对象 → 网关一律 400 + 空 body。
+  // 这两个用例把入口的两种分流都钉住，避免再回归。
+  {
+    const fresh = makeEnv();
+    setStoreFactoryForTest(() => fresh);
+
+    const out = await main(
+      {
+        httpMethod: 'POST',
+        path: '/auth/register',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'evtuser', password: 'qwudhnc2837' }),
+        isBase64Encoded: false,
+      },
+      {}
+    );
+    assert(
+      out && typeof out.statusCode === 'number' && typeof out.body === 'string',
+      '事件形态返回 {statusCode, body} 集成响应'
+    );
+    assert(out.statusCode === 200 && JSON.parse(out.body).token.length === 64, '事件形态 register → 200 + 64 位 token');
+
+    // 健康检查必须不碰数据层：工厂直接抛错时 GET / 仍应 200。
+    setStoreFactoryForTest(() => {
+      throw new Error('store boom');
+    });
+    const health = await main({ httpMethod: 'GET', path: '/', headers: {} }, {});
+    assert(
+      health.statusCode === 200 && JSON.parse(health.body).ok === true,
+      'GET / 健康检查不初始化数据层（工厂抛错也 200）'
+    );
+    assert(
+      typeof JSON.parse(health.body).runtime.node === 'string',
+      '健康检查带 runtime 自描述（node 版本）'
+    );
+
+    // 数据层真的挂了时，业务路径要回 500 + 可读 detail，而不是 400 空 body。
+    const broken = await main(
+      {
+        httpMethod: 'POST',
+        path: '/auth/login',
+        headers: {},
+        body: JSON.stringify({ username: 'evtuser', password: 'qwudhnc2837' }),
+      },
+      {}
+    );
+    assert(
+      broken.statusCode === 500 && JSON.parse(broken.body).error === 'store boom',
+      '数据层初始化失败 → 500 + detail（排查时看得到原因）'
+    );
+
+    // event 被序列化成 JSON 字符串投递时也要能解析。
+    const asString = await main(
+      JSON.stringify({
+        httpMethod: 'GET',
+        path: '/',
+        headers: {},
+        body: '',
+      }),
+      {}
+    );
+    assert(asString.statusCode === 200, '字符串形态的 event 也能被解析');
+
+    setStoreFactoryForTest(() => fresh);
+  }
+
+  // --- 25) 云函数入口 · Web 函数形态（必须返回 Response 对象）---
+  {
+    const fresh = makeEnv();
+    setStoreFactoryForTest(() => fresh);
+
+    const regRes = await main(
+      new Request('https://relay.example.com/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'webuser', password: 'ncbxuwye2938' }),
+      }),
+      {}
+    );
+    assert(regRes instanceof Response, 'Web 形态返回 Web 标准 Response 对象');
+    assert(regRes.status === 200, 'Web 形态 register → 200');
+    const regJson = await regRes.json();
+    assert(typeof regJson.token === 'string' && regJson.token.length === 64, 'Web 形态拿到 64 位 token');
+
+    const healthRes = await main(new Request('https://relay.example.com/'), {});
+    assert(healthRes instanceof Response && healthRes.status === 200, 'Web 形态 GET / → 200 Response');
+    const healthJson = await healthRes.json();
+    assert(healthJson.ok === true && healthJson.runtime.web_globals === true, 'Web 形态健康检查带 runtime 自描述');
+
+    // 带上令牌走一遍真实业务链路，确认 Request → event → store 全通。
+    const pushRes = await main(
+      new Request('https://relay.example.com/sync/push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${regJson.token}` },
+        body: JSON.stringify({
+          device_id: 'd1',
+          envelopes: [mkEnvId('notes', 'web-n1', 'd1', { title: 'from-web' })],
+        }),
+      }),
+      {}
+    );
+    assert(pushRes.status === 200 && (await pushRes.json()).received === 1, 'Web 形态 push → received=1');
+
+    const pullRes = await main(
+      new Request('https://relay.example.com/sync/pull', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${regJson.token}` },
+        body: JSON.stringify({ device_id: 'd1', since: null }),
+      }),
+      {}
+    );
+    const pullJson = await pullRes.json();
+    assert(pullJson.envelopes.length === 1 && pullJson.envelopes[0].payload.title === 'from-web', 'Web 形态 pull 取回刚推的数据');
+
+    // 未授权 → 401（Response 形态也要能表达状态码）。
+    const noAuth = await main(
+      new Request('https://relay.example.com/sync/manifest', { method: 'GET' }),
+      {}
+    );
+    assert(noAuth.status === 401, 'Web 形态未带令牌 → 401');
+
+    const notFound = await main(new Request('https://relay.example.com/sync/nope'), {});
+    assert(notFound.status === 404, 'Web 形态未知路径 → 404');
+
+    setStoreFactoryForTest(null);
   }
 
   console.log(`\n结果：通过 ${passed}，失败 ${failed}`);
