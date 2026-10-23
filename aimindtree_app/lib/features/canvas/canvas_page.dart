@@ -832,6 +832,137 @@ class CanvasPageState extends State<CanvasPage> {
     _toast('已新建并加入知识树');
   }
 
+  /// 在知识树界面「就地」编辑某个已存在的知识点：名称 / 类型 / 定义。
+  ///
+  /// 入口是 [_showNodeActions] 浮层的「编辑知识点」——用户不必跳去「知识点管理」
+  /// 页就能改掉画布上刚发现的问题点。
+  ///
+  /// **可改字段刻意只有三个**（与「知识点管理」页的编辑弹窗同口径）：
+  /// - 名称 / 类型 / 定义是展示性字段，用户可自由改；
+  /// - 锚点四件套（`sourceNoteId` / `sourceStart` / `sourceEnd` / `sourceQuote`）
+  ///   是「这个点从哪来」的硬证据，`origin` / `confidence` 是抽取时的元信息，
+  ///   全部**原样带回**——[KnowledgePoint.copyWith] 本就会保留它们，落库侧
+  ///   [KnowledgeRepository.updateKpMeta] 也只写 name/type/definition/sourceNoteId
+  ///   四列，并自带 `version + 1` 与 sync outbox 入队，锚点不会被这次编辑破坏。
+  /// - 树成员关系、节点坐标存在 `canvas_nodes`，本方法**完全不碰**，所以存完
+  ///   位置不变、连线不变。
+  ///
+  /// 与 [_newKnowledgePoint] 的差别只有一处：**不做「关联笔记」下拉**（树上快速
+  /// 编辑的场景里用户要的是「把名字/定义改对」），来源笔记沿用原值。其余形态完全
+  /// 对齐：SingleChildScrollView 承载（小屏/横屏不溢出）、名称为空就地 toast 且
+  /// **不关窗**、弹窗局部 TextEditingController 交给 GC。
+  Future<void> _showEditKpDialog(KnowledgePoint kp) async {
+    final nameCtrl = TextEditingController(text: kp.name);
+    final defCtrl = TextEditingController(text: kp.definition);
+    var type = kp.type;
+
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSt) => AlertDialog(
+          title: const Text('编辑知识点'),
+          content: SizedBox(
+            width: 420,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  TextField(
+                    controller: nameCtrl,
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                      labelText: '名称（必填）',
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  DropdownButtonFormField<KnowledgePointType>(
+                    initialValue: type,
+                    decoration: const InputDecoration(
+                      labelText: '类型',
+                      isDense: true,
+                    ),
+                    items: <DropdownMenuItem<KnowledgePointType>>[
+                      for (final t in KnowledgePointType.values)
+                        DropdownMenuItem<KnowledgePointType>(
+                          value: t,
+                          child: Text(t.label),
+                        ),
+                    ],
+                    onChanged: (v) => setSt(() => type = v ?? type),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: defCtrl,
+                    maxLines: 3,
+                    decoration: const InputDecoration(
+                      labelText: '定义',
+                      isDense: true,
+                      alignLabelWithHint: true,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () async {
+                final name = nameCtrl.text.trim();
+                if (name.isEmpty) {
+                  _toast('名称不能为空');
+                  return;
+                }
+                // 只改三项；锚点 / origin / confidence / version 由 copyWith 原样保留。
+                final updated = kp.copyWith(
+                  name: name,
+                  type: type,
+                  definition: defCtrl.text,
+                );
+                final res = await _repo.updateKpMeta(updated);
+                if (!mounted) return;
+                if (res is Failure<KnowledgePoint>) {
+                  _toast('保存失败：${res.message}');
+                  return;
+                }
+                Navigator.pop(ctx, true);
+              },
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    // 同 [_newKnowledgePoint]：**不要**在这里 dispose 两个 controller。
+    // `showDialog` 的 future 在路由 pop 的瞬间就已完成，此时弹窗还在退场动画里、
+    // TextField 仍会随动画重建，立即 dispose 会撞上
+    // 「A TextEditingController was used after being disposed」。交给 GC。
+    if (saved != true || !mounted) return;
+
+    final treeId = _selectedTree?.id;
+    if (treeId == null) return;
+    // 刷新整棵树（名称/类型/定义都参与渲染），顺带让这条改动落到画布上。
+    await _loadForTree(treeId);
+    if (!mounted) return;
+    // [_loadForTree] 首行会清空选中态；这里按 id 从刷新后的列表里找回**新实例**
+    // 重新选中——否则用户刚编辑完的点会自己「掉选」，得再点一次。
+    // （不用 collection 的 firstWhereOrNull：本项目未声明该直接依赖。）
+    KnowledgePoint? fresh;
+    for (final q in _points) {
+      if (q.id == kp.id) {
+        fresh = q;
+        break;
+      }
+    }
+    setState(() => _selectedPoint = fresh);
+    _toast('已更新');
+  }
+
   /// 从其他知识树加入知识点：选源树 → 勾选该树的成员（已在当前树的置灰）→
   /// 加入当前选中的树。
   ///
@@ -1329,7 +1460,10 @@ class CanvasPageState extends State<CanvasPage> {
     _showNodeActions(p);
   }
 
-  /// 操作浮层：选中节点后的三个动作。
+  /// 操作浮层：选中节点后的动作（编辑 / 讲解 / 掌握度 / 连线 / 补前置）。
+  ///
+  /// 这是**单点操作的唯一入口**：想改某个知识点不必跳去「知识点管理」页，
+  /// 在这里点「编辑知识点」即可就地改名称 / 类型 / 定义（见 [_showEditKpDialog]）。
   Future<void> _showNodeActions(KnowledgePoint p) async {
     if (!mounted) return;
     final choice = await showModalBottomSheet<String>(
@@ -1338,6 +1472,11 @@ class CanvasPageState extends State<CanvasPage> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text('编辑知识点'),
+              onTap: () => Navigator.pop(ctx, 'edit'),
+            ),
             ListTile(
               leading: const Icon(Icons.school),
               title: const Text('AI 讲解 / 追问'),
@@ -1365,6 +1504,8 @@ class CanvasPageState extends State<CanvasPage> {
     );
     if (!mounted) return;
     switch (choice) {
+      case 'edit':
+        await _showEditKpDialog(p);
       case 'teach':
         widget.onKpTap?.call(p);
       case 'master':
