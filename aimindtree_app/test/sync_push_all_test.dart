@@ -165,6 +165,92 @@ void main() {
     });
   });
 
+  group('bug ②b：pushDrain 排空积压（单次 push 只推 100 条）', () {
+    /// 直接往 outbox 里塞 [count] 条 pending。
+    Future<void> fill(int count) async {
+      for (var i = 0; i < count; i++) {
+        await outbox.enqueue(
+          entityTable: 'notes',
+          entityId: 'n-$i',
+          op: SyncOp.upsert,
+          payload: <String, dynamic>{
+            'id': 'n-$i',
+            'title': 't-$i',
+            'version': 1,
+          },
+          baseVersion: 1,
+        );
+      }
+    }
+
+    test('对照组：单次 push() 只推 100 条，积压留下 150 条', () async {
+      await fill(250);
+      expect(await outbox.pendingCount(), 250);
+
+      final single = await engine.push(api: api);
+      // 精确等于默认 limit —— 这就是用户看到「增量 100 条」的原因。
+      expect(single.pushed, 100);
+      expect(await outbox.pendingCount(), 150);
+    });
+
+    test('pushDrain() 把 250 条全部排空，pending 归零', () async {
+      await fill(250);
+
+      final drained = await engine.pushDrain(api: api);
+      expect(drained.pushed, 250);
+      expect(drained.failed, 0);
+      expect(await outbox.pendingCount(), 0);
+
+      // 250 → 100 + 100 + 50 = 3 轮
+      expect(api.pushHistory.length, 3);
+      expect(
+        api.pushHistory.map((b) => b.length).toList(),
+        <int>[100, 100, 50],
+      );
+    });
+
+    test('失败行不再永远轮不到重试：pushDrain 会继续推后续批次', () async {
+      await fill(150);
+
+      final drained = await engine.pushDrain(api: api, batchLimit: 100);
+      expect(drained.pushed, 150);
+      expect(await outbox.pendingCount(), 0);
+      expect(await outbox.failedCount(), 0);
+    });
+
+    test('防空转：全推不动的行（白名单外）不会无限循环', () async {
+      // `ai_providers` 不在 kSyncTableAllowlist → push() 原地跳过、行留在
+      // pending。没有防空转兜底的话，这里会空转到 maxRounds。
+      for (var i = 0; i < 5; i++) {
+        await outbox.enqueue(
+          entityTable: 'ai_providers',
+          entityId: 'p-$i',
+          op: SyncOp.upsert,
+          payload: <String, dynamic>{'id': 'p-$i'},
+          baseVersion: 1,
+        );
+      }
+
+      final report = await engine.pushDrain(api: api, maxRounds: 3);
+      expect(report.pushed, 0);
+      expect(report.failed, 0);
+      // 行仍在排队（不是丢了，只是这张表不上行）。
+      expect(await outbox.pendingCount(), 5);
+      // 提前退出：连续两轮无进展即 break，远早于 maxRounds 撞线。
+      expect(api.pushHistory, isEmpty);
+    });
+
+    test('防空转：后端持续失败时在 maxRounds 内返回且 failed >= 1', () async {
+      await fill(1);
+      api.pushShouldFail = true;
+
+      final report = await engine.pushDrain(api: api, maxRounds: 3);
+      expect(report.pushed, 0);
+      expect(report.failed, greaterThanOrEqualTo(1));
+      expect(await outbox.failedCount(), greaterThanOrEqualTo(1));
+    });
+  });
+
   group('bug ②：pushAll 全量快照', () {
     test('存量数据（outbox 为空）只靠 push() 发不出去，pushAll() 能发出去',
         () async {

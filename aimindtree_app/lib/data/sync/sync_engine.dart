@@ -491,6 +491,73 @@ SyncEngine({
     }
   }
 
+  // ============ Push：排空积压 ============
+
+  /// 反复调用 [push] 直到 outbox 排空，返回**累计**结果。
+  ///
+  /// 为什么需要它：[push] 单次受 `limit`（默认 100 条）约束。积压超过 100 条
+  /// 时一次「上传」推不完——用户会连续几次看到同样的「增量 100 条」，误以为
+  /// 同步卡住；更麻烦的是 pending 占满 limit 后
+  /// `failedPending(limit: limit - pending.length)` 的参数恒为 0，
+  /// **失败行永远轮不到重试**。
+  ///
+  /// 退出条件（任一满足）：
+  /// - `pendingCount()` 归零（推完了）；
+  /// - 连续两轮 `pushed == 0 && failed == 0`（防空转：全是超限包或白名单外
+  ///   的行时它们会一直留在 pending，不设这个兜底会空转到 [maxRounds]）；
+  /// - 达到 [maxRounds] 安全上限（默认 100 轮 × 100 条 = 1 万条）。
+  ///
+  /// [batchLimit] 是**每轮**的条数上限（不是总量上限）；[maxRounds] 是安全
+  /// 上限而非预期轮数。
+  Future<PushReport> pushDrain({
+    SyncApi? api,
+    int batchLimit = 100,
+    int maxRounds = 100,
+  }) async {
+    var pushed = 0;
+    var failed = 0;
+    var serverTime = DateTime.now().toUtc();
+    var idleRounds = 0;
+
+    for (var round = 1; round <= maxRounds; round++) {
+      final report = await push(api: api, limit: batchLimit);
+      pushed += report.pushed;
+      failed += report.failed;
+      // 空 outbox 时 push() 早返回 epoch，别让它覆盖真实的服务端时间。
+      if (report.pushed > 0 || report.failed > 0) {
+        serverTime = report.serverTime;
+      }
+
+      final remaining = await _outbox.pendingCount();
+      _log.d(
+        'pushDrain 第 $round 轮：本轮 pushed=${report.pushed} '
+        'failed=${report.failed}，剩余 pending=$remaining',
+      );
+
+      if (remaining == 0) break;
+
+      if (report.pushed == 0 && report.failed == 0) {
+        idleRounds++;
+        if (idleRounds >= 2) {
+          _log.w(
+            'pushDrain 连续 $idleRounds 轮无进展（剩余 $remaining 条），'
+            '可能全是白名单外或超限行，提前退出避免空转',
+          );
+          break;
+        }
+      } else {
+        idleRounds = 0;
+      }
+
+      if (round == maxRounds) {
+        _log.w('pushDrain 达到轮数上限 $maxRounds，仍有 $remaining 条未推');
+      }
+    }
+
+    _log.i('pushDrain 完成：pushed=$pushed failed=$failed');
+    return PushReport(pushed: pushed, failed: failed, serverTime: serverTime);
+  }
+
   // ============ Pull ============
 
   /// 拉取 since [lastPulledAt]（首次为 null = 全量）→ 自回声过滤 → LWW merge。

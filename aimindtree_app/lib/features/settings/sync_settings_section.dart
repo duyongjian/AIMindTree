@@ -155,7 +155,12 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
         // 先增量（outbox 里的变更语义，含墓碑），再全量快照（历史存量对齐）。
         // 只跑增量的话，同步接线之前创建的数据一条都发不出去
         //（用户实测现象：「提示上传成功，但是 0 条」）。
-        final inc = await engine.push(api: api);
+        //
+        // 增量用 pushDrain 而不是单次 push：单次 push 只推 100 条，积压超过
+        // 100 时用户会连续几次看到同样的「增量 100 条」，像卡住（实测就是
+        // 「增量 100 条 + 快照 159 条」）；而且 pending 占满 limit 后失败行
+        // 永远轮不到重试。pushDrain 会循环到 outbox 排空为止。
+        final inc = await engine.pushDrain(api: api);
         final snap = await engine.pushAll(api: api);
         final total = inc.pushed + snap.pushed;
         final failed = inc.failed + snap.failed;
