@@ -10,6 +10,7 @@ import 'data/models/knowledge_tree.dart';
 import 'data/repositories/ai_session_repository.dart';
 import 'data/repositories/knowledge_repository.dart';
 import 'data/repositories/settings_repository.dart';
+import 'data/sync/http_proxy.dart';
 import 'data/sync/sync_context.dart';
 import 'features/agent/agent_page.dart';
 import 'features/canvas/canvas_page.dart';
@@ -23,6 +24,9 @@ import 'ui/job_tray.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // 先探测系统代理（环境变量 / Windows 注册表 / 常见本地端口），
+  // 让后续同步请求能走代理（Dart HttpClient 默认不读系统代理）。
+  await initSystemProxy();
   final (service, db, router, settings, sync) =
       await ExtractionService.bootstrap();
   runApp(MyApp(

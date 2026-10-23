@@ -21,6 +21,7 @@ import 'package:flutter/material.dart';
 
 import '../../ai/ai_job_service.dart' show kAiJobQueueEnabled;
 import '../../ai/ai_task.dart';
+import '../../ai/agent_memory.dart';
 import '../../ai/agent_tools.dart';
 import '../../ai/extraction_service.dart';
 import '../../canvas/layout_autoplace.dart';
@@ -39,13 +40,30 @@ import '../knowledge/kp_dedup.dart';
 /// ``t5_ask.md`` 保证「模型没按协议输出」时退化为正常问答，不会崩。
 /// 协议要求模型要么输出**一行工具调用 JSON**，要么直接自然语言回答。
 const String _kToolProtocol = '''
-你可以使用下列「只读工具」查询用户自己的知识库（知识树 / 知识点 / 笔记 / 前置关系）：
+你可以使用下列「知识库工具」查询或修改用户自己的数据：
+
+【只读工具】list_knowledge_trees / list_tree_points / get_knowledge_point /
+find_knowledge_points / list_notes / get_note / get_point_relations。
+需要查看数据时，输出一行工具调用 JSON 即可。
+
+【写入工具】create_note / update_note / delete_note / create_knowledge_point /
+update_knowledge_point / set_mastery / soft_delete_knowledge_point /
+restore_knowledge_point / purge_knowledge_point / create_knowledge_tree /
+rename_knowledge_tree / delete_knowledge_tree / add_points_to_tree /
+remove_points_from_tree / create_group / rename_group / add_group_members /
+remove_group_members / delete_group / add_prerequisite_edge /
+delete_prerequisite_edge / save_memory / delete_memory。
+当用户想「新增 / 修改 / 删除 / 连线 / 记一笔长期记忆」任何数据时，使用对应的
+写入工具。注意：写入操作会先列成清单让你逐项确认，**你批准后才真正写入**，
+被拒的操作不会执行——所以放心提议，由用户把关。
+
+通用约定：
 - 需要数据时：只输出一行 JSON，形如 {"tool":"工具名","args":{...}}；
   不要任何解释、不要 ``` 围栏、不要输出思考过程。
 - 不需要工具时：直接用自然语言回答，不要输出 JSON。
-- 工具只能读取，不能修改任何数据。
-- tree_id / point_id / note_id 必须是工具结果里出现过的真实 id，不要臆造；
-  传入不存在的 id 会返回错误，请改正参数或直接说明查不到。''';
+- tree_id / point_id / note_id / group_id 必须是工具结果里出现过的真实 id，
+  不要臆造；传入不存在的 id 会被拒绝，请改正参数或直接说明查不到。
+- 危险操作（删树 / 彻底删除 / 删笔记带删点）会被高亮警示，请如实说明影响。''';
 
 /// 对话中检测到的「知识点建议」：分「需要的知识点」与「薄弱点」两类。
 class AgentDetectedItem {
@@ -282,6 +300,9 @@ class AgentPageState extends State<AgentPage> {
   /// H：会话仓储（与 main.dart 各自持有实例，底层同一个 AppDatabase）。
   late final AiSessionRepository _sessions = AiSessionRepository(widget.db);
 
+  /// AI 助手长期记忆存储（设置里可开关 / 查看内容）。
+  final AgentMemoryStore _memory = AgentMemoryStore();
+
   List<_Msg> _history = const <_Msg>[];
   bool _detecting = false;
 
@@ -308,10 +329,23 @@ class AgentPageState extends State<AgentPage> {
     _tools = AgentToolset.create(
       repo: widget.service.repo,
       trees: widget.service.trees,
+      groups: widget.service.groups,
+      memory: _memory,
     );
     _detected = widget.debugSeedDetected ?? const <AgentDetectedItem>[];
     _loadTrees();
+    _initMemory();
     _initSession();
+  }
+
+  /// 记忆初始化（读开关 + 预解析文件路径）；失败只记日志，不影响问答。
+  Future<void> _initMemory() async {
+    try {
+      await _memory.init();
+    } on Object catch (e) {
+      _log.w('记忆初始化失败（不影响问答）：$e');
+    }
+    if (mounted) setState(() {});
   }
 
   Future<void> _loadTrees() async {
@@ -479,8 +513,11 @@ class AgentPageState extends State<AgentPage> {
     await _persistMessage('user', text);
 
     // 工具循环：每一轮都是一次完整的 T5 问答；整轮输出是合法工具调用 →
-    // 就地执行（只读）并把结果并入下一轮；否则即为最终答案。
+    // 读工具就地执行（只读）并把结果并入下一轮；写工具先生成操作清单、
+    // 经用户逐项勾选批准后才执行，被拒的不写；否则即为最终答案。
     // 轮数上限 kAgentToolMaxRounds 防模型反复调用工具不回答。
+    final memoryCtx = await _buildMemoryContext();
+    final sessionCtx = _buildSessionContext();
     final toolLog = StringBuffer();
     for (var round = 1; round <= kAgentToolMaxRounds; round++) {
       final buf = StringBuffer();
@@ -488,7 +525,12 @@ class AgentPageState extends State<AgentPage> {
       try {
         await for (final c in widget.service.ai.chat(
           AiTask.t5Ask,
-          _composeQuery(text, toolLog.toString()),
+          _composeQuery(
+            text,
+            toolLog.toString(),
+            memoryCtx: memoryCtx,
+            sessionCtx: sessionCtx,
+          ),
           conversationId: _conversationId,
         )) {
           if (c.conversationId != null) convId = c.conversationId;
@@ -512,20 +554,85 @@ class AgentPageState extends State<AgentPage> {
         return;
       }
 
-      // 工具调用：执行 + 回显（用户看得见 AI 查了什么）。
+      // 读工具：直接执行（权限闸在 dispatch 内）。
+      if (_tools.findWrite(call.name) == null) {
+        if (!mounted) return;
+        setState(() => _status = '🔧 正在查询知识库（${call.name}）…');
+        final result = await _tools.dispatch(call.name, call.args);
+        toolLog.writeln('【第 $round 轮工具调用】${call.name} ${jsonEncode(call.args)}');
+        toolLog.writeln('【第 $round 轮工具结果】$result');
+        if (!mounted) return;
+        setState(() {
+          _history = [
+            ..._history,
+            _Msg(role: 'tool', content: '🔧 ${call.name} → ${cutText(result, 140)}'),
+          ];
+        });
+        _scrollToEnd();
+        continue;
+      }
+
+      // 写工具：记忆关闭时直接阻止记忆写工具，不弹审批框。
       if (!mounted) return;
-      setState(() => _status = '🔧 正在查询知识库（${call.name}）…');
-      final result = await _tools.dispatch(call.name, call.args);
-      toolLog.writeln('【第 $round 轮工具调用】${call.name} ${jsonEncode(call.args)}');
-      toolLog.writeln('【第 $round 轮工具结果】$result');
+      if ((call.name == 'save_memory' || call.name == 'delete_memory') &&
+          !_memory.enabled) {
+        toolLog.writeln('【写入】${call.name} 被阻止：记忆功能已关闭');
+        setState(() {
+          _history = [
+            ..._history,
+            _Msg(role: 'tool', content: '⛔ ${call.name} 被阻止：记忆功能已关闭'),
+          ];
+        });
+        _scrollToEnd();
+        continue;
+      }
+
+      // 生成操作计划（含存在性校验）；规划失败 → 回灌模型自我纠正。
+      final plan = await _tools.planWrite(call.name, call.args);
+      if (plan.isError) {
+        toolLog.writeln('【写入】${call.name} 规划失败：${plan.error}');
+        if (!mounted) return;
+        setState(() {
+          _history = [
+            ..._history,
+            _Msg(role: 'tool', content: '⚠️ ${call.name} 无法执行：${plan.error}'),
+          ];
+        });
+        _scrollToEnd();
+        continue;
+      }
+
+      // 弹审批清单，逐项勾选；返回空 = 用户全部拒绝。
+      setState(() => _status = '⏳ 等待你确认操作…');
+      final approved = await _requestApproval([plan]);
       if (!mounted) return;
-      setState(() {
-        _history = [
-          ..._history,
-          _Msg(role: 'tool', content: '🔧 ${call.name} → ${cutText(result, 140)}'),
-        ];
-      });
+      if (approved.isEmpty) {
+        toolLog.writeln('【写入】用户拒绝了操作：${call.name}');
+        setState(() {
+          _history = [
+            ..._history,
+            _Msg(role: 'tool', content: '⛔ 已拒绝：${plan.summary}'),
+          ];
+        });
+        _scrollToEnd();
+        // 把「被拒」告知模型，让它调整或改用自然语言回答。
+        continue;
+      }
+
+      for (final p in approved) {
+        final res = await _tools.executeWrite(p.toolName, p.args);
+        toolLog.writeln('【已执行】${p.toolName} ${jsonEncode(p.args)} → $res');
+        if (!mounted) return;
+        setState(() {
+          _history = [
+            ..._history,
+            _Msg(role: 'tool', content: '✅ ${p.summary}'),
+          ];
+        });
+      }
       _scrollToEnd();
+      // 写操作可能改变了树 / 知识点，刷新选择器与检测上下文。
+      await _loadTrees();
     }
 
     // 轮数用尽：最后再问一次，明确禁止工具、基于已有结果直接作答；
@@ -534,7 +641,13 @@ class AgentPageState extends State<AgentPage> {
     try {
       await for (final c in widget.service.ai.chat(
         AiTask.t5Ask,
-        _composeQuery(text, toolLog.toString(), forceAnswer: true),
+        _composeQuery(
+          text,
+          toolLog.toString(),
+          forceAnswer: true,
+          memoryCtx: memoryCtx,
+          sessionCtx: sessionCtx,
+        ),
         conversationId: _conversationId,
       )) {
         if (c.delta != null) buf.write(c.delta);
@@ -553,8 +666,15 @@ class AgentPageState extends State<AgentPage> {
 
   /// 拼接带工具协议的 query（透传模式：上下文全在 user message 里）。
   ///
+  /// [memoryCtx] / [sessionCtx] 分别注入长期记忆与单会话前文（见 _send）。
   /// [forceAnswer] = 工具轮数用尽后的收尾轮：追加「禁止再调用工具」。
-  String _composeQuery(String text, String toolLog, {bool forceAnswer = false}) {
+  String _composeQuery(
+    String text,
+    String toolLog, {
+    bool forceAnswer = false,
+    String memoryCtx = '',
+    String sessionCtx = '',
+  }) {
     final ctx = _activeTree == null
         ? ''
         : '（你正在帮用户在知识树「${_activeTree!.name}」里补全知识点，'
@@ -564,6 +684,12 @@ class AgentPageState extends State<AgentPage> {
       ..write(_kToolProtocol)
       ..write('\n\n【可用工具】\n')
       ..write(_tools.catalogText());
+    if (sessionCtx.isNotEmpty) {
+      b..write('\n\n')..write(sessionCtx);
+    }
+    if (memoryCtx.isNotEmpty) {
+      b..write('\n\n')..write(memoryCtx);
+    }
     if (toolLog.isNotEmpty) {
       b
         ..write('\n\n【已执行的工具调用与结果】\n')
@@ -577,6 +703,92 @@ class AgentPageState extends State<AgentPage> {
           '信息不足就直说，不要编造。）');
     }
     return b.toString();
+  }
+
+  // ===================== 记忆 / 会话上下文 / 审批 =====================
+
+  /// 长期记忆上下文（开启时）；关闭或为空返回 ''。
+  Future<String> _buildMemoryContext() async {
+    if (!_memory.enabled) return '';
+    try {
+      return await _memory.toContext();
+    } on Object {
+      return '';
+    }
+  }
+
+  /// 单会话前文：把当前会话里最近的 user/assistant 轮回灌给模型，
+  /// 保证同一会话内问答互相参考、不彼此孤立。
+  String _buildSessionContext() {
+    final turns = _history
+        .where((m) => m.role == 'user' || m.role == 'assistant')
+        .toList();
+    final recent = turns.length > 12 ? turns.sublist(turns.length - 12) : turns;
+    if (recent.isEmpty) return '';
+    final b = StringBuffer('【本会话前文】（同一会话内此前的问答，请参考上下文）\n');
+    for (final m in recent) {
+      b.writeln('${m.role == 'user' ? '用户' : 'AI'}：${m.content}');
+    }
+    return b.toString().trimRight();
+  }
+
+  /// 写入操作审批：列出操作清单，每项一个勾选框，返回用户勾选批准的部分。
+  /// 返回空列表 = 用户全部拒绝（不执行任何写入）。
+  Future<List<AgentToolPlan>> _requestApproval(List<AgentToolPlan> plans) async {
+    final checked = <int>{for (var i = 0; i < plans.length; i++) i};
+    final result = await showDialog<List<AgentToolPlan>>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx2, setSt) => AlertDialog(
+          title: const Text('请确认要执行的操作'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                const Text('以下操作会修改你的本地数据，勾选要执行的项：',
+                    style: TextStyle(fontSize: 13, color: Colors.grey)),
+                const SizedBox(height: 8),
+                for (var i = 0; i < plans.length; i++)
+                  _ApprovalTile(
+                    plan: plans[i],
+                    checked: checked.contains(i),
+                    onChanged: (v) => setSt(() {
+                      if (v) checked.add(i);
+                      else checked.remove(i);
+                    }),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, const <AgentToolPlan>[]),
+              child: const Text('全部拒绝'),
+            ),
+            ElevatedButton(
+              onPressed: checked.isEmpty
+                  ? null
+                  : () => Navigator.pop(ctx, [for (final i in checked) plans[i]]),
+              child: Text('执行选中的 ${checked.length} 项'),
+            ),
+          ],
+        ),
+      ),
+    );
+    return result ?? const <AgentToolPlan>[];
+  }
+
+  /// 打开 AI 助手设置（记忆开关 / 查看 / 清空）。
+  Future<void> _openAgentSettings() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _AgentSettingsSheet(
+        memory: _memory,
+        onChanged: () => setState(() {}),
+      ),
+    );
   }
 
   /// 收尾：落最终答案（持久化）+ 跑每轮检测。
@@ -872,6 +1084,12 @@ class AgentPageState extends State<AgentPage> {
         appBar: AppBar(
           title: const Text('AI 助手'),
           actions: [
+            // 设置入口：记忆开关 / 查看 / 清空。
+            IconButton(
+              tooltip: '设置',
+              icon: const Icon(Icons.settings_outlined),
+              onPressed: _openAgentSettings,
+            ),
             // H：会话管理入口（历史列表 + 切换 / 重命名 / 清空 / 删除 / 新建）。
             IconButton(
               tooltip: '会话',
@@ -1451,4 +1669,156 @@ class _SessionManagerSheetState extends State<_SessionManagerSheet> {
       ),
     );
   }
+}
+
+/// 审批清单里的一行：勾选框 + 操作摘要 + 风险标签。
+class _ApprovalTile extends StatelessWidget {
+  const _ApprovalTile({
+    required this.plan,
+    required this.checked,
+    required this.onChanged,
+  });
+  final AgentToolPlan plan;
+  final bool checked;
+  final ValueChanged<bool> onChanged;
+
+  Color _riskColor() {
+    switch (plan.risk) {
+      case AgentToolRisk.danger:
+        return Colors.red.shade700;
+      case AgentToolRisk.caution:
+        return Colors.orange.shade700;
+      case AgentToolRisk.normal:
+        return Colors.teal;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => CheckboxListTile(
+        contentPadding: EdgeInsets.zero,
+        controlAffinity: ListTileControlAffinity.leading,
+        value: checked,
+        onChanged: (v) => onChanged(v ?? false),
+        title: Text(plan.summary, style: const TextStyle(fontWeight: FontWeight.w600)),
+        subtitle: plan.riskNote != null
+            ? Row(
+                children: [
+                  Icon(Icons.warning_amber_rounded, size: 13, color: _riskColor()),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(plan.riskNote!,
+                        style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                  ),
+                ],
+              )
+            : null,
+        secondary: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          decoration: BoxDecoration(
+            color: _riskColor().withOpacity(0.12),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Text(
+            plan.risk == AgentToolRisk.danger
+                ? '高危'
+                : plan.risk == AgentToolRisk.caution
+                    ? '留意'
+                    : '写入',
+            style: TextStyle(fontSize: 11, color: _riskColor()),
+          ),
+        ),
+        dense: true,
+      );
+}
+
+/// AI 助手设置面板：记忆开关 / 查看记忆文件内容 / 清空记忆。
+class _AgentSettingsSheet extends StatefulWidget {
+  const _AgentSettingsSheet({required this.memory, required this.onChanged});
+  final AgentMemoryStore memory;
+  final VoidCallback onChanged;
+
+  @override
+  State<_AgentSettingsSheet> createState() => _AgentSettingsSheetState();
+}
+
+class _AgentSettingsSheetState extends State<_AgentSettingsSheet> {
+  Future<void> _toggle(bool v) async {
+    await widget.memory.setEnabled(v);
+    if (mounted) setState(() {});
+    widget.onChanged();
+  }
+
+  Future<void> _viewMemory() async {
+    final path = await widget.memory.filePath;
+    final content = await widget.memory.rawContent();
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('记忆文件内容'),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 320,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('路径：$path', style: const TextStyle(fontSize: 11, color: Colors.grey)),
+              const SizedBox(height: 8),
+              Expanded(
+                child: SelectableText(content,
+                    style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('关闭')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _clear() async {
+    final ok = await confirmDialog(context,
+        title: '清空全部记忆？',
+        message: '所有长期记忆将被删除，此操作不可恢复（记忆开关状态保留）。');
+    if (!ok) return;
+    await widget.memory.clear();
+    if (mounted) setState(() {});
+    if (mounted) Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.sizeOf(context).height * 0.5,
+          child: Column(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.memory),
+                title: const Text('长期记忆'),
+                subtitle: const Text('AI 会参考你记下的偏好 / 事实；关闭后不再读写'),
+                trailing: Switch(value: widget.memory.enabled, onChanged: _toggle),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.visibility_outlined),
+                title: const Text('查看记忆文件内容'),
+                onTap: _viewMemory,
+              ),
+              ListTile(
+                leading: const Icon(Icons.delete_outline),
+                title: const Text('清空记忆'),
+                onTap: _clear,
+              ),
+              const Spacer(),
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: const Text('记忆仅保存在本机，不上云、不进同步。',
+                    style: TextStyle(fontSize: 11, color: Colors.grey)),
+              ),
+            ],
+          ),
+        ),
+      );
 }

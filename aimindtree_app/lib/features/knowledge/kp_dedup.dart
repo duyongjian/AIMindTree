@@ -18,8 +18,10 @@
 ///    位置 / 连线 / 掌握度按序迁移到保留点，最后软删（墓碑）。
 library;
 
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../ai/ai_job_service.dart';
@@ -83,37 +85,73 @@ String _truncate(String s, int max) =>
 ///
 /// 每个无序对只出一次；按分数降序（并列按 id 字典序，保证确定性）；
 /// 截断到 [maxPairs]（默认 40，控制喂给 LLM 的量）。
+/// 本地预筛候选重复对（纯函数，同步版）。
+///
+/// 大数据量 / 自动扫描请走 [findDedupCandidatesAsync]：把 O(n²) 两两比较丢到
+/// 独立 isolate，避免阻塞 UI 主线程（A 优化）。两者语义完全一致，仅运行位置不同。
 List<DedupCandidatePair> findDedupCandidates(
   List<KnowledgePoint> points, {
   int maxPairs = 40,
 }) {
+  return _computeCandidatesOnSeeds(_toSeeds(points), maxPairs: maxPairs);
+}
+
+/// 把知识点投影成可跨 isolate 传输的轻量种子 `[id, name]`。
+/// `KnowledgePoint` 实例不可直接跨 isolate 发送，且预筛只用 name。
+List<List<String>> _toSeeds(List<KnowledgePoint> points) =>
+    <List<String>>[for (final p in points) <String>[p.id, p.name]];
+
+/// 异步预筛：把 O(n²) 两两比较丢到独立 isolate（[compute]），不卡 UI 主线程（A 优化）。
+///
+/// 小数据 / 单测可继续用同步版 [findDedupCandidates]。点数 < 2 或非正 cap
+/// 直接短路返回，不启动 isolate（省开销）。
+Future<List<DedupCandidatePair>> findDedupCandidatesAsync(
+  List<KnowledgePoint> points, {
+  int maxPairs = 40,
+}) {
   if (points.length < 2 || maxPairs <= 0) {
-    return const <DedupCandidatePair>[];
+    return Future.value(const <DedupCandidatePair>[]);
   }
+  final seeds = _toSeeds(points);
+  return compute(_runFindDedup, (seeds, maxPairs));
+}
+
+/// isolate 入口（顶层函数，无捕获，保证可序列化发送）。
+List<DedupCandidatePair> _runFindDedup((List<List<String>>, int) arg) =>
+    _computeCandidatesOnSeeds(arg.$1, maxPairs: arg.$2);
+
+/// 预筛核心（纯函数）：输入 `[id, name]` 种子，输出候选重复对。
+/// 与 [findDedupCandidates] 行为一致，只是数据来源换成可序列化的种子，
+/// 方便在 isolate 内运行。
+List<DedupCandidatePair> _computeCandidatesOnSeeds(
+  List<List<String>> seeds, {
+  int maxPairs = 40,
+}) {
+  if (seeds.length < 2) return const <DedupCandidatePair>[];
   // 预计算：每个点的规范化名 + 二元组集合只算一次（配对是 O(n²) 的）。
   final names = <String>[];
   final grams = <Set<String>>[];
-  for (final p in points) {
-    final n = _normalizeName(p.name);
+  for (final s in seeds) {
+    final n = _normalizeName(s[1]);
     names.add(n);
     grams.add(_bigrams(n));
   }
 
   final out = <DedupCandidatePair>[];
-  for (var i = 0; i < points.length; i++) {
+  for (var i = 0; i < seeds.length; i++) {
     final a = names[i];
     if (a.isEmpty) continue;
-    for (var j = i + 1; j < points.length; j++) {
+    for (var j = i + 1; j < seeds.length; j++) {
       final b = names[j];
       if (b.isEmpty) continue;
       if (a == b) {
-        out.add(DedupCandidatePair(aId: points[i].id, bId: points[j].id, score: 1.0));
+        out.add(DedupCandidatePair(aId: seeds[i][0], bId: seeds[j][0], score: 1.0));
         continue;
       }
       final shorter = a.length <= b.length ? a : b;
       final longer = a.length <= b.length ? b : a;
       if (shorter.length >= 4 && longer.contains(shorter)) {
-        out.add(DedupCandidatePair(aId: points[i].id, bId: points[j].id, score: 0.8));
+        out.add(DedupCandidatePair(aId: seeds[i][0], bId: seeds[j][0], score: 0.8));
         continue;
       }
       final ga = grams[i];
@@ -132,8 +170,8 @@ List<DedupCandidatePair> findDedupCandidates(
       final jaccard = inter / union;
       if (jaccard >= 0.6) {
         out.add(DedupCandidatePair(
-          aId: points[i].id,
-          bId: points[j].id,
+          aId: seeds[i][0],
+          bId: seeds[j][0],
           score: jaccard,
         ));
       }
@@ -288,16 +326,43 @@ bool get kpDedupInFlight => _kpDedupInFlight;
 
 /// 各知识点创建路径成功后的**后台异步**触发（fire-and-forget）。
 ///
-/// 行为：① 在飞就跳过（记日志）；② 读全部未删知识点；③ 无候选静默结束；
-/// ④ 有候选 → 提交 T14 job（`kp:dedup` 资源锁 + silent）；⑤ submit 返回
-/// null（锁被占 / 队列开关关）→ 静默返回；⑥ 完成 → [_onKpDedupResult]。
+/// 走防抖：批量创建（如一次导入几十个知识点）会在静默期后合并成**一次**扫描，
+/// 避免每个点都跑一轮 O(n²) 预筛（E 优化）。手动按钮 [kpDedupRunNow] 不防抖，
+/// 点了立即扫。
+///
+/// 行为：① 防抖静默期内重复触发只重置定时器；② 到点在飞就稍后重试；
+/// ③ 读全部未删知识点；④ 无候选静默结束；⑤ 有候选 → 提交 T14 job
+/// （`kp:dedup` 资源锁 + silent）；⑥ 完成 → [_onKpDedupResult]。
 ///
 /// 内部全兜异常：本函数不抛错、不需要调用方等待。
 void kpDedupSchedule({
   required KnowledgeRepository repo,
   required AiJobService jobs,
 }) {
-  kpDedupRunNow(repo: repo, jobs: jobs);
+  _scheduleDebouncedScan(repo: repo, jobs: jobs);
+}
+
+/// 自动触发的防抖定时器（E 优化）。
+///
+/// 创建路径频繁触发时，只在「最后一次触发后 [_kKpDedupDebounce] 内无新触发」
+/// 才真正跑一轮扫描。到点在飞则说明上一轮还没结束，稍后重试以免漏掉本次触发。
+Timer? _kpDedupTimer;
+const Duration _kKpDedupDebounce = Duration(milliseconds: 1500);
+
+void _scheduleDebouncedScan({
+  required KnowledgeRepository repo,
+  required AiJobService jobs,
+}) {
+  _kpDedupTimer?.cancel();
+  _kpDedupTimer = Timer(_kKpDedupDebounce, () {
+    _kpDedupTimer = null;
+    if (_kpDedupInFlight) {
+      // 当前有扫描在飞，稍后重试，避免漏掉这次触发。
+      _scheduleDebouncedScan(repo: repo, jobs: jobs);
+      return;
+    }
+    _kpDedupScan(repo: repo, jobs: jobs);
+  });
 }
 
 /// 手动「查重去重」按钮入口：与 [kpDedupSchedule] 同一管线，但把「无候选」
@@ -329,7 +394,8 @@ Future<void> _kpDedupScan({
   try {
     // 软删铁律：allKnowledgePoints 已过滤 deletedAt。
     final points = await repo.allKnowledgePoints();
-    final candidates = findDedupCandidates(points);
+    // 预筛丢到独立 isolate，避免 O(n²) 两两比较卡住 UI 主线程（A 优化）。
+    final candidates = await findDedupCandidatesAsync(points);
     if (candidates.isEmpty) {
       _kpDedupInFlight = false;
       onNoCandidates?.call();

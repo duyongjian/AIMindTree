@@ -156,7 +156,9 @@ class _TeacherPageState extends State<TeacherPage>
         '来源：${widget.kp.sourceQuote}';
     final fullQuery = '$ctx\n\n用户问题：$text';
 
-    String? answer;
+    // 累加流式增量：原实现 `answer = chunk.delta` 每片覆盖，最终只剩最后一个
+    // 分片（界面上就是一个「）」），这里改为 StringBuffer 拼接整段回答。
+    final answer = StringBuffer();
     try {
       await for (final chunk in widget.ai.chat(
         AiTask.t5Ask,
@@ -166,7 +168,8 @@ class _TeacherPageState extends State<TeacherPage>
         if (chunk.conversationId != null) {
           _askConversationId = chunk.conversationId;
         }
-        if (chunk.delta != null) answer = chunk.delta;
+        final delta = chunk.delta;
+        if (delta != null && delta.isNotEmpty) answer.write(delta);
         if (chunk.done) break;
       }
     } on Object catch (e) {
@@ -179,7 +182,7 @@ class _TeacherPageState extends State<TeacherPage>
       return;
     }
 
-    final finalAnswer = answer ?? '(无响应)';
+    final finalAnswer = answer.isEmpty ? '(无响应)' : answer.toString();
     await widget.sessions.addMessage(
       sessionId: _askSessionId,
       role: 'assistant',

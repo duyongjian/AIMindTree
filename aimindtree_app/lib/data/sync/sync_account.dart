@@ -11,6 +11,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'http_proxy.dart';
+
 /// 登录/注册返回的会话（user_id + 每用户令牌）。
 class SyncAccountSession {
   const SyncAccountSession({required this.userId, required this.token});
@@ -28,7 +30,13 @@ class SyncAccountApiException implements Exception {
 
 class SyncAccountApi {
   SyncAccountApi({required this.baseUrl, HttpClient? client})
-      : _client = client ?? HttpClient()..connectionTimeout = const Duration(seconds: 30);
+      : _client = client ?? _createClient();
+
+  static HttpClient _createClient() {
+    final c = HttpClient()..connectionTimeout = const Duration(seconds: 20);
+    c.findProxy = syncFindProxy;
+    return c;
+  }
 
   final String baseUrl;
   final HttpClient _client;
@@ -42,27 +50,40 @@ class SyncAccountApi {
     String password,
   ) async {
     final url = _url(path);
-    final req = await _client.postUrl(url).timeout(const Duration(seconds: 30));
-    req.headers.set('Content-Type', 'application/json; charset=utf-8');
-    req.add(utf8.encode(jsonEncode({'username': username, 'password': password})));
-    final resp = await req.close().timeout(const Duration(seconds: 30));
-    final payload = await resp.transform(utf8.decoder).join();
-    if (resp.statusCode != 200) {
-      var msg = 'auth $path 返回 ${resp.statusCode}';
-      try {
-        final m = jsonDecode(payload) as Map<String, dynamic>;
-        final err = m['error'];
-        if (err is String && err.isNotEmpty) msg = err;
-      } on Object {
-        // 非 JSON 错误体，保留状态码描述
+    try {
+      final req =
+          await _client.postUrl(url).timeout(const Duration(seconds: 20));
+      req.headers.set('Content-Type', 'application/json; charset=utf-8');
+      req.add(utf8.encode(jsonEncode({'username': username, 'password': password})));
+      final resp = await req.close().timeout(const Duration(seconds: 20));
+      final payload = await resp.transform(utf8.decoder).join();
+      if (resp.statusCode != 200) {
+        var msg = 'auth $path 返回 ${resp.statusCode}';
+        try {
+          final m = jsonDecode(payload) as Map<String, dynamic>;
+          final err = m['error'];
+          if (err is String && err.isNotEmpty) msg = err;
+        } on Object {
+          // 非 JSON 错误体，保留状态码描述
+        }
+        throw SyncAccountApiException(msg, resp.statusCode);
       }
-      throw SyncAccountApiException(msg, resp.statusCode);
+      final m = jsonDecode(payload) as Map<String, dynamic>;
+      return SyncAccountSession(
+        userId: m['user_id'] as String,
+        token: m['token'] as String,
+      );
+    } on SyncAccountApiException {
+      rethrow; // 服务端明确错误（409/400/401 等）原样上抛
+    } on TimeoutException {
+      throw const SyncAccountApiException('连接服务器超时（网络被拦截，或代理未生效）');
+    } on SocketException catch (e) {
+      throw SyncAccountApiException(
+        '无法连接服务器：${e.osError?.message ?? e.message}（请检查网络或代理）',
+      );
+    } on Object catch (e) {
+      throw SyncAccountApiException('请求失败：$e');
     }
-    final m = jsonDecode(payload) as Map<String, dynamic>;
-    return SyncAccountSession(
-      userId: m['user_id'] as String,
-      token: m['token'] as String,
-    );
   }
 
   Future<SyncAccountSession> register(String username, String password) =>
