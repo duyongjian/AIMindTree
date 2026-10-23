@@ -213,7 +213,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('已选 3 个'), findsOneWidget);
 
-      // 点「删除(3)」→ 确认弹窗。
+      // 点「批量操作」下拉 →「删除(3)」→ 确认弹窗。
+      await tester.tap(find.byTooltip('批量操作：归组 / 删除'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('删除(3)'));
       await tester.pumpAndSettle();
       expect(find.text('批量删除知识点'), findsOneWidget);
@@ -254,6 +256,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('已选 1 个'), findsOneWidget);
 
+      await tester.tap(find.byTooltip('批量操作：归组 / 删除'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('删除(1)'));
       await tester.pumpAndSettle();
       await tester.tap(find.descendant(

@@ -4,8 +4,8 @@
 /// 点条目 → 进入该知识点的老师模式页（讲解 + 追问，复用 [TeacherPage])。
 /// 顶部「+」手动新建（名称必填；类型、定义、可选关联笔记）。
 /// 条目菜单：置顶 / 设置分组 / 编辑 / 加入知识树 / 追问 / 删除（影响面预览）。
-/// 多选批量：AppBar 图标或长按条目进入多选态，全选 +「删除(N)」批量
-/// 软删（墓碑，进回收站可恢复）+「归组」批量调整分组归属。
+/// 多选批量：AppBar 图标或长按条目进入多选态，全选 +「批量操作」下拉
+/// （归组到分组 / 删除(N) 批量软删进回收站，可恢复）。
 ///
 /// 分组（全局作用域）：chips 行筛选（全部 / 各组 / 未分组）+「分组管理」
 /// 面板（新建 / 重命名 / 删除）。**分组只在知识点界面出现**，不进知识树
@@ -438,7 +438,7 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
         content: Text(
           '确定删除「${kp.name}」？\n\n'
           '影响面：所在 ${impacts.length} 棵知识树、涉及 $edgeCount 条前置关系。\n'
-          '删除后该知识点从所有界面消失（含知识树画布），不可恢复。',
+          '删除后该知识点从所有界面消失（含知识树画布），并移入回收站，可恢复。',
         ),
         actions: [
           TextButton(
@@ -705,17 +705,42 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
               icon: const Icon(Icons.select_all),
               tooltip: '全选',
             ),
-            IconButton(
-              onPressed: _selected.isEmpty ? null : _batchAssignGroup,
-              icon: const Icon(Icons.label_outline),
-              tooltip: '批量归组',
-            ),
-            TextButton(
-              onPressed: _selected.isEmpty ? null : _confirmBatchDelete,
-              child: Text(
-                '删除(${_selected.length})',
-                style: const TextStyle(color: Colors.red),
-              ),
+            // 批量操作分组（形态照抄知识树工具栏分组按钮）：把「归组」与
+            // 「删除」两个批量动作收进一个下拉，不再平铺在 AppBar 上；
+            // 菜单项各自保留禁用态（未选中任何条目时不可用）。
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.more_vert),
+              iconSize: 20,
+              tooltip: '批量操作：归组 / 删除',
+              itemBuilder: (_) => <PopupMenuEntry<String>>[
+                PopupMenuItem<String>(
+                  value: 'group',
+                  enabled: _selected.isNotEmpty,
+                  onTap: _batchAssignGroup,
+                  child: const Row(
+                    children: <Widget>[
+                      Icon(Icons.label_outline, size: 18),
+                      SizedBox(width: 10),
+                      Text('归组到分组…'),
+                    ],
+                  ),
+                ),
+                PopupMenuItem<String>(
+                  value: 'delete',
+                  enabled: _selected.isNotEmpty,
+                  onTap: _confirmBatchDelete,
+                  child: Row(
+                    children: <Widget>[
+                      const Icon(Icons.delete_outline, size: 18),
+                      const SizedBox(width: 10),
+                      Text(
+                        '删除(${_selected.length})',
+                        style: TextStyle(color: Colors.red),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ] else ...[
             IconButton(

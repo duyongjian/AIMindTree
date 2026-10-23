@@ -714,6 +714,96 @@ class KnowledgeRepository {
     }
   }
 
+  /// 批量彻底删除（回收站「一键清空」/ 多选「彻底删除(N)」）。
+  ///
+  /// 数据面 = [purgeKnowledgePoint] 的单条逻辑循环执行：每个 id 先顶
+  /// version 留档，再硬删 KP 墓碑行及其残留从属行（前置边 / 掌握记录 /
+  /// 知识树成员关系）。**单条失败不阻断其余**（逐条 try/catch），返回
+  /// 成功处理的条数；不存在的 id 按幂等计为成功（与单条口径一致）。
+  ///
+  /// 上行同步：各 id 删前统一留档，删完把**整个列表**一次性交给
+  /// [SyncOutboxWriter.hardDeleteKnowledgePoints]（它接受 Iterable），
+  /// 每个留档行入队一条 delete op，让远端跟着删。
+  Future<Result<int>> purgeKnowledgePoints(List<String> kpIds) async {
+    try {
+      var deleted = 0;
+      final archived = <KnowledgePointRow>[];
+      final residualEdges = <PrerequisiteEdgeRow>[];
+      final residualMastery = <MasteryRecordRow>[];
+      final residualNodes = <CanvasNodeRow>[];
+      for (final kpId in kpIds) {
+        try {
+          final row = await (_db.select(_db.knowledgePoints)
+                ..where((t) => t.id.equals(kpId)))
+              .getSingleOrNull();
+          if (row == null) {
+            // 已经彻底没了：幂等计为成功（与单条 purgeKnowledgePoint 一致）。
+            deleted += 1;
+            continue;
+          }
+          // 残留的从属行（软删时通常已级联清空，这里兜底）：先留档再删。
+          final edges = await (_db.select(_db.prerequisiteEdges)
+                ..where((t) => t.fromKpId.equals(kpId) | t.toKpId.equals(kpId)))
+              .get();
+          final mastery = await (_db.select(_db.masteryRecords)
+                ..where((t) => t.kpId.equals(kpId)))
+              .get();
+          final nodes = await (_db.select(_db.canvasNodes)
+                ..where((t) =>
+                    t.targetType.equals('kp') & t.targetId.equals(kpId)))
+              .get();
+          // 彻底删除 = 比墓碑更新的状态：先把 version 顶上去再删，入队
+          // delete op 的 baseVersion 严格大于墓碑那次（远端 LWW 判定
+          // 「彻底删除」胜出，同单条口径）。
+          final now = DateTime.now().toUtc();
+          await (_db.update(_db.knowledgePoints)
+                ..where((t) => t.id.equals(kpId)))
+              .write(KnowledgePointsCompanion(
+            version: Value(row.version + 1),
+            updatedAt: Value(now),
+          ));
+          // 留档（删完取不到 id / version）：重读带新 version 的行。
+          final archivedRow = await (_db.select(_db.knowledgePoints)
+                ..where((t) => t.id.equals(kpId)))
+              .getSingleOrNull();
+          // 硬删：从属行 + KP 墓碑行本身。
+          await (_db.delete(_db.prerequisiteEdges)
+                ..where((t) => t.fromKpId.equals(kpId) | t.toKpId.equals(kpId)))
+              .go();
+          await (_db.delete(_db.masteryRecords)
+                ..where((t) => t.kpId.equals(kpId)))
+              .go();
+          await (_db.delete(_db.canvasNodes)
+                ..where((t) =>
+                    t.targetType.equals('kp') & t.targetId.equals(kpId)))
+              .go();
+          await (_db.delete(_db.knowledgePoints)
+                ..where((t) => t.id.equals(kpId)))
+              .go();
+          // 删成功才留档入队（失败的行不留同步痕迹，避免远端误删）。
+          if (archivedRow != null) archived.add(archivedRow);
+          residualEdges.addAll(edges);
+          residualMastery.addAll(mastery);
+          residualNodes.addAll(nodes);
+          deleted += 1;
+        } on Object catch (e, s) {
+          _log.e('批量彻底删除知识点失败（跳过该条，不阻断其余）: $kpId',
+              error: e, stackTrace: s);
+        }
+      }
+      // 上行同步：整个列表一次性入队（ Iterable 接口），残留从属行同样删。
+      await _sync.hardDeleteKnowledgePoints(archived);
+      await _sync.hardDeletePrerequisiteEdges(residualEdges);
+      await _sync.hardDeleteMasteryRecords(residualMastery);
+      await _sync.hardDeleteCanvasNodes(residualNodes);
+      _log.i('批量彻底删除 $deleted 个知识点（物理删除，不可恢复）');
+      return Success(deleted);
+    } on Object catch (e, s) {
+      _log.e('批量彻底删除知识点失败', error: e, stackTrace: s);
+      return Failure<int>(e, s);
+    }
+  }
+
   // ============ 查询 ============
 
   /// 手动新建知识点（origin = 'user_manual'，锚点四件套豁免，见 PRD §4.2）。

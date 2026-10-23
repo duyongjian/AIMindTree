@@ -264,8 +264,10 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('已选 2 个'), findsOneWidget);
 
-      // 批量归组 → 选「数学」。
-      await tester.tap(find.byTooltip('批量归组'));
+      // 批量归组（收在「批量操作」下拉里）→ 选「数学」。
+      await tester.tap(find.byTooltip('批量操作：归组 / 删除'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('归组到分组…'));
       await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(SimpleDialogOption, '数学'));
       await tester.pumpAndSettle();
