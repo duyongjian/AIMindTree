@@ -1,5 +1,12 @@
-/// 直连 HttpClient：`*.workers.dev` 域名先经 DoH 拿真实 IP，再以原域名为
+/// 直连 HttpClient：**先探测**本机能否直连 `*.workers.dev:443`，能连就完全
+/// 不改道（行为 100% 等于改造前）；连不上才用 DoH 拿真实 IP，再以原域名为
 /// SNI 建 TLS 连接，绕开国内 DNS 投毒；任何失败都安静回退普通 HttpClient。
+///
+/// 为什么是「探测式」而不是「无条件改道」：上一版对 `*.workers.dev` 无条件
+/// 启用 DoH 直连，把本来完全正常的 PC 端（系统 DNS/TCP 无碍）也强制改道，
+/// 一旦 DoH 拿到假 IP 或某个 CF IP 不可达，每条新连接都要先耗尽
+/// [kDirectTotalBudget]（12s）才回退，同步表现为超时/失败。探测（3s TCP
+/// 建连）把「能不能直连」变成显式判据：能连 → 走默认通路，零副作用。
 ///
 /// 实现说明（与 Dart 3.13 dart:io API 对齐）：
 /// - `SecureSocket.connect(ip, 443, host: 域名)` 的 `host` 命名参数在当前
@@ -11,9 +18,10 @@
 ///   HttpClient 连接池（按 host/port 复用），且失败时可在工厂内直接回退
 ///   到默认连接逻辑。
 ///
-/// 核心约束：任何失败路径都必须退化成现状行为——DoH 失败/超时/返回空、
-/// 全部 IP 建连失败，全部安静回退普通 client，绝不抛异常；不依赖 DoH 的
-/// PC 端（本机 DNS 正常）行为完全不变。
+/// 核心约束：任何失败路径都必须退化成现状行为——探测失败/抛异常（保守按
+/// 「不能直连」处理，因为无法证明能直连）、DoH 失败/超时/返回空、全部 IP
+/// 建连失败，全部安静回退普通 client，绝不抛异常；能直连的 PC 端（本机
+/// DNS 正常）根本不安装 `connectionFactory`，行为完全不变。
 library;
 
 import 'dart:async';
@@ -32,8 +40,47 @@ const Duration kDirectSocketTimeout = Duration(seconds: 3);
 /// 回退路径（调用方 connectionTimeout 默认 20s）。
 const Duration kDirectTotalBudget = Duration(seconds: 12);
 
+/// 直连可达性探测的预算：一次 TCP 建连，3s 内没连上就认为「不能直连」，
+/// 从而启用 DoH。取值权衡：太短会在弱网下误判（把能直连的 PC 端改道），
+/// 太长会拖慢首连（只在进程内首次探测该 host 时有这个成本）。
+const Duration kReachabilityProbeTimeout = Duration(seconds: 3);
+
 /// IP 解析器契约（测试可注入假实现）。
 typedef IpResolver = Future<List<String>> Function(String host);
+
+/// 直连可达性探测契约（测试可注入假实现）。
+///
+/// 返回 true 表示本机可直连 `host:port`；任何异常/超时都应视为 false。
+typedef ReachabilityProbe = Future<bool> Function(
+  String host,
+  int port,
+  Duration timeout,
+);
+
+/// 探测本机能否直连 `host:port`（TCP 建连成功即视为可直连）。
+///
+/// 契约：建连成功 → 销毁 socket 并返回 true；建连失败 / 超时 / DNS 失败 /
+/// 任何异常 → 返回 false（不抛）。
+Future<bool> canReachDirect(String host, int port, Duration timeout) async {
+  Socket? socket;
+  try {
+    socket = await Socket.connect(host, port, timeout: timeout);
+    return true;
+  } on Object {
+    return false;
+  } finally {
+    _destroyQuietly(socket);
+  }
+}
+
+/// host → 是否可直连的进程内缓存。
+///
+/// 为什么缓存：同一 host 在一次进程生命周期内只探测一次——探测本身要花
+/// 最多 [kReachabilityProbeTimeout]，而 DNS 投毒是**网络级**状态（运营商/
+/// 代理链路决定），短期内不会来回切换；进程重启后重新探测即可。
+/// 缓存方向是安全的：误判成 true 时行为等于改造前（默认通路，本来就能用），
+/// 误判成 false 时最多多用一条 DoH 快路径且仍有安静回退。
+final Map<String, bool> _reachabilityCache = <String, bool>{};
 
 /// host 是否为回环/私网/保留地址——此类地址绝不走 DoH、也绝不外网直连。
 ///
@@ -67,17 +114,26 @@ bool _needsDoHDirect(String host) =>
     host.toLowerCase().endsWith(kWorkersDevSuffix) &&
     !isPrivateOrLoopbackHost(host);
 
-/// 创建 HttpClient；对 `*.workers.dev` 域名启用「DoH 真实 IP + 原域名 SNI」直连。
+/// 创建 HttpClient；`*.workers.dev` 域名在**探测确认不可直连**时启用
+/// 「DoH 真实 IP + 原域名 SNI」直连。
 ///
 /// 行为矩阵：
 /// - baseUrl 畸形 / host 为空 → 普通 client；
 /// - host 非 `.workers.dev` 结尾，或是回环/私网地址 → 普通 client（不走 DoH）；
-/// - host 命中 `.workers.dev`：先经 DoH 预解析一次（失败/超时/返回空 →
-///   普通 client，安静回退）；成功则给 client 安装 `connectionFactory`：
-///   之后每条新连接都经 DoH 拿 IP 列表（缓存命中不重复发请求），逐个
-///   `Socket.connect(ip, port)` + `SecureSocket.secure(socket, host: 原域名)`
-///   建连（host 同时用于 SNI 与证书校验），全部失败回退默认连接逻辑
-///   （= 现状：本机 DNS 解析 + 普通 TLS）。
+/// - host 命中 `.workers.dev`：**先探测**本机能否直连该 `host:端口`
+///   （[kReachabilityProbeTimeout] 预算）：
+///   - 能直连（true）→ 直接返回普通 client，**不安装** `connectionFactory`，
+///     行为 100% 等于改造前（PC 端正常场景就走这条，零改道、零延迟）；
+///   - 不能直连（false，含探测抛异常）→ 先经 DoH 预解析一次（失败/超时/
+///     返回空 → 普通 client，安静回退）；成功则给 client 安装
+///     `connectionFactory`：之后每条新连接都经 DoH 拿 IP 列表（缓存命中不
+///     重复发请求），逐个 `Socket.connect(ip, port)` +
+///     `SecureSocket.secure(socket, host: 原域名)` 建连（host 同时用于 SNI
+///     与证书校验），全部失败回退默认连接逻辑（= 现状：本机 DNS 解析 +
+///     普通 TLS）。
+///
+/// [probe] 默认 [canReachDirect]；探测结果按 host 进程内缓存，同一 host
+/// 只探测一次（见 `_reachabilityCache`）。
 ///
 /// [onBadCertificate] 仅供测试 / 自建 CA 场景注入；生产代码切勿传——
 /// 不传即保持与现状一致的严格证书校验。
@@ -85,6 +141,7 @@ Future<HttpClient> createDirectHttpClient(
   String baseUrl, {
   Duration connectionTimeout = const Duration(seconds: 20),
   IpResolver? ipResolver,
+  ReachabilityProbe? probe,
   Duration socketTimeout = kDirectSocketTimeout,
   bool Function(X509Certificate certificate)? onBadCertificate,
 }) async {
@@ -97,6 +154,14 @@ Future<HttpClient> createDirectHttpClient(
   final host = uri.host.toLowerCase();
   if (host.isEmpty || !_needsDoHDirect(host)) return client;
 
+  // 探测式启用：先问本机「能直连吗」。生产 baseUrl 是 https，端口恒为 443；
+  // 这里取 uri 的实际端口，兼容显式端口的用法（如测试里的本地 TLS 端口）。
+  final port = uri.hasPort ? uri.port : 443;
+  if (await _isDirectReachable(host: host, port: port, probe: probe)) {
+    // 能直连 → 完全不改道：不装 connectionFactory，等价于改造前行为。
+    return client;
+  }
+
   final resolve = ipResolver ?? sharedDoHResolver.resolveViaDoH;
   // 预解析：DoH 失败 / 超时 / 返回空 → 安静回退普通 client（现状行为）。
   List<String> ips;
@@ -107,7 +172,6 @@ Future<HttpClient> createDirectHttpClient(
   }
   if (ips.isEmpty) return client;
 
-  final port = uri.hasPort ? uri.port : 443;
   client.connectionFactory =
       (Uri requestUri, String? proxyHost, int? proxyPort) async {
     // 走代理时与默认行为一致：连到代理的明文 socket（CONNECT 隧道由
@@ -135,6 +199,29 @@ Future<HttpClient> createDirectHttpClient(
     }
   };
   return client;
+}
+
+/// 判断 `host:port` 是否可直连；结果按 host 进程内缓存。
+///
+/// 说明：探测抛异常时**保守按 false 处理**（即启用 DoH 快路径），因为异常
+/// 只说明「无法证明能直连」，并不等于「能直连」；按 false 处理仍保有
+/// 「DoH 失败 → 安静回退默认通路」的兜底，不会比改造前更差。
+Future<bool> _isDirectReachable({
+  required String host,
+  required int port,
+  required ReachabilityProbe? probe,
+}) async {
+  final cached = _reachabilityCache[host];
+  if (cached != null) return cached;
+  bool reachable;
+  try {
+    reachable =
+        await (probe ?? canReachDirect)(host, port, kReachabilityProbeTimeout);
+  } on Object {
+    reachable = false;
+  }
+  _reachabilityCache[host] = reachable;
+  return reachable;
 }
 
 /// 复刻 dart:io HttpClient 的默认连接逻辑（回退路径用）。

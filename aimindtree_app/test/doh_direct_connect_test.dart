@@ -1,14 +1,20 @@
-/// DoH 解析（doh_resolver）+ `*.workers.dev` 直连（direct_connect）单测。
+/// DoH 解析（doh_resolver）+ `*.workers.dev` 探测式直连（direct_connect）单测。
 ///
 /// 覆盖：
 /// 1. `parseDoHJson` 纯函数：正常多 IP / Status 非 0 / 空 Answer / 畸形 JSON /
 ///    仅 AAAA / 去重 / TTL 提取；
 /// 2. DoHResolver：内存缓存、TTL 过期与夹取（注入时钟）、失败不缓存、
 ///    请求格式（name/type/Accept）；
-/// 3. `isPrivateOrLoopbackHost`：回环/私网矩阵；
-/// 4. `createDirectHttpClient` 域名判定分支（fake resolver 验证调用与否）、
-///    DoH 失败/空/畸形回退、回退后 client 行为与现状一致；
-/// 5. 端到端：本地假 DoH + 本地 TLS（自签证书 + onBadCertificate）验证
+/// 3. DoH 请求强制直连：`dohDirectProxy` 恒返回 DIRECT（+ 源码守卫）；
+/// 4. `isPrivateOrLoopbackHost`：回环/私网矩阵；
+/// 5. `canReachDirect`：TCP 可连 → true，不可连 → false（真实本地 socket）；
+/// 6. `createDirectHttpClient` 探测式路由：
+///    - probe=true → 不安装 connectionFactory（等价改造前）；
+///    - probe=false → 安装 factories 且 DoH 路径生效；
+///    - probe 抛异常 → 保守按 false（启用 DoH）；
+///    - 探测结果按 host 进程内缓存（同一 host 只探一次）；
+///    - DoH 失败/空/畸形与 baseUrl 畸形 → 安静回退普通 client；
+/// 7. 端到端：本地假 DoH + 本地 TLS（自签证书 + onBadCertificate）验证
 ///    「DoH → 真 IP → 原域名 SNI TLS → HttpClient 连接池」完整链路，
 ///    以及全部 IP 建连失败时安静回退默认通路。
 library;
@@ -90,6 +96,10 @@ String _okBody({
     ],
   });
 }
+
+/// 路由/回退用例的短连接超时：这些用例只会请求「必定连不上」的 host:1，
+/// 用短超时让「默认通路失败」尽快定案，别拖慢整个测试套。
+const Duration kQuickTimeout = Duration(milliseconds: 800);
 
 void main() {
   group('parseDoHJson', () {
@@ -391,7 +401,68 @@ void main() {
     });
   });
 
-  group('createDirectHttpClient routing (fake resolver)', () {
+  group('DoH request must go direct (never via proxy)', () {
+    test('dohDirectProxy 恒返回 DIRECT（多种端点 / 协议）', () {
+      for (final url in <String>[
+        'https://doh.pub/dns-query?name=x.workers.dev&type=A',
+        'https://dns.alidns.com/dns-query?name=x.workers.dev&type=A',
+        'http://127.0.0.1:8053/dns-query',
+      ]) {
+        expect(dohDirectProxy(Uri.parse(url)), 'DIRECT', reason: url);
+      }
+    });
+
+    test('DoHResolver 自建 client 用 dohDirectProxy（源码守卫防回归）', () {
+      // `HttpClient.findProxy` 无法从外部读取，这里用源码守卫：上一版误用
+      // syncFindProxy 让 DoH 请求走了代理，实测返回假 IP（31.13.67.41）。
+      final source =
+          File('lib/data/sync/doh_resolver.dart').readAsStringSync();
+      expect(source, contains('..findProxy = dohDirectProxy'));
+      expect(source, isNot(matches(RegExp(r'findProxy\s*=\s*syncFindProxy'))));
+    });
+  });
+
+  group('canReachDirect (real local socket)', () {
+    test('端口可连 → true；端口无监听 → false', () async {
+      final server = await ServerSocket.bind('127.0.0.1', 0);
+      addTearDown(server.close);
+      server.listen((Socket socket) => socket.destroy());
+      expect(
+        await canReachDirect(
+          '127.0.0.1',
+          server.port,
+          const Duration(milliseconds: 500),
+        ),
+        isTrue,
+      );
+
+      // 取一个刚释放的端口（无人监听）。
+      final probe = await ServerSocket.bind('127.0.0.1', 0);
+      final closedPort = probe.port;
+      await probe.close();
+      expect(
+        await canReachDirect(
+          '127.0.0.1',
+          closedPort,
+          const Duration(milliseconds: 300),
+        ),
+        isFalse,
+      );
+    });
+
+    test('域名解析失败 → false（不抛）', () async {
+      expect(
+        await canReachDirect(
+          'no-such-host.invalid',
+          443,
+          const Duration(milliseconds: 300),
+        ),
+        isFalse,
+      );
+    });
+  });
+
+  group('createDirectHttpClient routing (fake resolver + fake probe)', () {
     /// 记录调用的假解析器：被调用时把 host 记入 [calls]，返回 [ips]。
     IpResolver recordingResolver(List<String> calls,
         {List<String> ips = const <String>['127.0.0.1']}) {
@@ -401,15 +472,191 @@ void main() {
       };
     }
 
-    test('*.workers.dev 触发 DoH；私网/其他域名不触发', () async {
-      final calls = <String>[];
-      final fake = recordingResolver(calls);
+    /// 记录调用的假探针：恒定返回 [result]，或抛 [error]。
+    ReachabilityProbe recordingProbe(
+      List<String> calls, {
+      bool result = false,
+      Object? error,
+      List<int>? ports,
+      List<Duration>? timeouts,
+    }) {
+      return (String host, int port, Duration timeout) async {
+        calls.add(host);
+        ports?.add(port);
+        timeouts?.add(timeout);
+        if (error != null) throw error;
+        return result;
+      };
+    }
+
+    /// `HttpClient.connectionFactory` 在 dart:io 里**只有 setter**，读不回来，
+    /// 所以「是否安装了工厂」只能靠行为观测：工厂命中时会在请求阶段再调一次
+    /// resolver（工厂内解析），据此判断是否真的走了 DoH 直连。
+    Future<void> expectRequestOutcome(
+      HttpClient client,
+      Uri uri,
+      List<String> resolveCalls, {
+      required int expectedResolveCalls,
+    }) async {
+      await expectLater(client.getUrl(uri), throwsA(anything));
+      expect(resolveCalls.length, expectedResolveCalls);
+    }
+
+    test('probe=true（可直连）→ 建 client 时既不探测 DoH 也不装工厂', () async {
+      final probeCalls = <String>[];
+      final ports = <int>[];
+      final timeouts = <Duration>[];
+      final resolveCalls = <String>[];
+      final client = await createDirectHttpClient(
+        'https://reachable.workers.dev',
+        ipResolver: recordingResolver(resolveCalls),
+        probe: recordingProbe(
+          probeCalls,
+          result: true,
+          ports: ports,
+          timeouts: timeouts,
+        ),
+      );
+      // 探测参数：host + 443 + kReachabilityProbeTimeout。
+      expect(probeCalls, <String>['reachable.workers.dev']);
+      expect(ports, <int>[443]);
+      expect(timeouts, <Duration>[kReachabilityProbeTimeout]);
+      // 不改道：不发 DoH 请求。
+      expect(resolveCalls, isEmpty);
+      client.close(force: true);
+    });
+
+    test('probe=true → 请求阶段也不经 DoH 工厂（等价普通 client）', () async {
+      final resolveCalls = <String>[];
+      final client = await createDirectHttpClient(
+        'https://reachable-behavior.workers.dev:1',
+        connectionTimeout: kQuickTimeout,
+        ipResolver: recordingResolver(resolveCalls),
+        probe: (_, __, ___) async => true,
+      );
+      // 端口 1 无人监听：请求必失败；关键是失败过程中 resolver 一次都没被
+      // 调用 → 工厂没被安装，走的是默认通路（= 改造前行为）。
+      await expectRequestOutcome(
+        client,
+        Uri.parse('https://reachable-behavior.workers.dev:1/'),
+        resolveCalls,
+        expectedResolveCalls: 0,
+      );
+      client.close(force: true);
+    });
+
+    test('探测端口取 baseUrl 的显式端口（生产恒为 443）', () async {
+      final ports = <int>[];
+      final timeouts = <Duration>[];
+      final client = await createDirectHttpClient(
+        'https://port-probe.workers.dev:8443',
+        ipResolver: (_) async => const <String>['127.0.0.1'],
+        probe: recordingProbe(
+          <String>[],
+          result: true,
+          ports: ports,
+          timeouts: timeouts,
+        ),
+      );
+      expect(ports, <int>[8443]);
+      expect(timeouts, <Duration>[kReachabilityProbeTimeout]);
+      client.close(force: true);
+    });
+
+    test('probe=true → 普通请求行为与普通 client 完全一致', () async {
+      final server = await HttpServer.bind('127.0.0.1', 0);
+      addTearDown(() => server.close(force: true));
+      server.listen((req) async {
+        req.response.write('ok');
+        await req.response.close();
+      });
+
+      final client = await createDirectHttpClient(
+        'https://reachable-http.workers.dev',
+        ipResolver: (_) async => const <String>['127.0.0.1'],
+        probe: (_, __, ___) async => true,
+      );
+      final resp = await (await client
+              .getUrl(Uri.parse('http://127.0.0.1:${server.port}/')))
+          .close();
+      expect(await resp.transform(utf8.decoder).join(), 'ok');
+      client.close(force: true);
+    });
+
+    test('probe=false（不可直连）→ 安装 factories：请求阶段工厂内再走 DoH',
+        () async {
+      final probeCalls = <String>[];
+      final resolveCalls = <String>[];
+      final client = await createDirectHttpClient(
+        'https://blocked.workers.dev:1',
+        connectionTimeout: kQuickTimeout,
+        ipResolver: recordingResolver(resolveCalls),
+        probe: recordingProbe(probeCalls, result: false),
+      );
+      expect(probeCalls, <String>['blocked.workers.dev']);
+      expect(resolveCalls, <String>['blocked.workers.dev']); // 预解析一次
+      // 请求阶段工厂再解析一次 → 证明 connectionFactory 确实安装并生效。
+      await expectRequestOutcome(
+        client,
+        Uri.parse('https://blocked.workers.dev:1/'),
+        resolveCalls,
+        expectedResolveCalls: 2,
+      );
+      client.close(force: true);
+    });
+
+    test('probe 抛异常 → 保守按 false：启用 DoH 快路径', () async {
+      final resolveCalls = <String>[];
+      final client = await createDirectHttpClient(
+        'https://probe-throws.workers.dev:1',
+        connectionTimeout: kQuickTimeout,
+        ipResolver: recordingResolver(resolveCalls),
+        probe: (_, __, ___) async => throw StateError('probe boom'),
+      );
+      expect(resolveCalls, <String>['probe-throws.workers.dev']);
+      await expectRequestOutcome(
+        client,
+        Uri.parse('https://probe-throws.workers.dev:1/'),
+        resolveCalls,
+        expectedResolveCalls: 2,
+      );
+      client.close(force: true);
+    });
+
+    test('探测结果按 host 进程内缓存：第二次不再触发 probe', () async {
+      final probeCalls = <String>[];
+      final resolveCalls = <String>[];
+      final probe = recordingProbe(probeCalls, result: false);
+      final resolver = recordingResolver(resolveCalls);
+
+      final c1 = await createDirectHttpClient(
+        'https://cached-probe.workers.dev',
+        ipResolver: resolver,
+        probe: probe,
+      );
+      final c2 = await createDirectHttpClient(
+        'https://cached-probe.workers.dev',
+        ipResolver: resolver,
+        probe: probe,
+      );
+      expect(probeCalls, <String>['cached-probe.workers.dev']); // 只探一次
+      expect(resolveCalls.length, 2); // DoH 每次预解析都走（其自身有 TTL 缓存）
+      c1.close(force: true);
+      c2.close(force: true);
+    });
+
+    test('*.workers.dev 不可直连才触发 DoH；私网/其他域名不探测也不触发', () async {
+      final resolveCalls = <String>[];
+      final probeCalls = <String>[];
+      final fake = recordingResolver(resolveCalls);
+      final probe = recordingProbe(probeCalls, result: false);
 
       final c1 = await createDirectHttpClient(
         'https://aimindtree-sync-relay.tuanx.workers.dev',
         ipResolver: fake,
+        probe: probe,
       );
-      expect(calls, <String>['aimindtree-sync-relay.tuanx.workers.dev']);
+      expect(resolveCalls, <String>['aimindtree-sync-relay.tuanx.workers.dev']);
       c1.close(force: true);
 
       for (final url in <String>[
@@ -422,28 +669,54 @@ void main() {
         'https://example.com',
         'https://aimindtree.com/api',
       ]) {
-        final c = await createDirectHttpClient(url, ipResolver: fake);
+        final c =
+            await createDirectHttpClient(url, ipResolver: fake, probe: probe);
         c.close(force: true);
       }
-      expect(calls, <String>['aimindtree-sync-relay.tuanx.workers.dev']);
+      // 非 workers.dev / 私网地址：既不探测也不 DoH。
+      expect(probeCalls, <String>['aimindtree-sync-relay.tuanx.workers.dev']);
+      expect(resolveCalls, <String>['aimindtree-sync-relay.tuanx.workers.dev']);
     });
 
-    test('DoH 抛错 → 安静回退普通 client，不抛', () async {
+    test('DoH 抛错 → 安静回退普通 client，不抛也不装工厂', () async {
+      final resolveCalls = <String>[];
       final client = await createDirectHttpClient(
-        'https://x.workers.dev',
-        ipResolver: (_) async =>
-            throw const DoHResolveException('boom'),
+        'https://doh-error.workers.dev:1',
+        connectionTimeout: kQuickTimeout,
+        ipResolver: (String host) async {
+          resolveCalls.add(host);
+          throw const DoHResolveException('boom');
+        },
+        probe: (_, __, ___) async => false, // 不可直连 → 走 DoH → DoH 失败
       );
       expect(client, isA<HttpClient>());
+      expect(resolveCalls.length, 1); // 预解析失败一次
+      // 请求阶段不再调 resolver → 工厂没装上，走默认通路（现状行为）。
+      await expectRequestOutcome(
+        client,
+        Uri.parse('https://doh-error.workers.dev:1/'),
+        resolveCalls,
+        expectedResolveCalls: 1,
+      );
       client.close(force: true);
     });
 
-    test('DoH 返回空 → 安静回退普通 client，不抛', () async {
+    test('DoH 返回空 → 安静回退普通 client，不抛也不装工厂', () async {
+      final resolveCalls = <String>[];
       final client = await createDirectHttpClient(
-        'https://x.workers.dev',
-        ipResolver: (_) async => const <String>[],
+        'https://doh-empty.workers.dev:1',
+        connectionTimeout: kQuickTimeout,
+        ipResolver: recordingResolver(resolveCalls, ips: const <String>[]),
+        probe: (_, __, ___) async => false,
       );
       expect(client, isA<HttpClient>());
+      expect(resolveCalls.length, 1);
+      await expectRequestOutcome(
+        client,
+        Uri.parse('https://doh-empty.workers.dev:1/'),
+        resolveCalls,
+        expectedResolveCalls: 1,
+      );
       client.close(force: true);
     });
 
@@ -470,8 +743,9 @@ void main() {
       // fake resolver 返回 127.0.0.1（443 无人监听，直连必失败）——
       // 但工厂是懒触发的，此处只验证：建 client 不抛 + 普通请求正常。
       final client = await createDirectHttpClient(
-        'https://x.workers.dev',
+        'https://plain.workers.dev',
         ipResolver: (_) async => const <String>['127.0.0.1'],
+        probe: (_, __, ___) async => false, // 走 DoH 直连分支
       );
       final request =
           await client.getUrl(Uri.parse('http://127.0.0.1:${server.port}/'));
@@ -535,6 +809,7 @@ void main() {
       final client = await createDirectHttpClient(
         'https://e2e.workers.dev:$tlsPort',
         ipResolver: resolver.resolveViaDoH,
+        probe: (_, __, ___) async => false, // 沙箱内不可直连 → 必须走 DoH
         onBadCertificate: (_) => true,
       );
 
@@ -557,7 +832,8 @@ void main() {
       final client = await createDirectHttpClient(
         'https://e2e.workers.dev:$tlsPort',
         ipResolver: resolver.resolveViaDoH,
-        connectionTimeout: const Duration(seconds: 3),
+        probe: (_, __, ___) async => false,
+        connectionTimeout: kQuickTimeout,
       );
 
       // 不回退会挂死；回退后走真实 DNS（沙箱内 e2e.workers.dev 连不通）

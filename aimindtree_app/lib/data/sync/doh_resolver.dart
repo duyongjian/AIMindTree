@@ -10,13 +10,14 @@
 /// - [parseDoHJson]：DoH JSON 解析纯函数（不依赖网络，可单测）；
 /// - [DoHResolver.resolveViaDoH]：带内存缓存的解析入口，多端点顺序尝试；
 /// - [sharedDoHResolver]：进程内共享实例（缓存跨 HttpClient 复用）。
+///
+/// 注意：DoH 请求**强制直连**（见 [dohDirectProxy]），绝不走系统代理——
+/// 经代理转发反而会被污染/拖慢，实测会返回假 IP。
 library;
 
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-
-import 'http_proxy.dart';
 
 /// 单个 DoH 端点的请求超时（含建连与响应体读取）。
 ///
@@ -99,6 +100,19 @@ DoHAnswer parseDoHJson(String body) {
   return DoHAnswer(ips: ips, ttlSeconds: ttl);
 }
 
+/// DoH 请求专用的 `HttpClient.findProxy`：**恒定 DIRECT**，永不走系统代理。
+///
+/// 为什么不用 `syncFindProxy`（见 `http_proxy.dart`）：
+/// DoH 端点 `doh.pub` / `dns.alidns.com` 本身国内直达，无需代理；而经代理
+/// 转发时，代理会把这个「明文 HTTP 语义」的 DoH 流量一并按它自己的解析结果
+/// 处理，实测会拿到 Facebook 段假 IP（31.13.67.41），与系统 DNS 被投毒的
+/// 结果同源——DoH 因此完全失去意义，还会被代理链路额外拖慢。
+///
+/// 副作用面：只影响本模块自建的 client，且仅用于访问 DoH 端点；
+/// 业务请求的 client（`direct_connect.dart`）仍用 `syncFindProxy`，
+/// 代理设置行为不变。
+String dohDirectProxy(Uri uri) => 'DIRECT';
+
 /// 带内存缓存的 DoH 解析器。
 ///
 /// - 端点按顺序尝试：腾讯 doh.pub → 阿里 dns.alidns.com（均为 JSON 模式）；
@@ -138,7 +152,14 @@ class DoHResolver {
     if (injected != null) return injected;
     return _ownClient ??= HttpClient()
       ..connectionTimeout = kDoHRequestTimeout
-      ..findProxy = syncFindProxy;
+      // 强制直连（不走系统代理）：DoH 端点（doh.pub / dns.alidns.com）在
+      // 国内可直达，经代理反而被污染或拖慢——实测本机 `https_proxy=
+      // http://127.0.0.1:5282` 时，DoH 查询 `*.workers.dev` 返回
+      // 31.13.67.41（Facebook 段假 IP），与系统 DNS 返回的
+      // 69.171.247.71（同为假 IP）同源：代理把 DoH 的明文 HTTP 流量也污染
+      // 了。DoH 存在的意义就是绕开这条被污染的链路，因此它自己必须绕过
+      // 代理。见 [dohDirectProxy]。
+      ..findProxy = dohDirectProxy;
   }
 
   /// 解析 [host] 的 IPv4 列表（成功时非空）。
