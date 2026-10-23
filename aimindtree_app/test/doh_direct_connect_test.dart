@@ -25,6 +25,7 @@ import 'dart:io';
 
 import 'package:aimindtree_app/data/sync/direct_connect.dart';
 import 'package:aimindtree_app/data/sync/doh_resolver.dart';
+import 'package:aimindtree_app/data/sync/http_proxy.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// 本地 TLS 服务器用的自签证书（仅测试用：CN/SAN = e2e.workers.dev，
@@ -591,6 +592,33 @@ void main() {
       await expectLater(client.getUrl(uri), throwsA(anything));
       expect(resolveCalls.length, expectedResolveCalls);
     }
+
+    test('已配置代理 → 不探测不 DoH，直接普通 client（隧道由代理解析）', () async {
+      // 2026-10-24 实测：本机 Clash(7897) 隧道可达 workers.dev，而探测因
+      // DNS 投毒必然失败。配了代理时预解析/探测都是白等 4~10s，必须整体跳过。
+      setUserProxy('127.0.0.1:9'); // 9 端口无人监听，请求必失败
+      addTearDown(() => setUserProxy(null));
+      final probeCalls = <String>[];
+      final resolveCalls = <String>[];
+      final client = await createDirectHttpClient(
+        'https://proxied.workers.dev:1',
+        connectionTimeout: kQuickTimeout,
+        ipResolver: recordingResolver(resolveCalls),
+        probe: recordingProbe(probeCalls, result: false),
+      );
+      // 代理已配：既没探测也没预解析。
+      expect(probeCalls, isEmpty);
+      expect(resolveCalls, isEmpty);
+      // 请求走默认通路（连 127.0.0.1:9 被拒）→ 有界失败；resolver 仍为 0 次
+      // 证明 DoH 工厂没有安装。
+      await expectRequestOutcome(
+        client,
+        Uri.parse('https://proxied.workers.dev:1/'),
+        resolveCalls,
+        expectedResolveCalls: 0,
+      );
+      client.close(force: true);
+    });
 
     test('probe=true（可直连）→ 建 client 时既不探测 DoH 也不装工厂', () async {
       final probeCalls = <String>[];

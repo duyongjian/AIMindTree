@@ -8,7 +8,7 @@
 ///
 /// 本文件只负责「域名 → IPv4 列表」：
 /// - [parseDoHJson]：DoH JSON 解析纯函数（不依赖网络，可单测）；
-/// - [DoHResolver.resolveViaDoH]：带内存缓存的解析入口，多端点顺序尝试；
+/// - [DoHResolver.resolveViaDoH]：带内存缓存的解析入口，按端点顺序尝试；
 /// - [sharedDoHResolver]：进程内共享实例（缓存跨 HttpClient 复用）。
 ///
 /// 注意：DoH 请求**强制直连**（见 [dohDirectProxy]），绝不走系统代理——
@@ -115,7 +115,8 @@ String dohDirectProxy(Uri uri) => 'DIRECT';
 
 /// 带内存缓存的 DoH 解析器。
 ///
-/// - 端点按顺序尝试：腾讯 doh.pub → 阿里 dns.alidns.com（均为 JSON 模式）；
+/// - 端点按 [kDefaultDoHEndpoints] 顺序尝试（当前仅 doh.pub，取舍依据见
+///   该常量的实测注释）；
 /// - 命中缓存（host → (ips, expiresAt)）直接返回，不发请求；
 /// - TTL 取 DNS 返回的 TTL，夹在 [kDoHCacheTtlMin] ~ [kDoHCacheTtlMax]；
 /// - 失败（网络 / 超时 / Status 非 0 / 空 Answer）不写缓存；全部端点失败
@@ -132,11 +133,24 @@ class DoHResolver {
         _clock = clock ?? DateTime.now,
         _endpoints = endpoints ?? kDefaultDoHEndpoints;
 
-  /// 默认端点：腾讯 DoH（doh.pub）优先，阿里 DoH 备用。两者都支持
-  /// `application/dns-json`，响应体结构与 [parseDoHJson] 一致。
+  /// 默认端点：**仅** DNSPod（腾讯）doh.pub。
+  ///
+  /// 2026-10-24 国内线路实测（当时本机系统 DNS 对 workers.dev 投毒）：
+  /// - `doh.pub` JSON 模式返回 workers.dev 的真实 CF IP（172.67.x / 104.21.x），
+  ///   可用；
+  /// - `dns.alidns.com/dns-query`、`doh.360.cn/dns-query` **只认 RFC 8484
+  ///   wire format**（`dns=` 参数），传 JSON 参数直接报
+  ///   "no 'dns' query parameter found"——当备用端点永远失败；
+  /// - `dns.alidns.com/resolve`（JSON）虽能应答，但对 workers.dev 返回的是
+  ///   **污染 IP**（104.244.43.182，Twitter 段 sinkhole），比不答更危险；
+  /// - `dns.baidu.com/dns-query` 无响应；`1.1.1.1` / `cloudflare-dns.com` /
+  ///   `dns.google` 本机直连与经代理均不通。
+  ///
+  /// 因此刻意不做「多端点冗余」：doh.pub 失败时安静回退默认通路（= 改造前
+  /// 行为），也绝不把污染 IP 当答案用。未来要加端点，先按上述口径实测再进
+  /// 列表。
   static const List<String> kDefaultDoHEndpoints = <String>[
     'https://doh.pub/dns-query',
-    'https://dns.alidns.com/dns-query',
   ];
 
   final HttpClient? _injectedClient;

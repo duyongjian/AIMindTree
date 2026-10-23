@@ -156,6 +156,9 @@ bool _needsDoHDirect(String host) =>
 /// 行为矩阵：
 /// - baseUrl 畸形 / host 为空 → 普通 client；
 /// - host 非 `.workers.dev` 结尾，或是回环/私网地址 → 普通 client（不走 DoH）；
+/// - **已配置代理**（[syncFindProxy] 非 DIRECT）→ 普通 client：请求走代理
+///   CONNECT 隧道，域名由代理侧解析，DoH 改道在代理路径下永不会被用到，
+///   再做「探测 + DoH 预解析」只是让首请求白等 4~10s（见实现处注释）；
 /// - host 命中 `.workers.dev`：**先探测**本机能否直连该 `host:端口`
 ///   （[kReachabilityProbeTimeout] 预算；TCP + TLS 握手 + 证书校验全过才算
 ///   可直连）：
@@ -190,6 +193,18 @@ Future<HttpClient> createDirectHttpClient(
   if (uri == null) return client;
   final host = uri.host.toLowerCase();
   if (host.isEmpty || !_needsDoHDirect(host)) return client;
+
+  // 已配置代理（Clash/v2rayN/系统代理/用户手填）→ 直接返回普通 client。
+  //
+  // 为什么：配了代理时，请求本来就经下方 `connectionFactory` 的
+  // `proxyHost != null` 分支走 CONNECT 隧道，域名由代理侧解析——DoH 改道
+  // 在代理路径下一次都不会被用到（工厂内直接 `Socket.startConnect(proxy)`）。
+  // 此时仍做「探测（最坏 6s）+ DoH 预解析（最坏 8s）」纯属浪费：2026-10-24
+  // 实测本机 Clash(7897) 隧道可达 workers.dev，而探测因 DNS 投毒必然失败，
+  // 首同步要白等 6s 才轮到（同样用不上的）DoH。
+  // 无代理的直连场景不受影响：syncFindProxy 返回 DIRECT，继续走探测。
+  // 请求路由也完全不变——client 的 findProxy 仍是 syncFindProxy。
+  if (syncFindProxy(uri) != 'DIRECT') return client;
 
   // 探测式启用：先问本机「能直连吗」。生产 baseUrl 是 https，端口恒为 443；
   // 这里取 uri 的实际端口，兼容显式端口的用法（如测试里的本地 TLS 端口）。

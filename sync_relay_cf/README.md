@@ -14,6 +14,33 @@
 > 方案 A（本地 llm_server）适合开发期与完全私有化；方案 B（CF）适合真机跨设备。
 > App 端两套配置独立，可同时配置、按需点对应按钮。
 
+## 国内线路可达性（2026-10-24 实测）
+
+`*.workers.dev` 在国内线路**双重受阻**，但两层都有解法，桌面端（PC）最终可用：
+
+| 层 | 现象 | 解法 |
+|----|------|------|
+| DNS | 系统 DNS 对 `*.workers.dev` 投毒，返回 Facebook/Twitter 段假 IP（实测 128.242.240.149 / 66.220.148.145） | App 侧 DoH（`doh.pub`）拿真实 CF IP（172.67.x / 104.21.x），见 `aimindtree_app/lib/data/sync/doh_resolver.dart` |
+| TLS | 拿到真 IP 后 TCP 可连，但带 `workers.dev` SNI 的 ClientHello 被 RST（SNI 级阻断，openssl/curl 均复现） | 走本地代理隧道：Clash/v2rayN 等自行解析并转发，不受本机投毒影响 |
+
+**桌面端现状（本机实测全绿）**：Clash 监听 7897 时，App 启动即自动探测到该代理
+（`initSystemProxy` 探测列表首位），同步请求全部走 CONNECT 隧道，
+register / push / pull / manifest / login 五端点全部 200。
+
+**App 侧两个对应设计**：
+
+1. `createDirectHttpClient`（`direct_connect.dart`）探测式启用：能直连就零改道；
+   不能直连才 DoH 拿真 IP、以原域名 SNI 建连；**已配置代理时直接跳过探测与
+   DoH 预解析**——代理路径下 DoH 工厂本就不会被用到，跳过可省首请求 4~10s。
+2. DoH 端点只保留 `doh.pub`：`dns.alidns.com` / `doh.360.cn` 只认 RFC 8484
+   wire format（JSON 参数直接 400），`dns.alidns.com/resolve` 对 workers.dev
+   返回污染 IP（104.244.43.182），均不可用；依据见 `doh_resolver.dart`
+   `kDefaultDoHEndpoints` 常量注释。
+
+> 若所在网络连代理也不通（SNI 阻断极严），终极解法是给 Worker 绑**自有域名**
+> （Dashboard → Workers → Triggers → Custom Domains）——非 workers.dev 域名
+> 不触发该 SNI 黑名单。
+
 ## 与 App 的契约（必须一致）
 
 | 方法 | 路径 | 请求体 | 响应 |
