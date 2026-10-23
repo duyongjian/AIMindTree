@@ -10,7 +10,7 @@
 /// 就是「这篇笔记的树」的成员；加载时会为每篇已有知识点的笔记补建笔记树并归集成员。
 ///
 /// 顶部工具栏：左侧切换知识树；右侧动作归组为 4 个图标菜单（见 [_buildToolbarGroups]）：
-/// 知识树（新建 / 重命名 / 删除）、内容导入（笔记并入 / 已有知识点）、
+/// 知识树（新建 / 重命名 / 删除）、内容导入（笔记并入 / 新建 / 加入已有知识点）、
 /// 布局与连线（重新布局 / 局部重排 / 自动连线 / 局部连线）、
 /// AI 与作业（批量补前置 / 布置作业 / 作业历史 / 作业模式）。
 library;
@@ -703,6 +703,133 @@ class CanvasPageState extends State<CanvasPage> {
       (e, _) => _toast('添加失败：$e'),
     );
     await _loadForTree(tree.id);
+  }
+
+  /// 在知识树界面「就地」新建知识点：填名称 / 类型 / 定义 → 落库 → 收进当前树
+  /// → 自动落位 → 触发一轮查重。
+  ///
+  /// 与「知识点管理」页手动新建的差别只有一处：**不做「关联笔记」下拉**——
+  /// 树上快速建点的场景里，用户想要的只是一个能立刻摆到画布上的节点；来源笔记
+  /// 留空即可，之后仍可在管理页补。其余口径完全对齐：同样走
+  /// [KnowledgeRepository.createManualKnowledgePoint]（origin=user_manual，
+  /// 豁免 T1 锚点铁律），同样在**新建**后调 [kpDedupSchedule] 跑 T14 查重
+  /// （跨树加入那种「没创建新知识点」的场景才故意不查重）。
+  ///
+  /// 落位交给 [_autoPlaceNewPoints]：只在「已有内容下方」找一个不重叠空位，
+  /// 不挤占现有节点、不触发全树重排（详见 [autoPlaceNewPointsInTree]）。
+  Future<void> _newKnowledgePoint() async {
+    final tree = _selectedTree;
+    if (tree == null) return;
+
+    final nameCtrl = TextEditingController();
+    final defCtrl = TextEditingController();
+    var type = KnowledgePointType.concept;
+
+    final created = await showDialog<KnowledgePoint>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSt) => AlertDialog(
+          title: const Text('新建知识点'),
+          content: SizedBox(
+            width: 420,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  TextField(
+                    controller: nameCtrl,
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                      labelText: '名称（必填）',
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  DropdownButtonFormField<KnowledgePointType>(
+                    initialValue: type,
+                    decoration: const InputDecoration(
+                      labelText: '类型',
+                      isDense: true,
+                    ),
+                    items: <DropdownMenuItem<KnowledgePointType>>[
+                      for (final t in KnowledgePointType.values)
+                        DropdownMenuItem<KnowledgePointType>(
+                          value: t,
+                          child: Text(t.label),
+                        ),
+                    ],
+                    onChanged: (v) => setSt(() => type = v ?? type),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: defCtrl,
+                    maxLines: 3,
+                    decoration: const InputDecoration(
+                      labelText: '定义',
+                      isDense: true,
+                      alignLabelWithHint: true,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () async {
+                final name = nameCtrl.text.trim();
+                if (name.isEmpty) {
+                  _toast('名称不能为空');
+                  return;
+                }
+                final res = await _repo.createManualKnowledgePoint(
+                  name: name,
+                  type: type,
+                  definition: defCtrl.text,
+                );
+                if (!mounted) return;
+                final kp = res.valueOrNull;
+                if (kp == null) {
+                  final msg = res is Failure<KnowledgePoint>
+                      ? res.message
+                      : '未知错误';
+                  _toast('新建失败：$msg');
+                  return;
+                }
+                Navigator.pop(ctx, kp);
+              },
+              child: const Text('创建'),
+            ),
+          ],
+        ),
+      ),
+    );
+    // 注意：**不要**在这里 dispose 两个 controller。`showDialog` 的 future 在路由
+    // pop 的瞬间就已完成，此时弹窗还在退场动画里、TextField 仍会随动画重建，
+    // 立即 dispose 会撞上「A TextEditingController was used after being disposed」。
+    // 与同文件 [_askName]、管理页 `_showEditDialog` 的口径一致：弹窗局部
+    // controller 交给 GC。
+    if (created == null || !mounted) return;
+
+    // 1) 收进当前树（addPoints 幂等写 canvas_nodes 成员行）。
+    final addRes = await _treesRepo.addPoints(tree.id, <String>[created.id]);
+    if (!mounted) return;
+    if (addRes is Failure<int>) {
+      _toast('加入知识树失败：${addRes.message}');
+      return;
+    }
+    // 2) 落位：已有内容下方第一个不重叠空位（不挤占节点、不触发全树重排）。
+    await _autoPlaceNewPoints(tree.id, <String>[created.id]);
+    if (!mounted) return;
+    // 3) 手动新建 → 后台异步跑一轮知识点查重（T14），与管理页手动新建同口径。
+    kpDedupSchedule(repo: _repo, jobs: widget.service.jobs);
+    await _loadForTree(tree.id);
+    _toast('已新建并加入知识树');
   }
 
   /// 从其他知识树加入知识点：选源树 → 勾选该树的成员（已在当前树的置灰）→
@@ -2578,7 +2705,7 @@ class CanvasPageState extends State<CanvasPage> {
   ///
   /// 1. **知识树**（实体 CRUD）：新建知识树 / 重命名 / 删除知识树；
   /// 2. **内容导入（树成员管理）**：从笔记并入知识点 / 加入已有知识点 /
-  ///    从其他知识树加入 / 从知识树移除知识点；
+  ///    新建知识点 / 从其他知识树加入 / 从知识树移除知识点；
   /// 3. **布局与连线**（布局系列 + 连线系列，用分隔线分开）：
   ///    - 布局系列：重新布局（全量重排）/ 局部重排；
   ///    - 连线系列：自动连线（原「自动布局」，实为 T3 前置连线）/ 局部连线（仅对框选子集连线）；
@@ -2613,10 +2740,10 @@ class CanvasPageState extends State<CanvasPage> {
           ),
         ],
       ),
-      // ② 内容导入（树成员管理：并入 / 添加 / 移除）
+      // ② 内容导入（树成员管理：并入 / 新建 / 添加 / 移除）
       _toolbarGroupButton(
         icon: Icons.playlist_add,
-        tooltip: '内容导入：并入笔记 / 已有知识点 / 移除',
+        tooltip: '内容导入：并入笔记 / 新建知识点 / 已有知识点 / 移除',
         itemBuilder: (_) => <PopupMenuEntry<int>>[
           _toolbarMenuItem(
             icon: Icons.merge_type,
@@ -2629,6 +2756,12 @@ class CanvasPageState extends State<CanvasPage> {
             label: '加入已有知识点',
             enabled: hasTree,
             onTap: _addKnowledgePoints,
+          ),
+          _toolbarMenuItem(
+            icon: Icons.add_circle_outline,
+            label: '新建知识点',
+            enabled: hasTree,
+            onTap: _newKnowledgePoint,
           ),
           _toolbarMenuItem(
             icon: Icons.move_down,

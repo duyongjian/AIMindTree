@@ -156,12 +156,14 @@ void main() {
       expect(labels, <String>[
         '从笔记并入知识点',
         '加入已有知识点',
+        '新建知识点',
         '从其他知识树加入',
         '从知识树移除知识点',
         '移除框选的知识点',
       ]);
       expect(itemEnabled(tester, '从笔记并入知识点'), isTrue);
       expect(itemEnabled(tester, '加入已有知识点'), isTrue);
+      expect(itemEnabled(tester, '新建知识点'), isTrue);
       expect(itemEnabled(tester, '从其他知识树加入'), isTrue);
       // 树里有「成员点」→ 移除可用；未开框选模式 → 框选移除禁用。
       expect(itemEnabled(tester, '从知识树移除知识点'), isTrue);
@@ -251,12 +253,14 @@ void main() {
       expect(labels, <String>[
         '从笔记并入知识点',
         '加入已有知识点',
+        '新建知识点',
         '从其他知识树加入',
         '从知识树移除知识点',
         '移除框选的知识点',
       ]);
       expect(itemEnabled(tester, '从笔记并入知识点'), isFalse);
       expect(itemEnabled(tester, '加入已有知识点'), isFalse);
+      expect(itemEnabled(tester, '新建知识点'), isFalse);
       expect(itemEnabled(tester, '从其他知识树加入'), isFalse);
       // 空库：移除类动作同样依赖树，全部禁用。
       expect(itemEnabled(tester, '从知识树移除知识点'), isFalse);
@@ -307,6 +311,81 @@ void main() {
       final labels = await openGroup(tester, Icons.auto_awesome);
       expect(labels, contains('批量补前置'));
       expect(labels, isNot(contains('补前置')));
+    });
+  });
+
+  // ==================== 画布内「新建知识点」====================
+  //
+  // 需求：直接在知识树界面新增知识点，新建后自动成为当前树的成员并落到画布上，
+  // 不必先去「知识点管理」页建好再回来手动加入。
+
+  group('② 组「新建知识点」（画布内直接建点）', () {
+    testWidgets('无树时该菜单项禁用', (tester) async {
+      await pumpPage(tester); // 空库：没有任何知识树。
+
+      final labels = await openGroup(tester, Icons.playlist_add);
+      expect(labels, contains('新建知识点'));
+      expect(itemEnabled(tester, '新建知识点'), isFalse);
+    });
+
+    testWidgets('建点后自动成为树成员，并落位到已有内容下方（不挤占旧节点）',
+        (tester) async {
+      // 造树 + 一个**已固化坐标**的成员点。只有固化过非 (0,0) 坐标的旧成员才
+      // 算「占位」——新点因此必须让开它，落到它下方。
+      final treeRes = await trees.createTree('树上建点树');
+      final tree = (treeRes as Success<KnowledgeTree>).value;
+      final existing = (await repo.createManualKnowledgePoint(name: '原有点'))
+          as Success<KnowledgePoint>;
+      await trees.addPoints(tree.id, <String>[existing.value.id]);
+      await repo.saveNodePosition(tree.id, existing.value.id, 200, 100);
+
+      await pumpPage(tester);
+
+      await openGroup(tester, Icons.playlist_add);
+      await tester.tap(find.text('新建知识点'));
+      await tester.pumpAndSettle();
+
+      // 精简弹窗：只有 名称 / 类型 / 定义，**没有**「关联笔记」下拉。
+      expect(find.text('新建知识点'), findsWidgets); // 标题
+      expect(find.text('关联笔记（可选）'), findsNothing);
+      expect(find.byType(TextField), findsNWidgets(2));
+
+      // 名称（第一个 TextField）+ 定义（第二个）；类型保持默认「概念」。
+      await tester.enterText(find.byType(TextField).first, '树上新建点');
+      await tester.enterText(find.byType(TextField).last, '在画布上直接写的定义');
+      await tester.tap(find.text('创建'));
+      await tester.pumpAndSettle();
+
+      // 1) 知识点落库：名称 / 定义 / 类型 / 来源都符合手动新建口径。
+      final all = await repo.allKnowledgePoints();
+      final createdList = all.where((p) => p.name == '树上新建点').toList();
+      expect(createdList, hasLength(1), reason: '画布内新建应真的创建知识点');
+      final created = createdList.single;
+      expect(created.type, KnowledgePointType.concept);
+      expect(created.definition, '在画布上直接写的定义');
+      expect(created.origin, 'user_manual');
+
+      // 2) 自动成为当前树成员（不用再手动「加入已有知识点」）。
+      final members = await trees.memberPointIds(tree.id);
+      expect(members, contains(created.id));
+
+      // 3) 自动落位：非 (0,0)，且让开既有节点（落在其下方）。
+      final positions = await repo.loadNodePositions(tree.id);
+      final pos = positions[created.id];
+      expect(pos, isNotNull, reason: '新点应有 canvas_nodes 落位行');
+      expect(pos!.x == 0 && pos.y == 0, isFalse,
+          reason: '新点不应堆在原点 (0,0)');
+      final oldPos = positions[existing.value.id];
+      expect(oldPos, isNotNull);
+      expect(pos.y, greaterThan(oldPos!.y),
+          reason: '新点应落在已有内容下方，不挤占旧节点');
+
+      // 4) 收尾：排掉 kpDedupSchedule 的 1.5s 防抖定时器（后台查重，本地预筛，
+      //    两个点名称毫无重叠 → 无候选直接返回，不发任何网络请求）。
+      await tester.pump(const Duration(seconds: 2));
+      await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 300)));
+      await tester.pumpAndSettle();
     });
   });
 
