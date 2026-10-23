@@ -57,8 +57,13 @@ class SyncConfig {
       'https://aimindtree-sync-relay.tuanx.workers.dev';
 
   /// 内置默认地址：腾讯云 CloudBase 同步中继（sync_relay_cn，已部署）。
+  ///
+  /// ⚠️ 必须带 `/sync-relay` 路径前缀：CloudBase 的 HTTP 访问服务是按「触发路径」
+  /// 路由的，我们在网关建的路由是 `path=/sync-relay`（`upstreamResourceType=SCF`）。
+  /// 少了这段前缀请求会落到静态托管的 404 上，看起来像「服务没起」。
+  /// 也不要加结尾斜杠——App 是 `<base>/auth/register` 直接拼接的。
   static const String kSyncCbDefaultBaseUrl =
-      'https://mindtree-d7glv6crkd8e9fba9-1409358097.ap-shanghai.app.tcloudbase.com';
+      'https://mindtree-d7glv6crkd8e9fba9-1409358097.ap-shanghai.app.tcloudbase.com/sync-relay';
 
   /// 内置默认地址：Vercel 同步中继（sync_relay_vercel）。
   ///
