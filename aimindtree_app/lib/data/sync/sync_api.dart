@@ -18,7 +18,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'http_proxy.dart';
+import 'direct_connect.dart';
 import 'sync_types.dart';
 
 /// 抽象同步后端。
@@ -67,17 +67,30 @@ class HttpSyncApi implements SyncApi {
     required this.baseUrl,
     required this.userToken,
     HttpClient? client,
-  }) : _client = client ?? _createClient();
-
-  static HttpClient _createClient() {
-    final c = HttpClient()..connectionTimeout = const Duration(seconds: 30);
-    c.findProxy = syncFindProxy;
-    return c;
-  }
+  }) : _externalClient = client;
 
   final String baseUrl;
   final String userToken;
-  final HttpClient _client;
+
+  /// 外部注入的 client（测试桩用）；为空时懒创建「DoH 直连」client。
+  final HttpClient? _externalClient;
+
+  /// 懒创建的 client（[close] 时关闭）。
+  HttpClient? _client;
+
+  Future<HttpClient>? _clientInit;
+
+  /// 取底层 client：外部注入优先；否则经 [createDirectHttpClient] 创建
+  /// （`*.workers.dev` 走 DoH 真实 IP 直连，任何失败都安静回退普通 client，
+  /// PC 端现状行为不变）。并发调用复用同一次创建结果。
+  Future<HttpClient> _ensureClient() {
+    final external = _externalClient;
+    if (external != null) return Future.value(external);
+    return _clientInit ??= createDirectHttpClient(
+      baseUrl,
+      connectionTimeout: const Duration(seconds: 30),
+    ).then((c) => _client = c);
+  }
 
   Map<String, String> get _headers => {
         'Authorization': 'Bearer $userToken',
@@ -95,7 +108,8 @@ class HttpSyncApi implements SyncApi {
     Duration timeout = const Duration(seconds: 60),
   }) async {
     final url = _url(path);
-    final req = await _client.postUrl(url).timeout(timeout);
+    final client = await _ensureClient();
+    final req = await client.postUrl(url).timeout(timeout);
     _headers.forEach(req.headers.set);
     req.add(utf8.encode(jsonEncode(body)));
     final resp = await req.close().timeout(timeout);
@@ -144,7 +158,9 @@ class HttpSyncApi implements SyncApi {
   Future<String?> testConnection() async {
     try {
       final url = _url('manifest');
-      final req = await _client.getUrl(url).timeout(const Duration(seconds: 10));
+      final client = await _ensureClient();
+      final req =
+          await client.getUrl(url).timeout(const Duration(seconds: 10));
       _headers.forEach(req.headers.set);
       final resp = await req.close().timeout(const Duration(seconds: 10));
       await resp.drain<void>();
@@ -156,7 +172,7 @@ class HttpSyncApi implements SyncApi {
   }
 
   @override
-  void close() => _client.close(force: true);
+  void close() => _client?.close(force: true);
 }
 
 /// 测试用 Mock：可预设 push 接受策略 + pull 返回 envelope 序列。

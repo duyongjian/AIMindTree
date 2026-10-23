@@ -11,7 +11,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'http_proxy.dart';
+import 'direct_connect.dart';
 
 /// 登录/注册返回的会话（user_id + 每用户令牌）。
 class SyncAccountSession {
@@ -30,16 +30,29 @@ class SyncAccountApiException implements Exception {
 
 class SyncAccountApi {
   SyncAccountApi({required this.baseUrl, HttpClient? client})
-      : _client = client ?? _createClient();
-
-  static HttpClient _createClient() {
-    final c = HttpClient()..connectionTimeout = const Duration(seconds: 20);
-    c.findProxy = syncFindProxy;
-    return c;
-  }
+      : _externalClient = client;
 
   final String baseUrl;
-  final HttpClient _client;
+
+  /// 外部注入的 client（测试桩用）；为空时懒创建「DoH 直连」client。
+  final HttpClient? _externalClient;
+
+  /// 懒创建的 client（[close] 时关闭）。
+  HttpClient? _client;
+
+  Future<HttpClient>? _clientInit;
+
+  /// 取底层 client：外部注入优先；否则经 [createDirectHttpClient] 创建
+  /// （`*.workers.dev` 走 DoH 真实 IP 直连，任何失败都安静回退普通 client，
+  /// PC 端现状行为不变）。并发调用复用同一次创建结果。
+  Future<HttpClient> _ensureClient() {
+    final external = _externalClient;
+    if (external != null) return Future.value(external);
+    return _clientInit ??= createDirectHttpClient(
+      baseUrl,
+      connectionTimeout: const Duration(seconds: 20),
+    ).then((c) => _client = c);
+  }
 
   String _normalize(String u) => u.endsWith('/') ? u.substring(0, u.length - 1) : u;
   Uri _url(String path) => Uri.parse('${_normalize(baseUrl)}/$path');
@@ -51,8 +64,9 @@ class SyncAccountApi {
   ) async {
     final url = _url(path);
     try {
+      final client = await _ensureClient();
       final req =
-          await _client.postUrl(url).timeout(const Duration(seconds: 20));
+          await client.postUrl(url).timeout(const Duration(seconds: 20));
       req.headers.set('Content-Type', 'application/json; charset=utf-8');
       req.add(utf8.encode(jsonEncode({'username': username, 'password': password})));
       final resp = await req.close().timeout(const Duration(seconds: 20));
@@ -92,5 +106,5 @@ class SyncAccountApi {
   Future<SyncAccountSession> login(String username, String password) =>
       _auth('auth/login', username, password);
 
-  void close() => _client.close(force: true);
+  void close() => _client?.close(force: true);
 }
