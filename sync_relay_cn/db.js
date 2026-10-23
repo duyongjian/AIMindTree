@@ -1,41 +1,58 @@
 /**
- * 同步中继数据访问适配层（腾讯云开发 CloudBase 云数据库 · 文档型）。
+ * 同步中继数据访问适配层（腾讯云开发 CloudBase · PostgreSQL）。
  *
- * 这一层刻意做得很薄：整个服务只有这里会碰 ``database`` 句柄，账号、路由、
- * 密码散列都在 ``index.js`` 里。将来若再换平台（比如换回 D1、或换成 MySQL
- * 型云数据库），只需要重写本文件，其余代码不用动。
+ * 这一层刻意做得很薄：整个服务只有这里会碰数据库客户端，账号、路由、
+ * 密码散列都在 ``index.js`` 里。将来若再换平台（换回 D1、或换 MySQL），
+ * 只需要重写本文件，其余代码不用动。
  *
- * 依赖注入：所有导出函数都由 ``createStore(database)`` 生产，``database`` 为
- * ``@cloudbase/node-sdk`` 的 ``app.database()`` 句柄。这样本地自测可以直接塞一个
- * 内存 mock 进来，不必联网、不必有腾讯云账号（见 ``test_protocol.mjs``）。
+ * 背景（重要，踩过的坑）：目标环境是 **PostgreSQL 环境**，不是文档型
+ * （NoSQL）环境。文档型 API（``app.database()`` / ``db.collection()`` /
+ * ``db.command.gt``）在该环境直接报错：
+ *   ``This environment has no document database instance. It is
+ *   provisioned with PostgreSQL instance [postgres-xxx], so
+ *   document-database actions such as CreateTable are not available.``
+ * 因此本版改走 ``app.rdb()`` —— ``@cloudbase/node-sdk`` 对 PostgreSQL
+ * 的 PostgREST 客户端（与官方文档一致，见 README「数据层选型」一节）。
  *
- * 集合（与 Cloudflare 版 schema.sql 一一对应）：
- * - sync_envelopes：每条文档存一个 (owner_id, entity_table, entity_id) 的最新态；
+ * 关于「为什么代码里没有 SQL 字符串」：查证结论（README 有完整引用），
+ * node-sdk 的 PostgreSQL 访问面只有 PostgREST 风格的
+ * ``from(table).select()/insert()/upsert()/update()/delete()`` 加
+ * ``eq/gt/order/range/limit`` 修饰；``app.models.$runSQL`` 属于
+ * MySQL 数据模型（文档原文 "MySQL data model provides two SQL query
+ * methods"），PG 环境不可用；``exec-pgsql`` HTTP API 仅管理员可调用，
+ * 云函数运行时没有管理员凭证。PostgREST 的 ``upsert()`` 底层就是
+ * ``INSERT ... ON CONFLICT (...) DO UPDATE``，与 CF 版 ``worker.js`` 的
+ * ``INSERT OR REPLACE`` 语义等价。
+ *
+ * 依赖注入：所有导出函数由 ``createStore(pg)`` 生产，``pg`` 为
+ * ``app.rdb()`` 客户端（或测试里的等价 mock —— ``test_protocol.mjs``
+ * 用 ``node:sqlite`` 内存库 + PostgREST 翻译层，不联网、不装驱动）。
+ *
+ * 表（由 ``cloudbase/migrations/`` 管理，与 CF 版 schema.sql 一一对应）：
+ * - sync_envelopes：每 (owner_id, entity_table, entity_id) 一条最新态；
  * - sync_users：账号；
  * - sync_tokens：登录会话令牌。
  */
 
 'use strict';
 
-const COLLECTION_ENVELOPES = 'sync_envelopes';
-const COLLECTION_USERS = 'sync_users';
-const COLLECTION_TOKENS = 'sync_tokens';
+const TABLE_ENVELOPES = 'sync_envelopes';
+const TABLE_USERS = 'sync_users';
+const TABLE_TOKENS = 'sync_tokens';
 
 /**
- * 单次 ``get()`` 的分页大小。
- *
- * CloudBase 文档型数据库的自述存在两个版本（以云函数运行时的实际行为为准）：
- * - 官方文档 增删改查：默认 100 条，最多 1000 条；
- * - node-sdk 仓库 docs/database/database.md：默认 100 条，最大 100 条。
- *
- * 取两者都安全的 100 作为默认分页大小，并用 ``while`` 循环翻页把结果取干净；
- * server_time + _id 二级排序保证翻页不重不漏。1000 只是「上限」，若运行时确实
+ * upsert 的冲突判定列：正是表的复合主键。
+ * PostgREST 会把它翻成 ``ON CONFLICT (owner_id, entity_table, entity_id)``。
  */
+const ENVELOPE_CONFLICT_COLS = 'owner_id,entity_table,entity_id';
+
+/** pull 分页大小：PG 本身没有文档库那种 100/1000 上限，但一次全量可能上千条，仍要分页。 */
 const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 1000;
 
-/** 写入并发度：一次 push 可能有上千条 envelope，串行 set 会拖慢整次调用。 */
-const DEFAULT_WRITE_CONCURRENCY = 20;
+/** push 分块大小：控制单次 upsert 请求体（envelope 的 payload 可能是整篇笔记）。 */
+const DEFAULT_PUSH_CHUNK = 100;
+const MAX_PUSH_CHUNK = 1000;
 
 function pageSizeFromEnv() {
   const n = parseInt(process.env.CB_PAGE_SIZE, 10);
@@ -43,186 +60,181 @@ function pageSizeFromEnv() {
   return Math.min(n, MAX_PAGE_SIZE);
 }
 
-function writeConcurrencyFromEnv() {
-  const n = parseInt(process.env.CB_WRITE_CONCURRENCY, 10);
-  if (!Number.isFinite(n) || n <= 0) return DEFAULT_WRITE_CONCURRENCY;
-  return n;
+function pushChunkFromEnv() {
+  const n = parseInt(process.env.CB_PUSH_CHUNK, 10);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_PUSH_CHUNK;
+  return Math.min(n, MAX_PUSH_CHUNK);
 }
 
-/**
- * document ``_id`` 段转义。
- *
- * 我们用 ``owner_id``、``entity_table``、``entity_id`` 拼成的字符串当 ``_id``，
- * 从而实现「每个业务键只保留最新态」的 upsert 语义。CloudBase 文档型数据库的
- * ``_id`` 是字符串，UUID 里的短横线是合法的，但**点号（.）、美元符（$）、斜杠
- * 这类字符不合法**——而 App 端的 ``entity_id`` 由各张表自己决定，并不保证不含
- * 这些字符。因此对每段做一次百分号风格的转义（``%`` 本身先转义，保证可逆）。
- *
- * 仅影响 ``_id``：``owner_id/entity_table/entity_id`` 依然以独立字段原样落库，
- * 查询和返回都读原值，转义不会泄漏给 App。
- */
-function escapeKeySegment(s) {
-  return String(s).replace(/[%$./\\]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+/** 把 PostgREST 返回的 error 对象转成带上下文的可读错误（由 index.js 统一转 500）。 */
+function raise(error, context) {
+  const msg = error && error.message ? error.message : JSON.stringify(error);
+  throw new Error(`${context}: ${msg}`);
 }
 
-/**
- * envelope 文档主键：``owner__table__entity``。
- *
- * owner_id 固定为 ``u_`` + 24 位十六进制，本身不含 ``__``，故拼接无歧义。
- */
-function envelopeDocId(ownerId, entityTable, entityId) {
-  return (
-    escapeKeySegment(ownerId) +
-    '__' +
-    escapeKeySegment(entityTable) +
-    '__' +
-    escapeKeySegment(entityId)
-  );
-}
-
-/**
- * ``doc().get()`` 在不同版本的 SDK 里返回的形状不完全一致（有的给 ``data: [doc]``，
- * 有的给 ``data: doc``），这里统一成「文档或 null」。
- */
-function pickDoc(res) {
-  const data = res && res.data;
-  if (!data) return null;
-  if (Array.isArray(data)) return data.length ? data[0] : null;
-  return data;
-}
-
-/** 有限并发地执行一批写任务（避免上千条 envelope 串行跑）。 */
-async function mapWithConcurrency(items, concurrency, fn) {
-  const queue = items.slice();
-  const workers = [];
-  for (let i = 0; i < Math.min(concurrency, queue.length); i++) {
-    workers.push(
-      (async () => {
-        while (queue.length) {
-          const item = queue.shift();
-          await fn(item);
-        }
-      })()
+/** 取 ``from(table)`` 查询构造器；客户端没就绪时给出可读错误（而不是 undefined TypeError）。 */
+function tableOf(pg, table) {
+  if (!pg || typeof pg.from !== 'function') {
+    throw new Error(
+      'PostgreSQL 客户端未就绪：createStore 需要一个 app.rdb() 客户端' +
+        '（云函数内由 index.js 的 getStore() 注入；本地测试用等价 mock）'
     );
   }
-  await Promise.all(workers);
+  return pg.from(table);
 }
 
 /**
- * @param {object} database @cloudbase/node-sdk 的 app.database() 句柄（或等价 mock）
+ * @param {object} pg ``app.rdb()`` 返回的 PostgREST 客户端（或等价 mock）
  */
-function createStore(database) {
-  const col = (name) => database.collection(name);
-
+function createStore(pg) {
   return {
+    /** 连接是否就绪（有可用的 PostgREST 客户端）。没就绪时各方法会抛可读错误。 */
+    isConfigured() {
+      return !!(pg && typeof pg.from === 'function');
+    },
+
     // ---------------- 账号 ----------------
 
-    /** 按用户名查账号文档；不存在返回 null。依赖 sync_users.username 唯一索引。 */
+    /** 按用户名查账号；不存在返回 null。依赖 sync_users.username 唯一索引。 */
     async getUserByUsername(username) {
-      const res = await col(COLLECTION_USERS).where({ username }).limit(1).get();
-      const docs = (res && res.data) || [];
-      return docs.length ? docs[0] : null;
+      const { data, error } = await tableOf(pg, TABLE_USERS)
+        .select('id, username, pw_hash, created_at')
+        .eq('username', username)
+        .limit(1)
+        .maybeSingle();
+      if (error) raise(error, 'getUserByUsername 失败');
+      return data || null;
     },
 
     /**
-     * 建账号。用 user_id 本身当 ``_id``，天然带上主键索引。
+     * 建账号（user_id 即表主键）。
      * @param {{id:string, username:string, pw_hash:string, created_at:string}} user
      */
     async createUser(user) {
-      await col(COLLECTION_USERS).doc(user.id).set(user);
+      const { error } = await tableOf(pg, TABLE_USERS).insert({
+        id: user.id,
+        username: user.username,
+        pw_hash: user.pw_hash,
+        created_at: user.created_at,
+      });
+      if (error) raise(error, 'createUser 失败');
       return user;
     },
 
-    /** 落一条会话令牌。用明文令牌当 ``_id``，查询走主键索引。 */
+    /** 落一条会话令牌（明文令牌即表主键，查询走主键索引）。 */
     async createToken(token, userId, createdAt) {
-      await col(COLLECTION_TOKENS).doc(token).set({
+      const { error } = await tableOf(pg, TABLE_TOKENS).insert({
         token,
         user_id: userId,
         created_at: createdAt,
       });
+      if (error) raise(error, 'createToken 失败');
       return token;
     },
 
     /** 令牌 → 归属 user_id；无效令牌返回 null。 */
     async resolveToken(token) {
-      const doc = pickDoc(await col(COLLECTION_TOKENS).doc(token).get());
-      return doc ? doc.user_id : null;
+      const { data, error } = await tableOf(pg, TABLE_TOKENS)
+        .select('token, user_id')
+        .eq('token', token)
+        .limit(1)
+        .maybeSingle();
+      if (error) raise(error, 'resolveToken 失败');
+      return data ? data.user_id : null;
     },
 
     // ---------------- 同步数据 ----------------
 
     /**
-     * 批量 upsert：以 (owner_id, entity_table, entity_id) 为键，``doc().set()``
-     * 在 CloudBase 里是「存在则整篇覆盖、不存在则新建」，等价于 D1 的
-     * ``INSERT OR REPLACE``。
+     * 批量 upsert：以 (owner_id, entity_table, entity_id) 为键覆盖最新态。
      *
-     * 注意 payload 一律以 ``payload_json`` 字符串落库（与 CF 版一致），不直接存对象：
-     * 文档型数据库的字段名有字符集限制，App 端 payload 的键不可控，字符串化最稳。
+     * 底层是 PostgREST 的 ``INSERT ... ON CONFLICT (owner_id, entity_table,
+     * entity_id) DO UPDATE SET device_id/op/payload_json/base_version/
+     * updated_at/deleted_at/server_time = excluded.*``，与 CF 版 D1 的
+     * ``INSERT OR REPLACE`` 等价：整行按本次 push 的内容覆盖（LWW 已在
+     * App 端完成，服务端不比较 base_version，直接写新值）。
+     *
+     * 按块切分（默认 100 条/块，CB_PUSH_CHUNK 可调）只为控制单次请求体
+     * 大小，语义上仍是「一条 upsert 语句批量处理一块」。
+     *
+     * payload 一律以 ``payload_json`` 字符串落库（与 CF 版一致）：PG 的
+     * text 列同样不关心 JSON 结构，字符串化最稳。
      */
     async upsertEnvelopes(ownerId, envelopes, serverTime) {
-      const envelopeCol = col(COLLECTION_ENVELOPES);
-      await mapWithConcurrency(envelopes, writeConcurrencyFromEnv(), async (e) => {
-        const doc = {
-          owner_id: ownerId,
-          entity_table: e.entity_table,
-          entity_id: e.entity_id,
-          device_id: e.device_id,
-          op: e.op,
-          payload_json: e.payload == null ? null : JSON.stringify(e.payload),
-          base_version: parseInt(e.base_version, 10) || 0,
-          updated_at: e.updated_at == null ? null : e.updated_at,
-          deleted_at: e.deleted_at == null ? null : e.deleted_at,
-          server_time: serverTime,
-        };
-        await envelopeCol
-          .doc(envelopeDocId(ownerId, e.entity_table, e.entity_id))
-          .set(doc);
-      });
+      const rows = envelopes.map((e) => ({
+        owner_id: ownerId,
+        entity_table: e.entity_table,
+        entity_id: e.entity_id,
+        device_id: e.device_id,
+        op: e.op,
+        payload_json: e.payload == null ? null : JSON.stringify(e.payload),
+        base_version: parseInt(e.base_version, 10) || 0,
+        updated_at: e.updated_at == null ? null : e.updated_at,
+        deleted_at: e.deleted_at == null ? null : e.deleted_at,
+        server_time: serverTime,
+      }));
+
+      const chunkSize = pushChunkFromEnv();
+      for (let i = 0; i < rows.length; i += chunkSize) {
+        const { error } = await tableOf(pg, TABLE_ENVELOPES)
+          .upsert(rows.slice(i, i + chunkSize), { onConflict: ENVELOPE_CONFLICT_COLS });
+        if (error) raise(error, `upsertEnvelopes 失败（第 ${i / chunkSize + 1} 块）`);
+      }
+      return rows.length;
     },
 
     /**
      * 按 server_time 升序取出 owner 名下 since 之后的全部 envelope；
      * since 为空取全量。内部按页循环取回全部结果。
+     *
+     * 三级排序 ``server_time + entity_table + entity_id``：同一批 push 的
+     * server_time 完全相同，只按时间排会让分页边界不确定（PG 不保证同值
+     * 行的稳定序），加上主键后两列兜底，翻页不重不漏（文档型旧版用
+     * server_time + _id 二级排序，PG 版主键本身就是三列，取其后两列）。
      */
     async pullSince(ownerId, since) {
-      const _ = database.command;
-      const condition = since
-        ? { owner_id: ownerId, server_time: _.gt(since) }
-        : { owner_id: ownerId };
-
+      const cols =
+        'owner_id, entity_table, entity_id, device_id, op, payload_json, ' +
+        'base_version, updated_at, deleted_at';
       const pageSize = pageSizeFromEnv();
       const out = [];
-      for (let skip = 0; ; skip += pageSize) {
-        const res = await col(COLLECTION_ENVELOPES)
-          .where(condition)
-          .orderBy('server_time', 'asc')
-          .orderBy('_id', 'asc')
-          .skip(skip)
-          .limit(pageSize)
-          .get();
-        const rows = (res && res.data) || [];
+      for (let offset = 0; ; offset += pageSize) {
+        let q = tableOf(pg, TABLE_ENVELOPES)
+          .select(cols)
+          .eq('owner_id', ownerId)
+          .order('server_time', { ascending: true })
+          .order('entity_table', { ascending: true })
+          .order('entity_id', { ascending: true })
+          .range(offset, offset + pageSize - 1);
+        if (since) q = q.gt('server_time', since);
+        const { data, error } = await q;
+        if (error) raise(error, 'pullSince 失败');
+        const rows = data || [];
         out.push(...rows);
         if (rows.length < pageSize) break;
       }
       return out;
     },
 
-    /** owner 名下 envelope 总数（manifest）。 */
+    /** owner 名下 envelope 总数（manifest）。head+exact 底层是 COUNT(*)。 */
     async countEnvelopes(ownerId) {
-      const res = await col(COLLECTION_ENVELOPES).where({ owner_id: ownerId }).count();
-      const total = res && res.total;
-      return typeof total === 'number' ? total : 0;
+      const { count, error } = await tableOf(pg, TABLE_ENVELOPES)
+        .select('*', { count: 'exact', head: true })
+        .eq('owner_id', ownerId);
+      if (error) raise(error, 'countEnvelopes 失败');
+      return typeof count === 'number' ? count : 0;
     },
   };
 }
 
 module.exports = {
   createStore,
-  envelopeDocId,
-  escapeKeySegment,
-  COLLECTION_ENVELOPES,
-  COLLECTION_USERS,
-  COLLECTION_TOKENS,
+  TABLE_ENVELOPES,
+  TABLE_USERS,
+  TABLE_TOKENS,
+  ENVELOPE_CONFLICT_COLS,
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,
+  DEFAULT_PUSH_CHUNK,
+  MAX_PUSH_CHUNK,
 };

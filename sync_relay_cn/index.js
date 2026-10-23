@@ -1,9 +1,13 @@
 /**
- * AIMindTree 同步中继 · 腾讯云开发 CloudBase 版（云函数 + HTTP 访问服务 + 云数据库）。
+ * AIMindTree 同步中继 · 腾讯云开发 CloudBase 版（云函数 + HTTP 访问服务 + PostgreSQL）。
  *
  * 这是 ``sync_relay_cf/worker.js``（Cloudflare Worker + D1）的等价实现，原因：
  * Cloudflare 的 IP 段在中国大陆被 TCP 层阻断，CF 版实测连不上；CloudBase 国内直连。
  * **HTTP 契约逐字兼容 CF 版，App 端零改动**，只需把「同步服务器地址」换成新域名。
+ *
+ * ⚠️ 数据层注意：目标 CloudBase 环境是 **PostgreSQL** 环境（不是文档型 NoSQL），
+ * 文档型 API 在该环境直接报错。本版数据层（``db.js``）走 ``app.rdb()``
+ * （PostgREST 客户端），选型查证过程见 README「数据层选型」一节。
  *
  * 契约（与 App 端 HttpSyncApi / SyncAccountApi 对齐）：
  * - ``GET  /``                   → ``{ok, service, version}``（健康检查，CF 版此处是 404）
@@ -283,17 +287,17 @@ async function handleLogin(store, event) {
 
 // ---------------- 同步（按 owner_id 隔离） ----------------
 
-/** 把 envelope 文档还原成 App 端 SyncEnvelope 结构（payload 反序列化）。 */
-function docToEnvelope(doc) {
+/** 把 PG 行还原成 App 端 SyncEnvelope 结构（payload 反序列化）。 */
+function rowToEnvelope(r) {
   return {
-    device_id: doc.device_id,
-    entity_table: doc.entity_table,
-    entity_id: doc.entity_id,
-    op: doc.op,
-    payload: doc.payload_json ? JSON.parse(doc.payload_json) : null,
-    base_version: doc.base_version,
-    updated_at: doc.updated_at,
-    deleted_at: doc.deleted_at,
+    device_id: r.device_id,
+    entity_table: r.entity_table,
+    entity_id: r.entity_id,
+    op: r.op,
+    payload: r.payload_json ? JSON.parse(r.payload_json) : null,
+    base_version: r.base_version,
+    updated_at: r.updated_at,
+    deleted_at: r.deleted_at,
   };
 }
 
@@ -321,8 +325,8 @@ async function handlePull(store, event, ownerId) {
   if (!body) return respond({ error: 'invalid json' }, 400);
 
   const since = body.since ? body.since : null;
-  const docs = await store.pullSince(ownerId, since);
-  return respond({ envelopes: docs.map(docToEnvelope), server_time: nowIso() });
+  const rows = await store.pullSince(ownerId, since);
+  return respond({ envelopes: rows.map(rowToEnvelope), server_time: nowIso() });
 }
 
 async function handleManifest(store, ownerId) {
@@ -334,11 +338,11 @@ async function handleManifest(store, ownerId) {
 let cachedStore = null;
 
 /**
- * 由数据库句柄合成业务 store：``db.js`` 的数据层 + 本文件内的令牌签发函数。
- * 抽出来是为了让本地自测能用同一个入口，只是把手柄换成内存 mock。
+ * 由 PostgreSQL 客户端合成业务 store：``db.js`` 的数据层 + 本文件内的令牌签发函数。
+ * 抽出来是为了让本地自测能用同一个入口，只是把客户端换成内存 mock。
  */
-function makeStore(database) {
-  const data = createStore(database);
+function makeStore(pg) {
+  const data = createStore(pg);
   return Object.assign({}, data, {
     /** 签发新会话令牌并落库，返回明文令牌。 */
     issueUserToken: async (userId) => await data.createToken(newToken(), userId, nowIso()),
@@ -346,12 +350,15 @@ function makeStore(database) {
 }
 
 /**
- * 懒加载 SDK 并拿到数据层。
+ * 懒加载 SDK 并拿到数据层（PostgreSQL 客户端）。
  *
  * CloudBase 云函数运行时会自动注入当前环境信息：可以用 ``tcb.SYMBOL_CURRENT_ENV``
  * 让 init() 取「当前函数所在环境」，也可以读环境变量 ``process.env.TCB_ENV``。
  * 这里优先 TCB_ENV（便于同一份代码在多环境显式切换），退回 SYMBOL_CURRENT_ENV。
  * 云函数内调用不需要 secretId / secretKey。
+ *
+ * 注意是 ``rdb()`` 而不是 ``database()``：后者是文档型（NoSQL）数据库入口，
+ * 在 PostgreSQL 环境会直接报错；前者才是 PG 的 PostgREST 客户端。
  */
 function getStore() {
   if (!cachedStore) {
@@ -360,7 +367,14 @@ function getStore() {
     const opts = {};
     if (process.env.TCB_ENV) opts.env = process.env.TCB_ENV;
     else if (tcb.SYMBOL_CURRENT_ENV) opts.env = tcb.SYMBOL_CURRENT_ENV;
-    cachedStore = makeStore(tcb.init(opts).database());
+    const app = tcb.init(opts);
+    if (typeof app.rdb !== 'function') {
+      throw new Error(
+        '当前 @cloudbase/node-sdk 不支持 rdb()（PostgreSQL 客户端），' +
+          '请升级到 ^3.18.7 或更高版本'
+      );
+    }
+    cachedStore = makeStore(app.rdb());
   }
   return cachedStore;
 }
