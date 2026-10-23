@@ -3,12 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "AIMindTree 同步中继 · Vercel Serverless Functions + KV 版（HTTP 契约兼容 sync_relay_cf / sync_relay_cn，App 端零改动）",
+  "description": "AIMindTree 同步中继 · Vercel Serverless Functions + Upstash Redis 版（HTTP 契约兼容 sync_relay_cf / sync_relay_cn，App 端零改动）",
   "scripts": {
     "test": "node test_protocol.mjs"
   },
   "dependencies": {
-    "@vercel/kv": "^2.0.0"
+    "@upstash/redis": "^1.34.0"
   },
   "engines": {
     "node": ">=18"

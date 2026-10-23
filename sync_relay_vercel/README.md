@@ -1,7 +1,11 @@
 # AIMindTree 同步中继 · Vercel 版
 
-把 AIMindTree 的多端同步中继部署到 **Vercel Serverless Functions + Vercel KV
-（Upstash Redis）**。
+把 AIMindTree 的多端同步中继部署到 **Vercel Serverless Functions + Upstash Redis**。
+
+> ⚠️ **2026-10-24**：Vercel KV 产品已下线（`@vercel/kv` 弃用，官方确认产品不存在），
+> 控制台 Storage 里已无 KV 选项。本仓库代码已从 `@vercel/kv` 迁到 `@upstash/redis`
+> （Redis 命令 API 完全一致，只换 import 与环境变量名），数据库从
+> **Integrations → Marketplace → Upstash Redis** 或 upstash.com 获取。
 
 ## 为什么要再做一个版本
 
@@ -10,10 +14,10 @@
 | 版本 | 目录 | 状态 |
 |------|------|------|
 | Cloudflare Worker + D1 | `sync_relay_cf/` | 权威契约；**实测在中国大陆连不上**（IP 段层阻断） |
-| 腾讯云 CloudBase 云函数 | `sync_relay_cn/` | 国内直连可达，已交付 |
-| **Vercel Functions + KV（本版）** | `sync_relay_vercel/` | 免费额度、部署最简单（纯 Web 控制台），作为第三个可选后端 |
+| 腾讯云 CloudBase 云函数 | `sync_relay_cn/` | 国内直连可达，**已跑通全链路**（register/push/pull/login） |
+| **Vercel Functions + Upstash Redis（本版）** | `sync_relay_vercel/` | 免费额度、部署最简单，作为第三个可选后端；**海外域名，国内可达性不稳定** |
 
-选 Vercel KV 而不是别的存储，是因为 Redis 的 **ZSET 天然适合「按时间游标增量拉取」**
+选 Redis 而不是别的存储，是因为 **ZSET 天生适合「按时间游标增量拉取」**
 这种 KV 语义（见下面「数据在 Redis 里长什么样」）。
 
 > **数据从此存在 Vercel / Upstash 上**，而不是你自己的机器。笔记内容是明文存进去的
@@ -101,9 +105,14 @@ node test_protocol.mjs
 **没有执行 `npm i` 也能跑**：核心用例（66 条）不依赖 `@vercel/kv` 真实包，
 入口级用例会自动跳过并提示。
 
-## 部署步骤（手把手，全程浏览器操作）
+## 部署步骤（手把手）
 
 > 不需要买服务器，全程约 10 分钟。个人双端同步用量在免费额度内。
+>
+> ⚠️ **2026-10-24 更新**：Vercel KV 产品已下线（`@vercel/kv` 弃用，官方确认产品不存在），
+> 控制台 **Storage → Create Database 里已经没有 KV 选项**。本仓库代码已迁移到
+> `@upstash/redis`（Redis 命令 API 与 `@vercel/kv` 完全一致，只是换 import 和环境变量名），
+> 数据库改从 **Integrations → Marketplace → Upstash Redis** 装。
 
 ### 1. 注册 / 登录 Vercel
 
@@ -116,25 +125,33 @@ node test_protocol.mjs
 3. **Root Directory 选 `sync_relay_vercel`**（重要：这个目录才是 Vercel 项目根，
    里面有 `package.json` 和 `api/`）。
 4. Framework Preset 选 **Other**（没有框架，就是几个 Serverless Functions）。
-5. 先**不要**点 Deploy——下一步建 KV 更省事（先部署也能后绑，见第 4 步）。
+5. 先**不要**点 Deploy——下一步建数据库更省事（先部署也能后绑，见第 4 步）。
 
-### 3. 创建 KV 数据库并绑定（不绑服务起不来）
+### 3. 建 Upstash Redis 数据库并绑定（不绑服务起不来）
 
-1. 顶部切到 **Storage** 标签 → **Create Database** → 选 **KV**（Upstash Redis）。
-2. 起个名（如 `aimindtree-sync`），地域选离你近的（如 `Singapore` / `Tokyo`，
-   国内访问 `Singapore` 通常好些），创建。
-3. 创建后在 KV 详情页点 **Connect**（或项目页 Storage 里 **Connect Project**），
-   选中第 2 步的项目，确认绑定。
-4. 绑定后平台会**自动注入**环境变量 `KV_REST_API_URL` / `KV_REST_API_TOKEN`，
-   代码里不需要填任何密钥。到项目 **Settings → Environment Variables** 能看到这两个
-   变量即算绑好。
+**方式 A：Vercel Marketplace（推荐，环境变量自动注入）**
+
+1. 项目页 → **Integrations** → **Marketplace** → 搜 **Upstash Redis** → **Add**。
+2. 选中第 2 步建的项目，按提示创建数据库（地域选离你近的，如 `Singapore` / `Tokyo`，
+   国内访问 `Singapore` 通常好些）。
+3. 绑定后环境变量会**自动注入**。Vercel 侧注入的变量名沿用旧称
+   `KV_REST_API_URL` / `KV_REST_API_TOKEN`——代码里两套名字都认，无需改任何东西。
+   到项目 **Settings → Environment Variables** 看到变量即算绑好。
+
+**方式 B：upstash.com 直建，手填环境变量**
+
+1. 打开 https://console.upstash.com/ 注册，**Create Database**（选 Redis，
+   Regional、就近地域；免费额度 500K 命令/月 + 256MB，个人同步够用）。
+2. 在数据库详情页拿到 **REST API** 的 `UPSTASH_REDIS_REST_URL` 和 `UPSTASH_REDIS_REST_TOKEN`。
+3. 回 Vercel 项目 **Settings → Environment Variables**，把这两个变量加进去
+   （Environment 选 **Production**，可顺手把 Preview / Development 也勾上）。
 
 ### 4. 部署
 
 回到项目页点 **Deploy**。等一两分钟出现 `Ready` 后拿到域名，形如
 `https://aimindtree-sync-relay-xxx.vercel.app`。
 
-> 部署时没绑 KV 也不会报错，但服务不可用——见下一步怎么判断。
+> 部署时没绑数据库也不会报错，但服务不可用——见下一步怎么判断。
 
 ### 5. 先验证，再填进 App
 
@@ -150,8 +167,8 @@ curl https://<你的域名>.vercel.app/
 {"ok":true,"service":"aimindtree-sync-relay","version":"1.0.0"}
 ```
 
-**如果返回 `503` 且 `{"ok":false, ..., "error":"KV 未绑定：..."}`**，说明 KV 没绑好：
-回第 3 步把 KV 连到项目，然后在项目页 **Deployments → 最新部署 → Redeploy**
+**如果返回 `503` 且 `{"ok":false, ..., "error":"Redis 未配置：Vercel KV 产品已下线..."}`**，
+说明数据库没配好：回第 3 步绑好，然后在项目页 **Deployments → 最新部署 → Redeploy**
 （环境变量变更需要重新部署才生效）。看到 `{"ok":true,...}` 再往下走。
 
 顺手验一下注册（把地址换成你自己的）：
@@ -169,14 +186,26 @@ curl -X POST https://<你的域名>.vercel.app/auth/register \
 设置页 → 同步 → 「同步服务器地址」，填上面拿到的域名（**不带结尾斜杠**），
 然后用 App 里的账号密码注册/登录，正常上传下载即可。
 
-> 也可以先用命令行部署（可选）：装 `npm i -g vercel`，在 `sync_relay_vercel/` 里
-> 跑 `vercel` 按提示绑定项目，KV 仍在控制台 Storage 里建并 Connect。
+### 7. 命令行部署（可选）
+
+装好 CLI 后，在 `sync_relay_vercel/` 目录里：
+
+```bash
+npm i -g vercel
+vercel login                      # 浏览器授权
+vercel link --project aimindtree-sync-relay
+vercel deploy --prod --yes        # 生产部署
+```
+
+> 注意：`vercel link` 会在目录下生成 `.vercel/project.json`（只含 projectId/orgId，
+> 不含密钥），已加进 `.gitignore`。
 
 ## 环境变量
 
 | 变量 | 来源 | 说明 |
 |------|------|------|
-| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | 绑定 KV 后平台自动注入 | 必填；缺失时服务返回 503 + 可读指引 |
+| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | upstash.com 直建后手填，或 Marketplace 集成注入 | 必填；缺失时服务返回 503 + 可读指引 |
+| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | Vercel Marketplace 装 Upstash 集成时自动注入（旧名，代码兼容） | 同上，任一整套齐备即可 |
 | `SYNC_PULL_PAGE_SIZE` | 可选，默认 100 | 单次 `zrange` 分页大小（pull 循环翻页取全量） |
 | `SYNC_WRITE_CHUNK` | 可选，默认 100 | 单个 `multi()` 事务写入的 envelope 条数 |
 
@@ -186,17 +215,16 @@ curl -X POST https://<你的域名>.vercel.app/auth/register \
 
 ## 费用与免责
 
-- Vercel **Hobby（免费版）**即可运行；Vercel KV 由 Upstash 提供，有免费额度
-  （存储容量 + 每月命令数，个人双端同步每天几十次调用，远低于限额）。
-  **具体数字以官方为准**：https://vercel.com/docs/storage/vercel-kv 、
-  https://upstash.com/pricing 。超出免费额度会产生费用，建议在 Vercel /
-  Upstash 控制台配费用告警。
+- Vercel **Hobby（免费版）**即可运行；数据库用 Upstash Redis，有免费额度
+  （免费档约 500K 命令/月 + 256MB 存储，个人双端同步每天几十次调用，远低于限额）。
+  **具体数字以官方为准**：https://upstash.com/pricing 。超出免费额度会产生费用，
+  建议在 Vercel / Upstash 控制台配费用告警。
 - **`*.vercel.app` 域名在中国大陆的可达性不稳定**：这是事实，不是配置问题——
   部分地区/运营商会超时或被重置，与 Cloudflare 版被阻断同源。如果实测连不上，
   请改用 `sync_relay_cn`（腾讯云 CloudBase，国内直连）或本地 `llm_server` 方案；
   也可以给 Vercel 项目绑自己的域名（需备案）改善可达性。
-- **数据存放在 Vercel / Upstash 的 Redis 上**，明文存储，无自动过期。
-  长期不用建议在 KV 控制台直接删数据（或删整个数据库）。
+- **数据存放在 Upstash 的 Redis 上**，明文存储，无自动过期。
+  长期不用建议在 Upstash 控制台直接删数据（或删整个数据库）。
 - 本中继没有任何删除接口，账号密码忘记即无法恢复数据。
 
 ## 已知与 CF 版的差异
@@ -204,7 +232,7 @@ curl -X POST https://<你的域名>.vercel.app/auth/register \
 | 项 | CF 版（worker.js） | 本版 |
 |----|-------------------|------|
 | `GET /` | 404 | **200 + 服务标识**（App「测试连接」需要） |
-| 存储 | D1（SQLite） | Vercel KV（Upstash Redis）：HASH 存文档 + ZSET 存时间游标 |
+| 存储 | D1（SQLite） | Upstash Redis（原 Vercel KV，产品已下线）：HASH 存文档 + ZSET 存时间游标 |
 | 增量游标 | SQL `server_time > since`（字符串比较） | ZSET score 开区间 `(sinceMs +inf`（毫秒数比较）。语义等价：`server_time` 恒为 ISO 8601 UTC，字符串比较与毫秒比较同序 |
 | 批量 push 原子性 | D1 `batch()` 单事务 | 按块 `multi()` 事务（默认 100 条/块）。块间非原子，中途失败前几块已生效——App 侧 push 是幂等 upsert，重推同一批即收敛 |
 | 重名注册 | 唯一索引兜底 | 「先查后插」+ `HSETNX` 原子占位（等价唯一索引） |
@@ -218,9 +246,9 @@ curl -X POST https://<你的域名>.vercel.app/auth/register \
 
 | 文件 | 作用 |
 |------|------|
-| `api/[[...path]].js` | Vercel 入口（catch-all 函数）：Web `Request` → core → `Response`；KV 未绑定时返回可读 503 |
+| `api/[[...path]].js` | Vercel 入口（catch-all 函数）：Web `Request` → core → `Response`；数据库未配置时返回可读 503 |
 | `core.js` | 平台无关的路由 / 账号 / 同步逻辑（输入 `{method, path, headers, body}`，输出 `{status, headers, body}`） |
-| `db.js` | 数据访问薄适配层（所有 Redis 调用都收敛在这里；不 import `@vercel/kv`，客户端由调用方注入） |
+| `db.js` | 数据访问薄适配层（所有 Redis 调用都收敛在这里；不 import 任何 Redis 客户端，客户端由调用方注入） |
 | `test_protocol.mjs` | 本地冒烟测试（内存 Redis mock，不联网） |
-| `package.json` | 依赖：仅 `@vercel/kv` |
+| `package.json` | 依赖：仅 `@upstash/redis` |
 | `vercel.json` | 函数 `maxDuration: 30` |

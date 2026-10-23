@@ -2,9 +2,9 @@
  * 同步中继数据访问适配层（Vercel KV · Upstash Redis）。
  *
  * 这一层刻意做得很薄：整个服务只有这里会碰 Redis 客户端，账号、路由、密码散列都在
- * ``core.js`` 里。**本文件不 import ``@vercel/kv``**——客户端由调用方注入
- * （``api/[[...path]].js`` 注入真实的 ``kv``，本地自测注入内存 mock），因此
- * ``node test_protocol.mjs`` 不需要安装任何依赖、不联网、不需要 Vercel 账号。
+ * ``core.js`` 里。**本文件不 import 任何 Redis 客户端包**——客户端由调用方注入
+ * （``api/[[...path]].js`` 注入真实的 Upstash 客户端，本地自测注入内存 mock），
+ * 因此 ``node test_protocol.mjs`` 不需要安装任何依赖、不联网、不需要 Vercel 账号。
  *
  * 数据模型（与 CF 版 schema.sql 的三张表一一对应）：
  *
@@ -99,9 +99,22 @@ function memberKey(entityTable, entityId) {
  * KV 环境变量是否就绪（Vercel 绑定 KV 数据库后会自动注入这两个变量）。
  * 没绑定时由入口返回可读的 503，而不是抛 ``@vercel/kv`` 那句看不懂的异常。
  */
+/**
+ * 环境变量是否齐备。
+ *
+ * Vercel KV 产品已下线，`@vercel/kv` 弃用，迁移到 `@upstash/redis`。两套变量名
+ * 都认：走 Vercel Marketplace 装 Upstash 集成注入的是旧名 KV_REST_API_*，
+ * 手动配置 / upstash.com 直建用的是 UPSTASH_REDIS_REST_*。
+ */
 export function isConfigured() {
-  const url = process.env.KV_REST_API_URL || process.env.KV_URL;
-  const token = process.env.KV_REST_API_TOKEN || process.env.KV_API_TOKEN;
+  const url =
+    process.env.UPSTASH_REDIS_REST_URL ||
+    process.env.KV_REST_API_URL ||
+    process.env.KV_URL;
+  const token =
+    process.env.UPSTASH_REDIS_REST_TOKEN ||
+    process.env.KV_REST_API_TOKEN ||
+    process.env.KV_API_TOKEN;
   return Boolean(url && token);
 }
 
@@ -110,12 +123,12 @@ export function isConfigured() {
 /**
  * 由 Redis 客户端合成业务 store。
  *
- * @param {object} client 注入的客户端（``@vercel/kv`` 的 ``kv`` 或等价 mock），
+ * @param {object} client 注入的客户端（``@upstash/redis`` 的 Redis 实例或等价 mock），
  *   需实现：hget / hset / hsetnx / hmget / zadd / zrange / zcard / multi()。
  */
 export function createStore(client) {
   if (!client) {
-    throw new Error('createStore 需要一个 Redis 客户端（入口传 @vercel/kv 的 kv，自测传内存 mock）');
+    throw new Error('createStore 需要一个 Redis 客户端（入口传 @upstash/redis 实例，自测传内存 mock）');
   }
 
   return {
