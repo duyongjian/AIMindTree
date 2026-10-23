@@ -71,6 +71,16 @@ const int kPushBatchBudgetBytes = 4 * 1024 * 1024;
 /// warning 日志，避免一条畸形巨包把整个 outbox 队列永久堵住。
 const int kMaxEnvelopeBytes = 6 * 1024 * 1024;
 
+/// 全量快照（[SyncEngine.pushAll]）**单批条数上限**（200）。
+///
+/// 字节预算（4MB）单独不足以保护远端：一行 payload 平均只有 ~1KB 时，
+/// 4MB 能塞进约 4000 条 envelope，而远端 `handlePush` 是一次性
+/// `env.DB.batch(batch)` 提交，D1 的 batch 语句数有上限 → 整批 500。
+///
+/// 200 条的取舍：200 × ~1KB ≈ 200KB，远低于 4MB 预算且给 D1 留足余量；
+/// 万一失败也只丢一小批，重试成本低。
+const int kSnapshotMaxBatchCount = 200;
+
 /// 推送结果。
 class PushReport {
   const PushReport({
@@ -259,12 +269,24 @@ SyncEngine({
   /// （envelope 是原子的），也不会把后面的小 envelope 一起拖下水。
   ///
   /// 泛型化是为了让「增量 push」与「全量快照 pushAll」共用同一套切批口径。
-  static List<List<T>> _splitBatches<T extends _ByteSized>(List<T> entries) {
+  /// [maxCount] 是可选的**条数**上限（0 = 不限，保持 `push()` 的原语义）。
+  ///
+  /// 为什么需要条数上限：远端 `handlePush` 把这个数组整个展开成一次
+  /// `env.DB.batch(batch)` 提交，而 D1 的 batch 有语句数上限。一行 payload
+  /// 平均 ~1KB 时，4MB 预算能塞进约 4000 条 → 整批 500，用户看到的是
+  /// 「上传失败」而不是「慢」。全量快照（[kSnapshotMaxBatchCount] = 200）
+  /// 必须同时受条数与字节双重约束；增量 `push()` 本来就有 `limit` 保护。
+  static List<List<T>> _splitBatches<T extends _ByteSized>(
+    List<T> entries, {
+    int maxCount = 0,
+  }) {
     final batches = <List<T>>[];
     var current = <T>[];
     var currentBytes = 0;
     for (final e in entries) {
-      if (current.isNotEmpty && currentBytes + e.bytes > kPushBatchBudgetBytes) {
+      final overBudget = currentBytes + e.bytes > kPushBatchBudgetBytes;
+      final overCount = maxCount > 0 && current.length >= maxCount;
+      if (current.isNotEmpty && (overBudget || overCount)) {
         batches.add(current);
         current = <T>[];
         currentBytes = 0;
@@ -309,7 +331,10 @@ SyncEngine({
 
     Future<void> flush() async {
       if (buffer.isEmpty) return;
-      final batches = _splitBatches<_SnapshotEntry>(buffer);
+      final batches = _splitBatches<_SnapshotEntry>(
+        buffer,
+        maxCount: kSnapshotMaxBatchCount,
+      );
       buffer.clear();
       bufferBytes = 0;
       for (final batch in batches) {

@@ -275,6 +275,40 @@ void main() {
       expect(ids.toSet(), <String>{for (var i = 1; i <= 7; i++) 'kp-$i'});
     });
 
+    test('单批条数上限 200：450 行小数据切成 ≥3 批，每批 ≤200 条', () async {
+      // 一行 payload ~几百字节 → 字节预算（4MB）根本拦不住，只有条数上限
+      // 能防止「一个批次 450 条」整包打到远端。远端 handlePush 是把数组
+      // 整个展开成一次 `env.DB.batch(...)`，D1 batch 有语句数上限，超了
+      // 整批 500 → 用户看到「上传失败」。
+      for (var i = 0; i < 450; i++) {
+        await db.into(db.knowledgePoints).insert(KnowledgePointsCompanion(
+              id: Value('bulk-$i'),
+              name: Value('k'),
+              type: const Value('concept'),
+              sourceNoteId: const Value(''),
+              sourceStart: const Value(0),
+              sourceEnd: const Value(0),
+              sourceQuote: const Value(''),
+              updatedAt: Value(DateTime.utc(2026, 1, 1)),
+              version: const Value(1),
+              deviceId: const Value('local-dev'),
+            ));
+      }
+
+      final report = await engine.pushAll();
+      expect(report.pushed, 450);
+      expect(report.failed, 0);
+
+      // 450 / 200 → 200 + 200 + 50 = 至少 3 批
+      expect(api.pushHistory.length, greaterThanOrEqualTo(3));
+      for (final batch in api.pushHistory) {
+        expect(batch.length, lessThanOrEqualTo(kSnapshotMaxBatchCount));
+      }
+      // 切批不能丢行。
+      final ids = api.pushHistory.expand((b) => b).map((e) => e.entityId).toSet();
+      expect(ids.length, 450);
+    });
+
     test('push() 与 pushAll() 可叠加：增量 + 快照都不重复丢', () async {
       await insertNote('n1');
       await outbox.enqueue(
