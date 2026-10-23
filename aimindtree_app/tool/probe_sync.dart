@@ -3,8 +3,12 @@
 // Purpose: when "sync fails on the desktop build", run this to see where the
 // traffic actually goes. It prints, step by step:
 //   [1] proxy detection  - initSystemProxy() result + *_proxy env vars
-//   [2] direct reachability - canReachDirect(host, 443) i.e. "can we simply
-//       TCP-connect to the sync host?" (true => nothing is rerouted at all)
+//   [2] direct reachability - canReachDirect(host, 443): can we TCP-connect
+//       AND complete a TLS handshake with SNI + certificate validation for
+//       the real hostname? (true => nothing is rerouted at all). TCP-only is
+//       NOT enough: a poisoned resolver often hands out a real foreign IP
+//       whose port 443 accepts TCP happily, so a TCP-only probe would wrongly
+//       report "reachable" and skip the DoH reroute.
 //   [3] system DNS       - what the poisoned local resolver returns
 //   [4] DoH resolution   - what DoH returns for the same host (DoH requests
 //       are forced DIRECT, never via proxy; see doh_resolver.dart)
@@ -53,7 +57,9 @@ Future<void> main() async {
     }
   }
 
-  stdout.writeln('[2] direct reachability (TCP to $kHost:443)...');
+  stdout.writeln(
+    '[2] direct reachability (TCP + TLS handshake to $kHost:443)...',
+  );
   final swProbe = Stopwatch()..start();
   final reachable = await canReachDirect(kHost, 443, kReachabilityProbeTimeout);
   stdout.writeln(

@@ -5,8 +5,9 @@
 /// 为什么是「探测式」而不是「无条件改道」：上一版对 `*.workers.dev` 无条件
 /// 启用 DoH 直连，把本来完全正常的 PC 端（系统 DNS/TCP 无碍）也强制改道，
 /// 一旦 DoH 拿到假 IP 或某个 CF IP 不可达，每条新连接都要先耗尽
-/// [kDirectTotalBudget]（12s）才回退，同步表现为超时/失败。探测（3s TCP
-/// 建连）把「能不能直连」变成显式判据：能连 → 走默认通路，零副作用。
+/// [kDirectTotalBudget]（12s）才回退，同步表现为超时/失败。探测（3s 内
+/// TCP 建连 + TLS 握手 + 证书校验）把「能不能直连」变成显式判据：能连 →
+/// 走默认通路，零副作用。
 ///
 /// 实现说明（与 Dart 3.13 dart:io API 对齐）：
 /// - `SecureSocket.connect(ip, 443, host: 域名)` 的 `host` 命名参数在当前
@@ -40,9 +41,21 @@ const Duration kDirectSocketTimeout = Duration(seconds: 3);
 /// 回退路径（调用方 connectionTimeout 默认 20s）。
 const Duration kDirectTotalBudget = Duration(seconds: 12);
 
-/// 直连可达性探测的预算：一次 TCP 建连，3s 内没连上就认为「不能直连」，
-/// 从而启用 DoH。取值权衡：太短会在弱网下误判（把能直连的 PC 端改道），
-/// 太长会拖慢首连（只在进程内首次探测该 host 时有这个成本）。
+/// 直连可达性探测的预算：一次 **TCP 建连 + TLS 握手（SNI + 证书校验）**，
+/// 每个阶段各自最多 3s（共用这个常量），任一阶段超时就认为「不能直连」，
+/// 从而启用 DoH。
+///
+/// 为什么不再只看 TCP：DNS 投毒常返回一个**真实存在的外网 IP**（实测
+/// 31.13.67.41 就是 Facebook 的地址，443 端口照常接受 TCP），TCP-only 探测
+/// 会误判成「能直连」，于是跳过 DoH 改道、同步照旧失败。要求握手成功且
+/// 证书能验到目标域名，sinkhole / 假 IP 必然失败，判据才成立。
+///
+/// 计时细节：建连与握手各自 `.timeout(timeout)`，即「每一阶段最多 3s」，
+/// 最坏情况下总耗时约 2×timeout（6s），仍远小于 [kDirectTotalBudget]，且
+/// 只在进程内首次探测该 host 时发生一次。
+///
+/// 取值权衡：太短会在弱网下误判（把能直连的 PC 端错误改道到 DoH），
+/// 太长会拖慢首连。
 const Duration kReachabilityProbeTimeout = Duration(seconds: 3);
 
 /// IP 解析器契约（测试可注入假实现）。
@@ -50,26 +63,49 @@ typedef IpResolver = Future<List<String>> Function(String host);
 
 /// 直连可达性探测契约（测试可注入假实现）。
 ///
-/// 返回 true 表示本机可直连 `host:port`；任何异常/超时都应视为 false。
+/// 返回 true 表示本机可直连 `host:port`（默认实现要求 TCP + TLS 握手 +
+/// 证书校验全部通过）；任何异常/超时都应视为 false。
 typedef ReachabilityProbe = Future<bool> Function(
   String host,
   int port,
   Duration timeout,
 );
 
-/// 探测本机能否直连 `host:port`（TCP 建连成功即视为可直连）。
+/// 探测本机能否直连 `host:port`——**必须**完成 TLS 握手且证书校验通过。
 ///
-/// 契约：建连成功 → 销毁 socket 并返回 true；建连失败 / 超时 / DNS 失败 /
-/// 任何异常 → 返回 false（不抛）。
-Future<bool> canReachDirect(String host, int port, Duration timeout) async {
-  Socket? socket;
+/// 判据：TCP 建连 → `SecureSocket.secure(raw, host: host)`（`host` 同时用于
+/// SNI 与证书校验）握手成功 → 销毁 socket 并返回 true；任何一步失败 / 超时
+/// （含 DNS 失败、对端只接受 TCP 却不做 TLS、证书链或域名不匹配）→ 返回
+/// false（不抛）。
+///
+/// 为什么不能只看 TCP：见 [kReachabilityProbeTimeout] 的注释。
+///
+/// [onBadCertificate] 仅供测试注入（让用例能把探测指向本地自签 TLS 服务），
+/// 生产调用点一律不传 —— 不传即走平台真实证书校验。
+Future<bool> canReachDirect(
+  String host,
+  int port,
+  Duration timeout, {
+  bool Function(X509Certificate certificate)? onBadCertificate,
+}) async {
+  Socket? raw;
+  Socket? secure;
   try {
-    socket = await Socket.connect(host, port, timeout: timeout);
+    raw = await Socket.connect(host, port, timeout: timeout);
+    // 复用 DoH 直连路径的握手实现：超时后握手若仍在后台完成，由它负责销毁。
+    secure = await _secureHandshake(
+      raw,
+      host: host,
+      onBadCertificate: onBadCertificate,
+      timeout: timeout,
+    );
+    raw = null; // 所有权已移交 secure
     return true;
   } on Object {
     return false;
   } finally {
-    _destroyQuietly(socket);
+    _destroyQuietly(secure);
+    _destroyQuietly(raw);
   }
 }
 
@@ -121,7 +157,8 @@ bool _needsDoHDirect(String host) =>
 /// - baseUrl 畸形 / host 为空 → 普通 client；
 /// - host 非 `.workers.dev` 结尾，或是回环/私网地址 → 普通 client（不走 DoH）；
 /// - host 命中 `.workers.dev`：**先探测**本机能否直连该 `host:端口`
-///   （[kReachabilityProbeTimeout] 预算）：
+///   （[kReachabilityProbeTimeout] 预算；TCP + TLS 握手 + 证书校验全过才算
+///   可直连）：
 ///   - 能直连（true）→ 直接返回普通 client，**不安装** `connectionFactory`，
 ///     行为 100% 等于改造前（PC 端正常场景就走这条，零改道、零延迟）；
 ///   - 不能直连（false，含探测抛异常）→ 先经 DoH 预解析一次（失败/超时/

@@ -7,7 +7,8 @@
 ///    请求格式（name/type/Accept）；
 /// 3. DoH 请求强制直连：`dohDirectProxy` 恒返回 DIRECT（+ 源码守卫）；
 /// 4. `isPrivateOrLoopbackHost`：回环/私网矩阵；
-/// 5. `canReachDirect`：TCP 可连 → true，不可连 → false（真实本地 socket）；
+/// 5. `canReachDirect`：**TCP + TLS 握手 + 证书校验**全过才算可达（真实本地
+///    socket）；
 /// 6. `createDirectHttpClient` 探测式路由：
 ///    - probe=true → 不安装 connectionFactory（等价改造前）；
 ///    - probe=false → 安装 factories 且 DoH 路径生效；
@@ -81,6 +82,14 @@ ZZjIanbyKNCPfsL1v1uWqz+TncZRS3xPD/13r2lOgB9sWYcLMiCqOREv0MIec7to
 RF4YV5aekDX5WSgyfVXN+s8=
 -----END PRIVATE KEY-----
 ''';
+
+/// 本地 TLS 服务用的自签证书上下文（探测用例与 e2e 链路用例共用）。
+///
+/// 证书 SAN = `e2e.workers.dev` / `*.workers.dev` / `127.0.0.1`，
+/// 不含 `localhost`——「证书不覆盖该域名」的用例靠这一点成立。
+SecurityContext _testSecurityContext() => SecurityContext()
+  ..useCertificateChainBytes(utf8.encode(kTestCertPem))
+  ..usePrivateKeyBytes(utf8.encode(kTestKeyPem));
 
 /// 构造标准双 IP 的 DoH 成功响应体。
 String _okBody({
@@ -422,20 +431,11 @@ void main() {
     });
   });
 
-  group('canReachDirect (real local socket)', () {
-    test('端口可连 → true；端口无监听 → false', () async {
-      final server = await ServerSocket.bind('127.0.0.1', 0);
-      addTearDown(server.close);
-      server.listen((Socket socket) => socket.destroy());
-      expect(
-        await canReachDirect(
-          '127.0.0.1',
-          server.port,
-          const Duration(milliseconds: 500),
-        ),
-        isTrue,
-      );
+  group('canReachDirect (real local socket, 要求 TLS 握手 + 证书校验)', () {
+    /// 探测用例的超时：本地回环，握手成功/失败都很快，2s 足够。
+    const Duration probeTimeout = Duration(seconds: 2);
 
+    test('端口无监听 → false', () async {
       // 取一个刚释放的端口（无人监听）。
       final probe = await ServerSocket.bind('127.0.0.1', 0);
       final closedPort = probe.port;
@@ -446,6 +446,96 @@ void main() {
           closedPort,
           const Duration(milliseconds: 300),
         ),
+        isFalse,
+      );
+    });
+
+    test('只收 TCP 不做 TLS 的假目标 → false（TCP 单向可连不再算可达）', () async {
+      // 这就是「DNS 投毒返回真实外网 IP」的等价场景：31.13.67.41 这类地址
+      // 443 端口照常接受 TCP，TCP-only 探测会误判成可直连 → 跳过 DoH → 同步
+      // 失败。要求握手 + 证书校验后必须判 false。
+      final server = await ServerSocket.bind('127.0.0.1', 0);
+      addTearDown(server.close);
+      server.listen((Socket socket) => socket.destroy()); // 收下连接就断
+
+      expect(
+        await canReachDirect('127.0.0.1', server.port, probeTimeout),
+        isFalse,
+      );
+    });
+
+    test('只收 TCP 但保持沉默（sinkhole 不响应握手）→ false（超时兜底）', () async {
+      final server = await ServerSocket.bind('127.0.0.1', 0);
+      addTearDown(server.close);
+      final held = <Socket>[];
+      addTearDown(() {
+        for (final s in held) {
+          s.destroy();
+        }
+      });
+      server.listen(held.add); // 收下连接，什么都不回
+
+      expect(
+        await canReachDirect(
+          '127.0.0.1',
+          server.port,
+          const Duration(milliseconds: 600),
+        ),
+        isFalse,
+      );
+    });
+
+    test('本地 TLS 服务 + onBadCertificate 放行 → true', () async {
+      final server = await HttpServer.bindSecure(
+        '127.0.0.1',
+        0,
+        _testSecurityContext(),
+      );
+      addTearDown(() => server.close(force: true));
+      server.listen((HttpRequest req) async {
+        req.response.write('ok');
+        await req.response.close();
+      });
+
+      expect(
+        await canReachDirect(
+          '127.0.0.1',
+          server.port,
+          probeTimeout,
+          onBadCertificate: (_) => true,
+        ),
+        isTrue,
+      );
+    });
+
+    test('同一 TLS 服务不给 hook、host 不在证书覆盖范围内 → false（校验真的在跑）', () async {
+      final server = await HttpServer.bindSecure(
+        '127.0.0.1',
+        0,
+        _testSecurityContext(),
+      );
+      addTearDown(() => server.close(force: true));
+      server.listen((HttpRequest req) async {
+        req.response.write('ok');
+        await req.response.close();
+      });
+
+      // 先证明这条路径**确实**能连上本地 TLS 服务（否则下面的 false 可能只是
+      // 连接没建立，起不到校验断言的作用）。
+      expect(
+        await canReachDirect(
+          'localhost',
+          server.port,
+          probeTimeout,
+          onBadCertificate: (_) => true,
+        ),
+        isTrue,
+      );
+
+      // `localhost` 不在证书 SAN 里，且自签证书链本身也不可信——生产环境
+      // 遇到「假 IP」时正是这种双重失败；两条都要求判 false。
+      expect(
+        await canReachDirect('localhost', server.port, probeTimeout),
         isFalse,
       );
     });
@@ -786,10 +876,11 @@ void main() {
         await req.response.close();
       });
 
-      final context = SecurityContext()
-        ..useCertificateChainBytes(utf8.encode(kTestCertPem))
-        ..usePrivateKeyBytes(utf8.encode(kTestKeyPem));
-      tlsServer = await HttpServer.bindSecure('127.0.0.1', 0, context);
+      tlsServer = await HttpServer.bindSecure(
+        '127.0.0.1',
+        0,
+        _testSecurityContext(),
+      );
       tlsPort = tlsServer.port;
       tlsServer.listen((req) async {
         req.response.write('pong');
