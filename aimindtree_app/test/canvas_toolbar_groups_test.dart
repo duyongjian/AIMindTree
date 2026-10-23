@@ -148,7 +148,7 @@ void main() {
       expect(itemEnabled(tester, '删除知识树'), isTrue);
     });
 
-    testWidgets('② 内容导入组：从笔记并入 / 加入已有 / 移除（含框选移除）',
+    testWidgets('② 内容导入组：从笔记并入 / 加入已有 / 从其他知识树加入 / 移除（含框选移除）',
         (tester) async {
       await pumpCanvasWithTree(tester);
 
@@ -156,11 +156,13 @@ void main() {
       expect(labels, <String>[
         '从笔记并入知识点',
         '加入已有知识点',
+        '从其他知识树加入',
         '从知识树移除知识点',
         '移除框选的知识点',
       ]);
       expect(itemEnabled(tester, '从笔记并入知识点'), isTrue);
       expect(itemEnabled(tester, '加入已有知识点'), isTrue);
+      expect(itemEnabled(tester, '从其他知识树加入'), isTrue);
       // 树里有「成员点」→ 移除可用；未开框选模式 → 框选移除禁用。
       expect(itemEnabled(tester, '从知识树移除知识点'), isTrue);
       expect(itemEnabled(tester, '移除框选的知识点'), isFalse);
@@ -249,11 +251,13 @@ void main() {
       expect(labels, <String>[
         '从笔记并入知识点',
         '加入已有知识点',
+        '从其他知识树加入',
         '从知识树移除知识点',
         '移除框选的知识点',
       ]);
       expect(itemEnabled(tester, '从笔记并入知识点'), isFalse);
       expect(itemEnabled(tester, '加入已有知识点'), isFalse);
+      expect(itemEnabled(tester, '从其他知识树加入'), isFalse);
       // 空库：移除类动作同样依赖树，全部禁用。
       expect(itemEnabled(tester, '从知识树移除知识点'), isFalse);
       expect(itemEnabled(tester, '移除框选的知识点'), isFalse);

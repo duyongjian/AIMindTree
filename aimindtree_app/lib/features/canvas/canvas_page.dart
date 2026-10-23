@@ -24,6 +24,7 @@ import '../../ai/extract_into_tree_chain.dart';
 import '../../ai/extraction_service.dart';
 import '../../ai/prereq_depth.dart';
 import '../../canvas/layout_autoplace.dart';
+import '../../canvas/layout_transfer.dart';
 import '../../canvas/render/layout_engine.dart';
 import '../../canvas/render/tree_canvas.dart';
 import '../../core/id.dart';
@@ -701,6 +702,168 @@ class CanvasPageState extends State<CanvasPage> {
           _toast(added == 0 ? '都在树里了' : '已添加 $added 个知识点'),
       (e, _) => _toast('添加失败：$e'),
     );
+    await _loadForTree(tree.id);
+  }
+
+  /// 从其他知识树加入知识点：选源树 → 勾选该树的成员（已在当前树的置灰）→
+  /// 加入当前选中的树。
+  ///
+  /// 落位保留**源树里的相对坐标**（[placeTransferredPointsInTree]），不重新布局；
+  /// 源树内部的连线也无需搬运——画布按全局 `prerequisite_edges` 过滤当前树成员
+  /// 之间的边，两端点进了同一棵树，线会自动出现。
+  Future<void> _copyFromOtherTree() async {
+    final tree = _selectedTree;
+    if (tree == null) return;
+
+    final allTrees = await _treesRepo.listTrees();
+    final sources = allTrees.where((t) => t.id != tree.id).toList();
+    if (!mounted) return;
+    if (sources.isEmpty) {
+      _toast('还没有其他知识树');
+      return;
+    }
+
+    // 1) 选源树。
+    final sourceTree = await showDialog<KnowledgeTree>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('从哪棵树加入？'),
+        children: [
+          for (final t in sources)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, t),
+              child: Text(
+                t.name.isEmpty ? '(未命名)' : t.name,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消', style: TextStyle(color: Colors.grey)),
+          ),
+        ],
+      ),
+    );
+    if (sourceTree == null || !mounted) return;
+
+    // 2) 读源树成员 + 当前树已有成员（用于置灰「已在当前树」）。
+    final sourceIds = await _treesRepo.memberPointIds(sourceTree.id);
+    final existing = (await _treesRepo.memberPointIds(tree.id)).toSet();
+    final points = await _repo.pointsByIds(sourceIds);
+    if (!mounted) return;
+    if (points.isEmpty) {
+      _toast('「${sourceTree.name}」里还没有知识点');
+      return;
+    }
+
+    // 3) 多选对话框（结构参照 [_addKnowledgePoints]）。
+    final selected = <String>{};
+    final query = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        var keyword = '';
+        return StatefulBuilder(
+          builder: (ctx, setSt) {
+            final filtered = points.where((p) {
+              final k = keyword.toLowerCase();
+              return p.name.toLowerCase().contains(k) ||
+                  p.type.label.toLowerCase().contains(k);
+            }).toList();
+            return AlertDialog(
+              title: Text('从《${sourceTree.name}》加入知识点'),
+              content: SizedBox(
+                width: 420,
+                height: 420,
+                child: Column(
+                  children: [
+                    TextField(
+                      controller: query,
+                      decoration: const InputDecoration(
+                        prefixIcon: Icon(Icons.search),
+                        hintText: '搜索知识点名称 / 类型',
+                        isDense: true,
+                      ),
+                      onChanged: (v) => setSt(() => keyword = v.trim()),
+                    ),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: filtered.isEmpty
+                          ? const Center(
+                              child: Text('没有匹配的知识点',
+                                  style: TextStyle(color: Colors.grey)),
+                            )
+                          : ListView.builder(
+                              itemCount: filtered.length,
+                              itemBuilder: (_, i) {
+                                final kp = filtered[i];
+                                final already = existing.contains(kp.id);
+                                return CheckboxListTile(
+                                  dense: true,
+                                  value: already || selected.contains(kp.id),
+                                  // 已在当前树的置灰不可勾选。
+                                  onChanged: already
+                                      ? null
+                                      : (v) => setSt(() {
+                                            if (v == true) {
+                                              selected.add(kp.id);
+                                            } else {
+                                              selected.remove(kp.id);
+                                            }
+                                          }),
+                                  title: Text(kp.name),
+                                  subtitle: Text(
+                                      already ? '已在当前树' : kp.type.label),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('取消'),
+                ),
+                TextButton(
+                  onPressed: selected.isEmpty
+                      ? null
+                      : () => Navigator.pop(ctx, true),
+                  child: const Text('加入'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    query.dispose();
+    if (ok != true || selected.isEmpty || !mounted) return;
+
+    // 4) 先落成员行（幂等），再只对**真正新增**的点按源树相对坐标整块落位。
+    final ids = selected.toList();
+    final newIds = ids.where((id) => !existing.contains(id)).toList();
+    final addRes = await _treesRepo.addPoints(tree.id, ids);
+    if (!mounted) return;
+    if (addRes is Failure<int>) {
+      _toast('加入失败：${addRes.error}');
+      return;
+    }
+    final added = addRes.valueOrNull ?? 0;
+    if (newIds.isNotEmpty) {
+      await placeTransferredPointsInTree(
+        trees: _treesRepo,
+        repo: _repo,
+        sourceTreeId: sourceTree.id,
+        targetTreeId: tree.id,
+        kpIds: newIds,
+      );
+    }
+    if (!mounted) return;
+    _toast('已从「${sourceTree.name}」加入 $added 个知识点');
+    // 跨树加入只新增成员行、不创建知识点：跑 T14 查重纯浪费 LLM 调用，故意不调
+    // kpDedupSchedule（别「补全」）。
     await _loadForTree(tree.id);
   }
 
@@ -2414,7 +2577,8 @@ class CanvasPageState extends State<CanvasPage> {
   /// 工具栏右侧的 4 个分组按钮（由原来一排平铺图标归类而来）：
   ///
   /// 1. **知识树**（实体 CRUD）：新建知识树 / 重命名 / 删除知识树；
-  /// 2. **内容导入（树成员管理）**：从笔记并入知识点 / 加入已有知识点 / 从知识树移除知识点；
+  /// 2. **内容导入（树成员管理）**：从笔记并入知识点 / 加入已有知识点 /
+  ///    从其他知识树加入 / 从知识树移除知识点；
   /// 3. **布局与连线**（布局系列 + 连线系列，用分隔线分开）：
   ///    - 布局系列：重新布局（全量重排）/ 局部重排；
   ///    - 连线系列：自动连线（原「自动布局」，实为 T3 前置连线）/ 局部连线（仅对框选子集连线）；
@@ -2465,6 +2629,12 @@ class CanvasPageState extends State<CanvasPage> {
             label: '加入已有知识点',
             enabled: hasTree,
             onTap: _addKnowledgePoints,
+          ),
+          _toolbarMenuItem(
+            icon: Icons.move_down,
+            label: '从其他知识树加入',
+            enabled: hasTree,
+            onTap: _copyFromOtherTree,
           ),
           const PopupMenuDivider(),
           _toolbarMenuItem(
