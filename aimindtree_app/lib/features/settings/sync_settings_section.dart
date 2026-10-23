@@ -1,21 +1,13 @@
-/// SettingsPage 中的「同步」分区（T03 + 任务 B：系统级字段改管理后台下发）。
+/// SettingsPage 中的「同步」分区。
 ///
-/// 同步为**手动**模式（自动调度已下线）：提供两个独立按钮——
-/// 「上传本地到管理端（push）」与「拉取管理端到本地（pull）」。
-///
-/// 包含：
-/// - Base URL / Token：**由管理后台统一下发**（任务 B）——
-///   - Base URL 有值时只读展示（标注「由管理后台配置」）；无下发值时保留
-///     原手动输入作兜底；
-///   - Token 不再手输，展示「Token 由管理后台配置（本机 SecretStore 保存）」；
-/// - 上传 / 拉取按钮（分别调 SyncEngine.push / SyncEngine.pull）；
-/// - 测试连接按钮；
-/// - 状态显示：上次 push/pull 时间 + 待推条数 + 最近错误。
+/// 精简版 UI：标题「同步」+ 登录卡片（CF 自助注册/登录）+ 四个按钮
+/// （llm_server / CF × 上传 / 拉取）。CF Worker 地址已内置，用户无需填写。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../../core/secret_store.dart';
+import '../../data/sync/http_proxy.dart';
 import '../../data/sync/sync_api.dart';
 import '../../data/sync/sync_account.dart';
 import '../../data/sync/sync_config.dart';
@@ -44,74 +36,27 @@ class SyncSettingsSection extends StatefulWidget {
 }
 
 class _SyncSettingsSectionState extends State<SyncSettingsSection> {
-  late final TextEditingController _url;
-  late final TextEditingController _cfUrl;
   late final TextEditingController _cfUser;
   late final TextEditingController _cfPass;
-  int _pending = 0;
-  int _failed = 0;
-  String _status = 'idle';
 
   @override
   void initState() {
     super.initState();
-    _url = TextEditingController(text: widget.config.baseUrl ?? '');
-    _cfUrl = TextEditingController(text: widget.config.cfUrl ?? '');
     _cfUser = TextEditingController(text: widget.config.cfUsername ?? '');
     _cfPass = TextEditingController();
-    _status = widget.statusStore.status;
-    _refreshCounters();
   }
 
   @override
   void dispose() {
-    _url.dispose();
-    _cfUrl.dispose();
     _cfUser.dispose();
     _cfPass.dispose();
     super.dispose();
   }
 
-  Future<void> _refreshCounters() async {
-    final p = await widget.outbox.pendingCount();
-    final f = await widget.outbox.failedCount();
-    if (!mounted) return;
-    setState(() {
-      _pending = p;
-      _failed = f;
-      _status = widget.statusStore.status;
-    });
-  }
-
-  /// 兜底保存：仅「无下发值」时可手动填 Base URL（任务 B）。
-  /// Token 一律不手输（由管理后台下发，本机 SecretStore 保存）。
-  Future<void> _save() async {
-    final url = _url.text.trim();
-    await widget.config.setBaseUrl(url);
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('同步配置已保存（重启 App 后生效）。')),
-    );
-  }
-
-  Future<void> _saveCf() async {
-    await widget.config.setCfUrl(_cfUrl.text.trim());
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('CF 同步配置已保存（重启 App 后生效）。')),
-    );
-  }
-
   /// 登录/注册 CF 账号（方案 B 多租户）：成功后保存每用户令牌，普通用户无需填共享 token。
   Future<void> _account({required bool register}) async {
-    final url = widget.config.cfUrl?.trim();
-    if (url == null || url.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先填写 CF Worker URL。')),
-      );
-      return;
-    }
+    // 地址内置，用户无需填写（方案 B 已部署的 Worker）。
+    final url = widget.config.cfUrlResolved;
     final username = _cfUser.text.trim();
     final password = _cfPass.text;
     if (username.isEmpty || password.isEmpty) {
@@ -141,6 +86,12 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('${register ? '注册' : '登录'}失败：${e.message}'), backgroundColor: Colors.red),
       );
+    } on Object catch (e) {
+      // 兜底：任何未预期异常都要变成可见提示，不能静默（否则「点了没反应」）。
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${register ? '注册' : '登录'}失败：$e'), backgroundColor: Colors.red),
+      );
     } finally {
       api.close();
     }
@@ -163,8 +114,8 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   /// 复用 [widget.scheduler.engine] 的本地 outbox / deviceId，仅覆盖其 [api]
   /// 指向对应后端。拉取前强制游标归零（dev 期两个后端共用游标，避免漏拉）。
   Future<void> _runSync({required bool toCf, required bool push}) async {
-    final url = toCf ? widget.config.cfUrl : widget.config.llmUrl;
-    if (url == null || url.trim().isEmpty) {
+    final url = toCf ? widget.config.cfUrlResolved : widget.config.llmUrl;
+    if (url.trim().isEmpty) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -201,34 +152,46 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     await widget.statusStore.setStatus('syncing');
     try {
       if (push) {
-        final report = await engine.push(api: api);
+        // 先增量（outbox 里的变更语义，含墓碑），再全量快照（历史存量对齐）。
+        // 只跑增量的话，同步接线之前创建的数据一条都发不出去
+        //（用户实测现象：「提示上传成功，但是 0 条」）。
+        final inc = await engine.push(api: api);
+        final snap = await engine.pushAll(api: api);
+        final total = inc.pushed + snap.pushed;
+        final failed = inc.failed + snap.failed;
         await widget.statusStore.setLastPushAt(DateTime.now().toUtc());
         await widget.statusStore.setStatus('ok');
-        await _refreshCounters();
         if (!mounted) return;
-        final failedNote = report.failed > 0 ? '，失败 ${report.failed} 条' : '';
+        final failedNote = failed > 0 ? '，失败 $failed 条' : '';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('上传完成：推送 ${report.pushed} 条$failedNote'),
-            backgroundColor: report.failed > 0 ? Colors.red : Colors.green,
+            content: Text(
+              '上传完成：增量 ${inc.pushed} 条 + 快照 ${snap.pushed} 条，'
+              '共 $total 条$failedNote',
+            ),
+            backgroundColor: failed > 0 ? Colors.red : Colors.green,
           ),
         );
       } else {
         final report = await engine.pull(api: api);
         await widget.statusStore.setLastPulledAt(report.serverTime);
         await widget.statusStore.setStatus('ok');
-        await _refreshCounters();
         if (!mounted) return;
+        // skipped 也是证据：它 = 「服务端确实存有本机自己上传的行」。
+        // 只报 applied 的话，自己刚传上去的数据拉回来会显示「应用 0 条」，
+        // 让人误以为拉取失败。
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('拉取完成：应用 ${report.applied} 条变更'),
+            content: Text(
+              '拉取完成：应用 ${report.applied} 条变更，'
+              '跳过 ${report.skipped} 条（本机自己上传的）',
+            ),
             backgroundColor: Colors.green,
           ),
         );
       }
     } on Object catch (e) {
       await widget.statusStore.setStatus('error:$e');
-      await _refreshCounters();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -239,101 +202,138 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     }
   }
 
-  /// Cloudflare 账号卡片：已登录显示只读状态 + 退出；未登录显示用户名/密码 + 登录/注册。
+  /// 「我的账号」卡片：顶部状态徽章（已登录/未登录）+ 账号信息 / 登录注册表单。
+  ///
+  /// 登录/注册成功后 `setState` 触发重建 → 徽章由灰「未登录」变绿「已登录」
+  /// 并显示用户名，状态切换肉眼可辨；失败则该卡片保持「未登录」+ 红条提示。
   Widget _cfAccountCard() {
     final username = widget.config.cfUsername;
     final loggedIn = username != null && username.isNotEmpty;
-    if (loggedIn) {
-      return Column(
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        border: Border.all(color: theme.dividerColor),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _ReadOnlyField(
-            label: 'Cloudflare 账号',
-            value: username,
-            note: '已登录（每用户令牌本机 SecretStore 保存）',
+          Row(
+            children: [
+              Icon(
+                Icons.account_circle_outlined,
+                color: theme.colorScheme.primary,
+                size: 22,
+              ),
+              const SizedBox(width: 6),
+              const Text(
+                '我的账号',
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+              ),
+              const Spacer(),
+              _StatusChip(
+                text: loggedIn ? '已登录' : '未登录',
+                ok: loggedIn,
+              ),
+            ],
           ),
-          const SizedBox(height: 8),
-          FilledButton.tonal(
-            onPressed: _logoutCf,
-            child: const Text('退出登录'),
-          ),
-        ],
-      );
-    }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        TextField(
-          controller: _cfUser,
-          decoration: const InputDecoration(labelText: '用户名'),
-        ),
-        const SizedBox(height: 8),
-        TextField(
-          controller: _cfPass,
-          obscureText: true,
-          decoration: const InputDecoration(
-            labelText: '密码',
-            helperText: '自助注册：用户名≥3、密码≥8',
-          ),
-        ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: FilledButton(
-                onPressed: () => _account(register: false),
-                child: const Text('登录'),
+          const SizedBox(height: 10),
+          if (loggedIn) ...[
+            _ReadOnlyField(
+              label: 'Cloudflare 账号',
+              value: username,
+              note: '已登录（每用户令牌本机 SecretStore 保存）',
+            ),
+            const SizedBox(height: 8),
+            FilledButton.tonal(
+              onPressed: _logoutCf,
+              child: const Text('退出登录'),
+            ),
+          ] else ...[
+            TextField(
+              controller: _cfUser,
+              decoration: const InputDecoration(labelText: '用户名'),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _cfPass,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: '密码',
+                helperText: '自助注册：用户名≥3、密码≥8',
               ),
             ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: OutlinedButton(
-                onPressed: () => _account(register: true),
-                child: const Text('注册'),
-              ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton(
+                    onPressed: () => _account(register: false),
+                    child: const Text('登录'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => _account(register: true),
+                    child: const Text('注册'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '首次使用点「注册」，成功后徽章会变成绿色「已登录」。',
+              style: TextStyle(color: theme.hintColor, fontSize: 11),
             ),
           ],
-        ),
-      ],
-    );
-  }
-
-  Future<void> _testConnection() async {
-    if (!widget.config.isLlmConfigured) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('尚未配置 llm_server 同步地址。')),
-      );
-      return;
-    }
-    final err = await widget.scheduler.testConnection();
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(err == null ? '连接成功' : '连接失败：$err'),
-        backgroundColor: err == null ? Colors.green : Colors.red,
+          // 网络通道诊断（直连 / 代理）：注册失败时先看这一行。
+          _networkLine(),
+        ],
       ),
     );
   }
 
-  String _formatTime(DateTime? t) {
-    if (t == null) return '从未';
-    final l = t.toLocal();
-    return '${l.year}-${l.month.toString().padLeft(2, "0")}-${l.day.toString().padLeft(2, "0")} '
-        '${l.hour.toString().padLeft(2, "0")}:${l.minute.toString().padLeft(2, "0")}';
+  /// 网络通道诊断行。
+  ///
+  /// Dart 的 HttpClient 默认直连、不读系统代理，这正是此前「点注册没反应」
+  /// （SocketException errno 121）的根因。启动时已自动探测代理，这里把结果
+  /// 显式写出来，出问题一眼能分清是「没走代理」还是「代理也不通」。
+  Widget _networkLine() {
+    final proxy = detectedSystemProxy;
+    final viaProxy = proxy != null && proxy.isNotEmpty;
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(
+        children: [
+          Icon(
+            viaProxy ? Icons.shield_outlined : Icons.wifi,
+            size: 13,
+            color: theme.hintColor,
+          ),
+          const SizedBox(width: 4),
+          Expanded(
+            child: Text(
+              viaProxy ? '网络通道：经由代理 $proxy' : '网络通道：直连（未探测到系统代理）',
+              style: TextStyle(color: theme.hintColor, fontSize: 11),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final baseUrl = (widget.config.baseUrl ?? '').trim();
-    final hasBaseUrl = baseUrl.isNotEmpty;
-    final theme = Theme.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const Padding(
           padding: EdgeInsets.fromLTRB(16, 24, 16, 8),
           child: Text(
-            '同步（可指向 llm_server / Cloudflare）',
+            '同步',
             style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
           ),
         ),
@@ -342,86 +342,10 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Base URL：有下发值 → 只读展示；无下发值 → 保留手动输入兜底。
-              if (hasBaseUrl)
-                _ReadOnlyField(
-                  label: 'Base URL',
-                  value: baseUrl,
-                  note: '由管理后台配置',
-                )
-              else
-                TextField(
-                  controller: _url,
-                  decoration: const InputDecoration(
-                    labelText: 'Base URL',
-                    helperText: '形如 https://xxx.supabase.co/functions/v1/ai-proxy',
-                  ),
-                ),
-              const SizedBox(height: 8),
-              // Token：不手输，展示后台下发状态（本体在 SecretStore）。
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Token 由管理后台配置（本机 SecretStore 保存）',
-                    style: TextStyle(fontSize: 13),
-                  ),
-                  Text(
-                    widget.config.tokenRef == null
-                        ? '（未配置）'
-                        : '（已保存，引用名 ${widget.config.tokenRef}）',
-                    style: const TextStyle(color: Colors.grey, fontSize: 11),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              // 兜底模式才需要「保存配置」；只读模式下没有可手改的字段。
-              if (!hasBaseUrl)
-                Row(
-                  children: [
-                    FilledButton.tonal(
-                      onPressed: _save,
-                      child: const Text('保存配置'),
-                    ),
-                    const SizedBox(width: 8),
-                    OutlinedButton(
-                      onPressed: _testConnection,
-                      child: const Text('测试连接'),
-                    ),
-                  ],
-                )
-              else
-                OutlinedButton(
-                  onPressed: _testConnection,
-                  child: const Text('测试连接'),
-                ),
-              const SizedBox(height: 8),
-              // ---- Cloudflare 目标（方案 B，可选）----
-              const Divider(),
-              const Text(
-                'Cloudflare 目标（方案 B）',
-                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
-              ),
-              const SizedBox(height: 4),
-              TextField(
-                controller: _cfUrl,
-                decoration: const InputDecoration(
-                  labelText: 'CF Worker URL',
-                  helperText: '形如 https://<subdomain>.workers.dev',
-                ),
-              ),
-              const SizedBox(height: 8),
-              // ---- Cloudflare 账号（方案 B 多租户）----
-              // 普通用户自助注册/登录，无需填写任何共享 token；登录后令牌本机保存。
+              // 登录卡片（Cloudflare 自助注册 / 登录）
               _cfAccountCard(),
-              const SizedBox(height: 8),
-              FilledButton.tonal(
-                onPressed: _saveCf,
-                child: const Text('保存 CF 配置'),
-              ),
-              const SizedBox(height: 8),
-              // 开发期手动同步：两个目标 × 上传 / 拉取 = 4 个按钮。
-              const Divider(),
+              const SizedBox(height: 16),
+              // 手动同步：两个目标 × 上传 / 拉取 = 四个按钮
               Row(
                 children: [
                   Expanded(
@@ -461,33 +385,39 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
                   ),
                 ],
               ),
-              const SizedBox(height: 8),
-              _StatusLine(
-                status: _status,
-                pending: _pending,
-                failed: _failed,
-                lastPush: widget.statusStore.lastPushAt,
-                lastPull: widget.statusStore.lastPulledAt,
-                formatTime: _formatTime,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                '• 默认指向本机 llm_server（127.0.0.1:8787）；CF 需先填 URL 并登录/注册账号；\n'
-                '• 普通用户用用户名+密码自助注册，无需填写任何共享 token；\n'
-                '• 每用户令牌仅本机 SecretStore 保存，按账号隔离数据，不入 DB；\n'
-                '• 同步为手动：上传 = 本地 → 目标，拉取 = 目标 → 本地；\n'
-                '• 跨设备冲突用 LWW（version 大者赢），自回声自动过滤；\n'
-                '• 上传会消费本地 outbox（标记 done）；同一份数据传两个后端请先清空 outbox 或换库。',
-                style: TextStyle(
-                  color: theme.disabledColor,
-                  fontSize: 11,
-                  height: 1.6,
-                ),
-              ),
             ],
           ),
         ),
       ],
+    );
+  }
+}
+
+/// 状态徽章：ok=true 绿色「已登录」，false 灰色「未登录」。
+class _StatusChip extends StatelessWidget {
+  const _StatusChip({required this.text, required this.ok});
+
+  final String text;
+  final bool ok;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = ok ? Colors.green : Colors.grey;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.5)),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: color,
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
     );
   }
 }
@@ -522,56 +452,6 @@ class _ReadOnlyField extends StatelessWidget {
           Text(value, style: const TextStyle(fontSize: 13)),
           const SizedBox(height: 2),
           Text(note, style: TextStyle(color: theme.hintColor, fontSize: 11)),
-        ],
-      ),
-    );
-  }
-}
-
-class _StatusLine extends StatelessWidget {
-  const _StatusLine({
-    required this.status,
-    required this.pending,
-    required this.failed,
-    required this.lastPush,
-    required this.lastPull,
-    required this.formatTime,
-  });
-
-  final String status;
-  final int pending;
-  final int failed;
-  final DateTime? lastPush;
-  final DateTime? lastPull;
-  final String Function(DateTime?) formatTime;
-
-  @override
-  Widget build(BuildContext context) {
-    final isError = status.startsWith('error');
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: isError ? Colors.red.shade50 : Colors.blueGrey.shade50,
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            '状态：$status',
-            style: TextStyle(
-              fontSize: 12,
-              color: isError ? Colors.red : Colors.blueGrey.shade800,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            '待推：$pending 条　失败：$failed 条\n'
-            '上次 push：${formatTime(lastPush)}\n'
-            '上次 pull：${formatTime(lastPull)}',
-            style: const TextStyle(fontSize: 11, color: Colors.black87),
-          ),
         ],
       ),
     );

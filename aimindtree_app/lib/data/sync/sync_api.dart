@@ -18,6 +18,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'http_proxy.dart';
 import 'sync_types.dart';
 
 /// 抽象同步后端。
@@ -66,7 +67,13 @@ class HttpSyncApi implements SyncApi {
     required this.baseUrl,
     required this.userToken,
     HttpClient? client,
-  }) : _client = client ?? HttpClient()..connectionTimeout = const Duration(seconds: 30);
+  }) : _client = client ?? _createClient();
+
+  static HttpClient _createClient() {
+    final c = HttpClient()..connectionTimeout = const Duration(seconds: 30);
+    c.findProxy = syncFindProxy;
+    return c;
+  }
 
   final String baseUrl;
   final String userToken;
@@ -110,7 +117,10 @@ class HttpSyncApi implements SyncApi {
       'envelopes': envelopes.map((e) => e.toJson()).toList(),
     });
     return SyncPushResult(
-      accepted: (m['accepted'] as num?)?.toInt() ?? 0,
+      // 字段兼容：CF Worker 目前返回 `received`，其它后端（llm_server 中继 /
+      // 旧实现）返回 `accepted`。以前只读 `accepted` → CF 链路永远回落 0，
+      // 用户看到「上传成功但 0 条」。优先 `received`，回退 `accepted`。
+      accepted: ((m['received'] ?? m['accepted']) as num?)?.toInt() ?? 0,
       serverTime: DateTime.parse(m['server_time'] as String),
     );
   }

@@ -239,13 +239,17 @@ SyncEngine({
   ///
   /// [rawPayloadJson] 是 outbox 里存的原始 JSON 串，只在 `jsonEncode` 抛出
   /// （payload 里混入了 jsonEncode 不支持的对象）时用作退化估算，
-  /// 保证切批逻辑不会因为一条坏包而整体崩掉。
-  int _envelopeBytes(SyncEnvelope env, String rawPayloadJson) {
+  /// 保证切批逻辑不会因为一条坏包而整体崩掉。全量快照（[pushAll]）没有
+  /// 原始 JSON 串，传 null 即可（`SyncEnvelope.toJson` 已用 `toJsonSafe`
+  /// 把 DateTime 等转成字符串，正常情况下不会抛）。
+  int _envelopeBytes(SyncEnvelope env, [String? rawPayloadJson]) {
     try {
       return utf8.encode(jsonEncode(env.toJson())).length;
     } on Object {
+      final raw = rawPayloadJson;
+      if (raw == null) return 0;
       // base64 正文基本是纯 ASCII，1.2 倍系数足够保守。
-      return (rawPayloadJson.length * 1.2).ceil();
+      return (raw.length * 1.2).ceil();
     }
   }
 
@@ -253,14 +257,16 @@ SyncEngine({
   ///
   /// 效果是「一条 2.7MB 的 asset envelope 单独成批」——它既不会被拆开
   /// （envelope 是原子的），也不会把后面的小 envelope 一起拖下水。
-  static List<List<_PushEntry>> _splitBatches(List<_PushEntry> entries) {
-    final batches = <List<_PushEntry>>[];
-    var current = <_PushEntry>[];
+  ///
+  /// 泛型化是为了让「增量 push」与「全量快照 pushAll」共用同一套切批口径。
+  static List<List<T>> _splitBatches<T extends _ByteSized>(List<T> entries) {
+    final batches = <List<T>>[];
+    var current = <T>[];
     var currentBytes = 0;
     for (final e in entries) {
       if (current.isNotEmpty && currentBytes + e.bytes > kPushBatchBudgetBytes) {
         batches.add(current);
-        current = <_PushEntry>[];
+        current = <T>[];
         currentBytes = 0;
       }
       current.add(e);
@@ -268,6 +274,196 @@ SyncEngine({
     }
     if (current.isNotEmpty) batches.add(current);
     return batches;
+  }
+
+  // ============ Push：全量快照 ============
+
+  /// 全量快照推送：把 [kSyncTableAllowlist] 里 13 张表的**所有现存行**当作
+  /// upsert 推上去，与 outbox 是否为空无关。
+  ///
+  /// 为什么必须要有它：outbox 是**增量发件箱**，只记录「接线之后经仓储写入」
+  /// 的变更。本 App 在同步接线（`extraction_service.dart` 的 bootstrap）之前
+  /// 就已存在大量历史数据，这些行永远不会入队，只靠 [push] 会一条都发不出去
+  /// （用户实测表现就是「提示上传成功，但是 0 条」）。
+  ///
+  /// 与 [push] 的分工：
+  /// - [push] 负责**变更语义**——含硬删墓碑（行已不在表里，快照扫不到）；
+  /// - [pushAll] 负责**状态对齐**——含历史存量与未接线的表。
+  /// 调用方应「先 push() 再 pushAll()」，两者都跑才完整，报告分开计数。
+  ///
+  /// 分页读取（[pageSize] 行/页）避免把整表（尤其 note_assets 的
+  /// data_base64）一次性读进内存；复用 `sync_row_map.dart` 的 `*RowToMap`，
+  /// 保证 payload 键与下行 `*FromMap` 严格一致。
+  ///
+  /// **不写 outbox**：全量是对齐，不是变更记账（outbox 行由 [push] 负责）。
+  Future<PushReport> pushAll({SyncApi? api, int pageSize = 50}) async {
+    final target = api ?? _api;
+    var pushed = 0;
+    var failed = 0;
+    var serverTime = DateTime.now().toUtc();
+
+    // 边读边发：缓冲到字节预算就整批下发，内存峰值 ≈ 一个批次（4MB）
+    // 加上一页数据，而不是整张表。
+    final buffer = <_SnapshotEntry>[];
+    var bufferBytes = 0;
+
+    Future<void> flush() async {
+      if (buffer.isEmpty) return;
+      final batches = _splitBatches<_SnapshotEntry>(buffer);
+      buffer.clear();
+      bufferBytes = 0;
+      for (final batch in batches) {
+        try {
+          final result = await target.pushBatch(
+            <SyncEnvelope>[for (final e in batch) e.envelope],
+          );
+          pushed += result.accepted;
+          serverTime = result.serverTime;
+          _log.i('pushAll 批成功 ${result.accepted} 条；'
+              'server_time=${result.serverTime}');
+        } on Object catch (e) {
+          _log.w('pushAll 批失败：$e；${batch.length} 条计入 failed');
+          failed += batch.length;
+        }
+      }
+    }
+
+    // 表名顺序固定（Set 的迭代顺序 = 字面量插入顺序），便于测试断言。
+    for (final table in kSyncTableAllowlist) {
+      var offset = 0;
+      while (true) {
+        final page = await _readPagePayloads(table, pageSize, offset);
+        if (page.isEmpty) break;
+        for (final payload in page) {
+          final env = SyncEnvelope(
+            deviceId: deviceId,
+            entityTable: table,
+            entityId: payload['id'] as String,
+            op: SyncOp.upsert,
+            payload: payload,
+            baseVersion: (payload['version'] as num?)?.toInt() ?? 1,
+            updatedAt: _dt(payload['updated_at']) ?? _epoch,
+            // 软删行也要带上墓碑时间：快照是「状态对齐」，
+            // 漏掉 deleted_at 会让对端把已删的行业当成活数据收下。
+            deletedAt: _dt(payload['deleted_at']),
+          );
+          final bytes = _envelopeBytes(env);
+          if (bytes > kMaxEnvelopeBytes) {
+            // 单条超硬上限：跳过但不中断整轮（否则一张坏表堵死全部快照）。
+            failed++;
+            _log.w('pushAll 跳过超大 envelope：$table/${payload['id']} '
+                '(${bytes ~/ 1024}KB > ${kMaxEnvelopeBytes ~/ (1024 * 1024)}MB)');
+            continue;
+          }
+          if (buffer.isNotEmpty &&
+              bufferBytes + bytes > kPushBatchBudgetBytes) {
+            await flush();
+          }
+          buffer.add(_SnapshotEntry(envelope: env, bytes: bytes));
+          bufferBytes += bytes;
+        }
+        if (page.length < pageSize) break;
+        offset += page.length;
+      }
+    }
+    await flush();
+
+    _log.i('pushAll 完成：pushed=$pushed failed=$failed');
+    return PushReport(pushed: pushed, failed: failed, serverTime: serverTime);
+  }
+
+  /// 读一张表的一页并转成 payload 列表（按 id 升序保证分页稳定）。
+  ///
+  /// ⚠️ [note_assets] 必须**整行 select**：payload 要带完整 `data_base64`，
+  /// 不能像 [_readLocalRow] 那样只取三列（那里是 LWW 比较，不需要正文）。
+  Future<List<Map<String, dynamic>>> _readPagePayloads(
+    String table,
+    int limit,
+    int offset,
+  ) async {
+    switch (table) {
+      case 'notebooks':
+        final rows = await (_db.select(_db.notebooks)
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(limit, offset: offset))
+            .get();
+        return rows.map(notebookRowToMap).toList();
+      case 'notes':
+        final rows = await (_db.select(_db.notes)
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(limit, offset: offset))
+            .get();
+        return rows.map(noteRowToMap).toList();
+      case 'knowledge_points':
+        final rows = await (_db.select(_db.knowledgePoints)
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(limit, offset: offset))
+            .get();
+        return rows.map(knowledgePointRowToMap).toList();
+      case 'prerequisite_edges':
+        final rows = await (_db.select(_db.prerequisiteEdges)
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(limit, offset: offset))
+            .get();
+        return rows.map(prerequisiteEdgeRowToMap).toList();
+      case 'mastery_records':
+        final rows = await (_db.select(_db.masteryRecords)
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(limit, offset: offset))
+            .get();
+        return rows.map(masteryRecordRowToMap).toList();
+      case 'cards':
+        final rows = await (_db.select(_db.cards)
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(limit, offset: offset))
+            .get();
+        return rows.map(cardRowToMap).toList();
+      case 'canvases':
+        final rows = await (_db.select(_db.canvases)
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(limit, offset: offset))
+            .get();
+        return rows.map(canvasRowToMap).toList();
+      case 'canvas_nodes':
+        final rows = await (_db.select(_db.canvasNodes)
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(limit, offset: offset))
+            .get();
+        return rows.map(canvasNodeRowToMap).toList();
+      case 'canvas_edges':
+        final rows = await (_db.select(_db.canvasEdges)
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(limit, offset: offset))
+            .get();
+        return rows.map(canvasEdgeRowToMap).toList();
+      case 'ai_sessions':
+        final rows = await (_db.select(_db.aiSessions)
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(limit, offset: offset))
+            .get();
+        return rows.map(aiSessionRowToMap).toList();
+      case 'ai_messages':
+        final rows = await (_db.select(_db.aiMessages)
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(limit, offset: offset))
+            .get();
+        return rows.map(aiMessageRowToMap).toList();
+      case 'kp_groups':
+        final rows = await (_db.select(_db.kpGroups)
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(limit, offset: offset))
+            .get();
+        return rows.map(kpGroupRowToMap).toList();
+      case 'note_assets':
+        final rows = await (_db.select(_db.noteAssets)
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(limit, offset: offset))
+            .get();
+        return rows.map(noteAssetRowToMap).toList();
+      default:
+        _log.w('pushAll 遇到未知表 $table，跳过');
+        return const <Map<String, dynamic>>[];
+    }
   }
 
   // ============ Pull ============
@@ -796,8 +992,17 @@ class _LocalVer {
   final DateTime updatedAt;
 }
 
+/// 「带预估字节数」的待发条目（[SyncEngine._splitBatches] 的切批依据）。
+///
+/// 抽成接口是为了让增量 push（[_PushEntry]，来自 outbox）与全量快照
+/// （[_SnapshotEntry]，来自表扫描）共用同一套字节预算切批逻辑。
+abstract class _ByteSized {
+  /// 该 envelope 序列化后的 UTF-8 字节数。
+  int get bytes;
+}
+
 /// 一次 push 里「outbox 行 ↔ envelope ↔ 预估字节数」的三元组。
-class _PushEntry {
+class _PushEntry implements _ByteSized {
   const _PushEntry({
     required this.row,
     required this.envelope,
@@ -808,5 +1013,17 @@ class _PushEntry {
   final SyncEnvelope envelope;
 
   /// 该 envelope 序列化后的 UTF-8 字节数（切批依据）。
+  @override
+  final int bytes;
+}
+
+/// 全量快照里的一条待发条目（没有 outbox 行：快照不记账）。
+class _SnapshotEntry implements _ByteSized {
+  const _SnapshotEntry({required this.envelope, required this.bytes});
+
+  final SyncEnvelope envelope;
+
+  /// 该 envelope 序列化后的 UTF-8 字节数（切批依据）。
+  @override
   final int bytes;
 }

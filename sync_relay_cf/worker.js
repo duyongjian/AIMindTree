@@ -8,7 +8,7 @@
  * - ``POST /auth/login``     ``{username, password}`` → ``{user_id, token}``
  *
  * 同步（均须 ``Authorization: Bearer <token>``，按 token 归属的 user_id 隔离）：
- * - ``POST /sync/push``   ``{device_id, envelopes:[...]}`` → ``{received, server_time}``
+ * - ``POST /sync/push``   ``{device_id, envelopes:[...]}`` → ``{received, accepted, server_time}``
  * - ``POST /sync/pull``   ``{device_id, since|null}``      → ``{envelopes:[...], server_time}``
  * - ``GET  /sync/manifest``                             → ``{count}``
  *
@@ -241,7 +241,13 @@ async function handlePush(request, env, ownerId) {
     await env.DB.batch(batch);
   }
 
-  return jsonResponse({ received: envelopes.length, server_time: serverTime });
+  // 双写 `received` 与 `accepted`：App 端 `HttpSyncApi` 优先读 `received`，
+  // 旧版 App（只读 `accepted`）也能拿到正确条数，避免「传成功但显示 0 条」。
+  return jsonResponse({
+    received: envelopes.length,
+    accepted: envelopes.length,
+    server_time: serverTime,
+  });
 }
 
 /** POST /sync/pull —— 拉取本用户 since 之后的增量；since 为空 = 全量。 */

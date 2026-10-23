@@ -29,6 +29,12 @@ class SyncConfig {
   /// 未单独配置时的 llm_server 默认地址（与 kLlmServerDefaultBaseUrl 同源）。
   static const String kSyncLlmServerDefaultBaseUrl = 'http://127.0.0.1:8787';
 
+  /// 内置 Cloudflare Worker 默认地址（方案 B 已部署）。
+  /// App 自带该地址，普通用户**无需填写**；若更换 Worker 域名，改这里即可
+  /// （用户仍可在设置里自定义覆盖，存到 [_kCfUrl]）。
+  static const String kSyncCfDefaultBaseUrl =
+      'https://aimindtree-sync-relay.tuanx.workers.dev';
+
   String? get baseUrl => prefs.getString(_kBaseUrl);
   Future<void> setBaseUrl(String v) async => prefs.setString(_kBaseUrl, v);
 
@@ -55,6 +61,13 @@ class SyncConfig {
 
   String? get cfUrl => prefs.getString(_kCfUrl);
   Future<void> setCfUrl(String v) async => prefs.setString(_kCfUrl, v);
+
+  /// CF 目标实际地址：用户自定义优先，未配置时回落到内置默认地址。
+  /// 普通用户开箱即用，无需在设置里填 URL。
+  String get cfUrlResolved {
+    final v = cfUrl?.trim();
+    return (v != null && v.isNotEmpty) ? v : kSyncCfDefaultBaseUrl;
+  }
 
   String? get cfTokenRef => prefs.getString(_kCfTokenRef);
   Future<void> setCfTokenRef(String? v) async {
@@ -111,9 +124,9 @@ class SyncConfig {
   /// llm 目标是否可用（默认指向 localhost，永远可用）。
   bool get isLlmConfigured => llmUrl.isNotEmpty;
 
-  /// CF 目标是否可用（URL + token 至少其一就绪）。
+  /// CF 目标是否可用（地址恒有内置默认，故只看 token 是否就绪）。
   bool get isCfConfigured =>
-      (cfUrl?.isNotEmpty ?? false) &&
+      cfUrlResolved.isNotEmpty &&
       ((cfTokenRef?.isNotEmpty ?? false) || (cfToken?.isNotEmpty ?? false));
 
   /// 取出 CF token：优先 token_ref（SecretStore），回退开发期直存 token。
