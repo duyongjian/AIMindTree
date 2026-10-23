@@ -368,6 +368,39 @@ function makeStore(pg) {
 }
 
 /**
+ * 组装 ``tcb.init()`` 的选项。
+ *
+ * 抽成纯函数（入参只有 SDK 模块和环境变量）是为了能在本地自测里直接断言，
+ * 不用真连腾讯云。
+ *
+ * @param {object} tcb require('@cloudbase/node-sdk') 的返回值
+ */
+function buildInitOptions(tcb) {
+  const opts = {};
+  if (process.env.TCB_ENV) opts.env = process.env.TCB_ENV;
+  else if (tcb.SYMBOL_CURRENT_ENV) opts.env = tcb.SYMBOL_CURRENT_ENV;
+  // API Key（服务端凭据）→ PostgREST 侧的 service_role。
+  //
+  // ⚠️ 必须在这里显式传，不能只配环境变量 CLOUDBASE_APIKEY。SDK 的
+  // normalizeConfig 有一条明确注释：「不从环境变量读取 CLOUDBASE_APIKEY 并
+  // 固化到 config」，而 auth.getClientCredential() 只认 config.accessKey。
+  // 环境变量那条回退发生在 requester 内部，且会被匿名令牌盖掉——结果是
+  // PostgREST 侧落到 anon 角色，anon 默认只有 SELECT，一切写入都报
+  // `permission denied for table xxx`（2026-10-24 实测：register 时
+  // SELECT 成功、INSERT 失败，据此定位到角色）。
+  //
+  // 传了之后链路（已用真 SDK 本地验证）：
+  //   tcb.init({accessKey}) → config.accessKey 固化
+  //   → getClientCredential() 直接返回**裸字符串** accessKey（不是对象）
+  //   → PG 客户端取 .access_token 得 undefined
+  //   → requester 里 args.token 为空，改走 `else if (accessKey)` 分支
+  //   → 请求带 Authorization: Bearer <API Key> → 服务端识别为 service_role。
+  // service_role 可绕过 RLS，仅限服务端使用，切勿下发到客户端。
+  if (process.env.CLOUDBASE_APIKEY) opts.accessKey = process.env.CLOUDBASE_APIKEY;
+  return opts;
+}
+
+/**
  * 懒加载 SDK 并拿到数据层（PostgreSQL 客户端）。
  *
  * CloudBase 云函数运行时会自动注入当前环境信息：可以用 ``tcb.SYMBOL_CURRENT_ENV``
@@ -382,10 +415,7 @@ function getStore() {
   if (!cachedStore) {
     // 延迟 require：本地自测时不必安装 @cloudbase/node-sdk。
     const tcb = require('@cloudbase/node-sdk');
-    const opts = {};
-    if (process.env.TCB_ENV) opts.env = process.env.TCB_ENV;
-    else if (tcb.SYMBOL_CURRENT_ENV) opts.env = tcb.SYMBOL_CURRENT_ENV;
-    const app = tcb.init(opts);
+    const app = tcb.init(buildInitOptions(tcb));
     if (typeof app.rdb !== 'function') {
       throw new Error(
         '当前 @cloudbase/node-sdk 不支持 rdb()（PostgreSQL 客户端），' +
@@ -542,3 +572,4 @@ exports.main = async (event, context) => {
 exports.handle = handle;
 exports.makeStore = makeStore;
 exports.setStoreFactoryForTest = setStoreFactoryForTest;
+exports.buildInitOptions = buildInitOptions;

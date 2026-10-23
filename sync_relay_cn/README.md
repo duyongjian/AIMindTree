@@ -192,6 +192,46 @@ node test_protocol.mjs
 > 注意：网关的 `headers` 不支持 `Location` key（我们不重定向，不受影响）。
 > 若返回普通对象（不含 `statusCode`），网关会按 200 + `application/json` 兜底处理。
 
+### ⚠️ 两种投递形态与 `upstreamResourceType`（2026-10-24 实测踩坑）
+
+CloudBase 的 HTTP 访问服务把请求转给云函数时有**两种**形态，入参和返回值的要求正好相反：
+
+| 路由 `upstreamResourceType` | 对应函数 `Type` | 入参 | 必须返回 |
+|---|---|---|---|
+| `SCF` | `Event`（事件函数） | API 网关风格普通对象 `{httpMethod, path, headers, body, isBase64Encoded}` | 集成响应 `{statusCode, body}` |
+| `WEB_SCF` | `HTTP`（Web 函数） | Web 标准 `Request` 对象 | Web 标准 `Response` 对象 |
+
+配错的症状非常有迷惑性：**`400 Bad Request` + `content-length: 0` + `content-disposition: attachment`**，
+响应头带 `x-cloudbase-upstream-status-code: 400`、`x-cloudbase-upstream-type: Tencent-SCF_HTTP`，
+而同一域名下未命中的路径正常返回 404——看起来像「路由通了但函数挂了」。
+
+**最快的判别方法**是看响应头里的 `x-cloudbase-upstream-timecost`：类型不匹配时网关在
+**十几毫秒**内就拒掉，根本不会真的调用函数（Node 冷启动 + 加载 5.8MB 依赖不可能这么快）。
+本次排查一开始误判成「返回值多带了 `headers` / `isBase64Encoded`」，还把返回值裁剪成
+`{statusCode, body}` 两字段——**依然是 400**，因为根因是形状整个不被识别，不是字段多寡。
+
+因此 `index.js` 的入口按 `isWebRequest(event)` 自动分流：收到 `Request` 就回 `Response`，
+收到普通对象就回集成响应。两种形态都覆盖，将来改路由配置或换运行时版本都不用再动入口。
+
+### ⚠️ 数据库角色：必须配 API Key，否则写入全线 `permission denied`
+
+云函数默认用**匿名 clientCredential 令牌**连 PostgREST，服务端据此落到 `anon` 角色，
+而 `anon` 默认只有 `SELECT`。症状是 register 时报
+`createUser 失败: permission denied for table sync_users`——注意前面的
+`getUserByUsername`（SELECT）是**成功**的，据此可定位到角色而非表结构。
+
+`service_role` 和 `authenticated` 在 CloudBase 建表时通常已被授予全权限，所以**不需要改任何
+数据库授权**，只要让函数改用 API Key 以 `service_role` 身份连库即可：
+
+1. CloudBase 控制台 → 设置 → **API Key**，新建一个（仅服务端使用，切勿下发客户端）。
+2. 配成云函数环境变量 `CLOUDBASE_APIKEY`。
+3. 代码里在 `tcb.init()` **显式**传 `accessKey`（见 `buildInitOptions()`）。
+
+为什么不能只配环境变量：SDK 的 `normalizeConfig` 有一条明确注释「不从环境变量读取
+`CLOUDBASE_APIKEY` 并固化到 config」，而 `auth.getClientCredential()` 只认 `config.accessKey`；
+requester 内部那条环境变量回退还会被匿名令牌盖掉。这条隐蔽链路已用真 SDK 在
+`test_protocol.mjs` 里锁住（换 SDK 版本能第一时间发现）。
+
 ### 环境 ID 注入
 
 文档原文：「从 v3 版本开始，如在初始化 `init({})` 未指定 env 参数，则默认使用当前云函数
@@ -273,30 +313,44 @@ zip -r sync-relay-cn.zip index.js db.js package.json package-lock.json node_modu
 5. （可选）在云函数「函数配置 → 环境变量」里设置：
    - `CB_PAGE_SIZE=1000` 减少 pull 分页轮次；
    - `CB_PUSH_CHUNK=100`（默认）控制单次 upsert 请求体大小；
-   - 若 HTTP 触发路径不是 `/`，加 `CB_BASE_PATH=/你的触发路径`。
+   - 若 HTTP 触发路径不是 `/`，加 `CB_BASE_PATH=/你的触发路径`；
+   - **`CLOUDBASE_APIKEY=<API Key>`（必填，见第 6.5 步）**——不配的话函数以 `anon`
+     角色连库，只有 `SELECT`，register / push 全部 `permission denied`。
 6. （可选）把函数内存调到 256MB、超时调到 30 秒，大量首次上传时更从容。
 
 ### 6. 开启 HTTP 访问服务，拿到域名
 
 1. 进入刚建的云函数详情页，找到「HTTP 访问服务」/「自定义域名」模块，点「添加域名」。
-2. **触发路径填 `/`**（表示所有路径都转给这个函数）。
+2. **触发路径建议填 `/`**（表示所有路径都转给这个函数）。若填了 `/sync-relay` 之类的前缀，
+   记住 App 端地址要把这段前缀一起带上（App 是 `<base>/auth/register` 直接拼接的）。
 3. 域名选**默认域名**（形如 `https://<环境ID>.<地域>.app.tcloudbase.com`），
    也可以选自定义域名（需备案）。
 4. 确认后拿到完整地址，例如：
-   `https://mindtree-d7glv6crkd8e9fba9.ap-shanghai.app.tcloudbase.com`
+   `https://mindtree-d7glv6crkd8e9fba9-1409358097.ap-shanghai.app.tcloudbase.com/sync-relay`
+
+> ⚠️ 路由的上游类型必须是 **`SCF`（Event 云函数）**，与函数的 `Type: Event` 对应。
+> 若建成 `WEB_SCF`，请求会一律返回 `400` + 空 body（详见上方「两种投递形态」一节）。
+
+### 6.5 建 API Key 并配成环境变量（不做这步写入会全线失败）
+
+1. 控制台 → 设置 → **API Key** → 新建。这个 Key 等同于 `service_role`（可绕过 RLS），
+   **仅限服务端使用，切勿下发到 App / 前端 / 仓库**。
+2. 配成云函数环境变量 `CLOUDBASE_APIKEY`。
+3. 代码里 `buildInitOptions()` 会把它显式传进 `tcb.init({accessKey})`——**不能只配环境变量**，
+   原因见上方「数据库角色」一节。
 
 ### 7. 先验证，再填进 App
 
 **在浏览器或命令行里先打开根路径**，确认能看到健康检查响应：
 
 ```bash
-curl https://mindtree-d7glv6crkd8e9fba9.ap-shanghai.app.tcloudbase.com/
+curl https://mindtree-d7glv6crkd8e9fba9-1409358097.ap-shanghai.app.tcloudbase.com/sync-relay
 ```
 
 应该看到：
 
 ```json
-{"ok":true,"service":"aimindtree-sync-relay","version":"1.0.0"}
+{"ok":true,"service":"aimindtree-sync-relay","version":"1.0.0","runtime":{"node":"v18.15.0","web_globals":true}}
 ```
 
 看到这个再往下走。如果这一步就不通（超时 / 404 / 不是这个 JSON），先别填 App——
@@ -314,9 +368,12 @@ curl -X POST https://<你的域名>/auth/register \
 
 ### 8. 填进 App
 
-设置页 → 同步 → 「同步服务器地址」，填上面拿到的域名（**不带结尾斜杠**，例如
-`https://mindtree-d7glv6crkd8e9fba9.ap-shanghai.app.tcloudbase.com`），
+设置页 → 同步 → 「同步服务器地址」，填上面拿到的完整地址（**不带结尾斜杠**，且**要带上
+触发路径前缀**，例如
+`https://mindtree-d7glv6crkd8e9fba9-1409358097.ap-shanghai.app.tcloudbase.com/sync-relay`），
 然后用 App 里的账号密码注册/登录，正常上传下载即可。
+
+> 常见坑：只填到域名（漏了 `/sync-relay`）会命中静态托管的 404，看起来像「服务没起」。
 
 ## 费用与免责
 

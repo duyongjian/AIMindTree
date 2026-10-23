@@ -29,8 +29,9 @@
 
 import relay from './index.js';
 import { DatabaseSync } from 'node:sqlite';
+import { createRequire } from 'node:module';
 
-const { handle, makeStore, main, setStoreFactoryForTest } = relay;
+const { handle, makeStore, main, setStoreFactoryForTest, buildInitOptions } = relay;
 
 // node:sqlite 在 Node 22 仍是实验特性，屏蔽它的 ExperimentalWarning 噪音，
 // 避免淹没测试输出（不影响逻辑与退出码；其余 warning 照常打印）。
@@ -799,6 +800,81 @@ async function run() {
     assert(notFound.status === 404, 'Web 形态未知路径 → 404');
 
     setStoreFactoryForTest(null);
+  }
+
+  // --- 26) tcb.init() 选项组装：API Key 必须显式进 config.accessKey ---
+  // 背景（2026-10-24 实测）：云函数默认以匿名 clientCredential 令牌连
+  // PostgREST，落在 anon 角色，而 anon 只有 SELECT——register 时报
+  // `permission denied for table sync_users`。SDK 的 normalizeConfig 明确
+  // 「不从环境变量固化 CLOUDBASE_APIKEY」，且 auth.getClientCredential() 只认
+  // config.accessKey；requester 内部那条环境变量回退还会被匿名令牌盖掉。
+  // 所以唯一通路是在 init 选项里显式带上 accessKey（→ service_role）。
+  {
+    const fakeTcb = { SYMBOL_CURRENT_ENV: Symbol('SYMBOL_CURRENT_ENV') };
+    const savedEnv = process.env.TCB_ENV;
+    const savedKey = process.env.CLOUDBASE_APIKEY;
+    const restore = () => {
+      if (savedEnv === undefined) delete process.env.TCB_ENV;
+      else process.env.TCB_ENV = savedEnv;
+      if (savedKey === undefined) delete process.env.CLOUDBASE_APIKEY;
+      else process.env.CLOUDBASE_APIKEY = savedKey;
+    };
+
+    // 26.1 什么都没配 → 用当前环境符号，且不碰 accessKey（保持原行为）
+    delete process.env.TCB_ENV;
+    delete process.env.CLOUDBASE_APIKEY;
+    let o = buildInitOptions(fakeTcb);
+    assert(o.env === fakeTcb.SYMBOL_CURRENT_ENV, '无 TCB_ENV 时回落 SYMBOL_CURRENT_ENV');
+    assert(!('accessKey' in o), '无 API Key 时不塞 accessKey（不改变既有行为）');
+
+    // 26.2 TCB_ENV 优先于符号
+    process.env.TCB_ENV = 'env-explicit';
+    o = buildInitOptions(fakeTcb);
+    assert(o.env === 'env-explicit', 'TCB_ENV 优先于 SYMBOL_CURRENT_ENV');
+
+    // 26.3 配了 API Key 时必须显式带上，否则 PostgREST 侧落到 anon
+    process.env.CLOUDBASE_APIKEY = 'cb-api-key-for-test';
+    o = buildInitOptions(fakeTcb);
+    assert(
+      o.accessKey === 'cb-api-key-for-test',
+      'CLOUDBASE_APIKEY 必须显式进 init 选项（否则写入全线 permission denied）'
+    );
+    assert(o.env === 'env-explicit', '带上 accessKey 不影响 env 选择');
+
+    // 26.4 SDK 没有符号时也不能崩
+    delete process.env.TCB_ENV;
+    o = buildInitOptions({});
+    assert(
+      o.env === undefined && o.accessKey === 'cb-api-key-for-test',
+      'SDK 无 SYMBOL_CURRENT_ENV 时不设 env，accessKey 照常带上'
+    );
+
+    restore();
+
+    // 26.5 真 SDK 验证：accessKey 真的会固化进 config，且 getClientCredential
+    // 直接返回裸字符串（不是 {access_token} 对象）——PG 客户端取 .access_token
+    // 得 undefined，requester 才改走 accessKey 分支把 API Key 带出去。
+    // 这条断言锁住的是「SDK 内部这条隐蔽链路」，换 SDK 版本时能第一时间发现。
+    try {
+      const require = createRequire(import.meta.url);
+      const realTcb = require('@cloudbase/node-sdk');
+      const realApp = realTcb.init({ env: 'x-test', accessKey: 'cb-api-key-for-test' });
+      assert(
+        realApp.config.accessKey === 'cb-api-key-for-test',
+        '真 SDK：init({accessKey}) 会固化进 config.accessKey'
+      );
+      const cred = await realApp.auth().getClientCredential();
+      assert(
+        cred === 'cb-api-key-for-test',
+        '真 SDK：getClientCredential 直接返回 accessKey 原值（裸字符串，非对象）'
+      );
+      assert(
+        cred && cred.access_token === undefined,
+        '真 SDK：裸字符串没有 .access_token，requester 因此走 accessKey 分支'
+      );
+    } catch (e) {
+      assert(true, `真 SDK 断言跳过（未安装 @cloudbase/node-sdk）：${e.message}`);
+    }
   }
 
   console.log(`\n结果：通过 ${passed}，失败 ${failed}`);
