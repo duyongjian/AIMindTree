@@ -22,7 +22,6 @@ import 'dart:io';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../core/id.dart';
 import '../core/logger.dart';
 import '../core/secret_store.dart';
 import '../data/db/drift_database.dart';
@@ -45,8 +44,12 @@ enum AppConfigSource {
   unreachable,
 }
 
-/// 同步（Supabase）下发段（契约 `GET /v1/app/config` 的 `sync` 对象：
+/// 同步下发段（契约 `GET /v1/app/config` 的 `sync` 对象：
 /// `{ base_url, enabled, token(可 null), token_set }`）。
+///
+/// 多后端口径：[baseUrl] / [token] 写入「当前选中后端」（见
+/// [_applySyncConfig]）；[enabled] 随 llm_server 同步目标一并废弃，App 不再
+/// 消费（原 `aimindtree.sync.enabled` 只写不读、无实际消费者）。
 ///
 /// - [token]：服务端下发的 token 明文。**只经 SecretStore 落本机**，绝不入
 ///   prefs / DB；`null` = 服务端没有下发 token。
@@ -346,7 +349,7 @@ class AppConfigService {
   ///
   /// [syncConfig] / [secretStore]（任务 B）：消费下发 `sync` 段时使用；
   /// 缺省走 [FileSecretStore] 默认实例（与 main.dart 同一个 secrets 文件，
-  /// `sync_<ulid>` ref 机制与设置页完全一致）。
+  /// 每用户令牌按后端隔离存放，与设置页账号登录同一套 key）。
   static Future<AppConfigSnapshot> fetchAndApply(
     SettingsRepository repo,
     SharedPreferences prefs, {
@@ -484,16 +487,16 @@ class AppConfigService {
     }
   }
 
-  /// 任务 B：把下发 `sync` 段写进 SyncConfig / prefs / SecretStore。
+  /// 任务 B：把下发 `sync` 段写进 SyncConfig（当前选中后端）。
   ///
   /// 规则（契约 + 降级口径）：
   /// - **无 `sync` 段**（旧服务 / 内置默认快照）→ 什么都不写，本地值保留；
-  /// - `base_url` 非空 → 写 prefs（空则不覆盖本地已有值）；
-  /// - `enabled` → 写 `aimindtree.sync.enabled`（作为默认，用户随后仍可本地
-  ///   改；重启后回到管理后台下发的默认值）；
-  /// - `token` 非 null → 存 SecretStore 并设 `token_ref`（复用设置页同一
-  ///   `sync_<ulid>` ref 机制，旧 ref 删除）；`token` 为 null 但
-  ///   `token_set=true` → 不动本地 token。
+  /// - `base_url` 非空 → 写「当前选中后端」的地址覆盖（空则不覆盖本地值）；
+  /// - `token` 非 null → 存入 SecretStore 的每用户令牌键（按后端隔离，与
+  ///   设置页登录写入同一个键）；`token` 为 null 但 `token_set=true` → 不动
+  ///   本地令牌；
+  /// - `enabled` 字段随 llm_server 同步目标一并废弃：原
+  ///   `aimindtree.sync.enabled` 只写不读、无实际消费者，不再消费。
   ///
   /// **永不抛异常**：写入失败只记日志，绝不影响 ai_providers 落库与启动。
   static Future<void> _applySyncConfig(
@@ -508,26 +511,20 @@ class AppConfigService {
     try {
       final store = secretStore ?? await FileSecretStore.defaultInstance();
       final cfg = syncConfig ?? SyncConfig(prefs: prefs, secretStore: store);
+      final backend = cfg.selectedBackend;
 
       if (push.hasBaseUrl) {
-        await cfg.setBaseUrl(push.baseUrl.trim());
+        await cfg.setUrl(backend, push.baseUrl.trim());
       }
-      await cfg.setEnabled(push.enabled);
 
       final token = push.token;
       if (token != null && token.trim().isNotEmpty) {
-        // `sync_<ulid>` ref 机制（原设置页 _save() 的口径）：新 ref 写
-        // SecretStore，旧 ref 清理，prefs 只留引用名。
-        final ref = 'sync_${newUlid()}';
-        await store.set(ref, token);
-        final old = cfg.tokenRef;
-        if (old != null && old != ref) {
-          await store.delete(old);
-        }
-        await cfg.setTokenRef(ref);
+        // 每用户令牌按后端隔离存 SecretStore（键形如
+        // aimindtree.sync.cf_user_token），与设置页账号登录同一个键。
+        await cfg.setUserToken(backend, token);
       }
-      _log.i('sync 段已消费：base=${cfg.baseUrl} enabled=${push.enabled} '
-          'tokenSet=${push.tokenSet} tokenRef=${cfg.tokenRef}');
+      _log.i('sync 段已消费：backend=$backend base=${cfg.urlOf(backend)} '
+          'tokenSet=${push.tokenSet}');
     } on Object catch (e, s) {
       _log.e('sync 段消费失败（同步配置保持本地值）', error: e, stackTrace: s);
     }

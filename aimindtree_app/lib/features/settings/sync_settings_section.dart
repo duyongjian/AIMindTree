@@ -1,9 +1,16 @@
 /// SettingsPage 中的「同步」分区。
 ///
-/// 精简版 UI：标题「同步」+ 登录卡片（CF 自助注册/登录）+ 四个按钮
-/// （llm_server / CF × 上传 / 拉取）+ 「服务器与网络」卡片（自定义同步地址
-/// 与 HTTP 代理）。CF Worker 地址已内置，用户无需填写即可开箱即用；
-/// 换中继 / 走代理都在这张卡里配，不必重新编译 App。
+/// 多后端 UI（Cloudflare / 腾讯云 CloudBase / Vercel 三选一；原 llm_server
+/// 目标已移除）：顶部后端选择器 → 当前后端的账号卡片（自助注册/登录）→
+/// 上传/拉取按钮 → 「服务器与网络」卡片（自定义地址 + HTTP 代理 + 测试连接）。
+///
+/// 要点：
+/// - 三个中继的 HTTP 契约逐字一致，App 侧只换地址；三个后端的账号体系
+///   **互相独立**（同一用户在 CF 与 CloudBase 上是不同账号），用户名/令牌
+///   按后端隔离存储（见 [SyncConfig]）；
+/// - CF / CloudBase 地址已内置，用户无需填写即可开箱即用；Vercel 域名待
+///   部署回填，选中/使用时会明确提示「待配置」，不会静默失败；
+/// - 换中继 / 走代理都在「服务器与网络」卡里配，不必重新编译 App。
 library;
 
 import 'dart:async';
@@ -45,10 +52,16 @@ class SyncSettingsSection extends StatefulWidget {
 }
 
 class _SyncSettingsSectionState extends State<SyncSettingsSection> {
-  late final TextEditingController _cfUser;
-  late final TextEditingController _cfPass;
+  /// 当前选中的后端（表单 / 按钮都跟着它走）。
+  late SyncBackend _backend;
+
+  late final TextEditingController _user;
+  late final TextEditingController _pass;
   late final TextEditingController _endpoint;
   late final TextEditingController _proxy;
+
+  /// 当前后端是否已登录（用户名 + 每用户令牌都在）。
+  bool _loggedIn = false;
 
   /// 保存 / 测试连接进行中：置灰按钮，防重复点击。
   bool _busy = false;
@@ -59,21 +72,31 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   @override
   void initState() {
     super.initState();
-    _cfUser = TextEditingController(text: widget.config.cfUsername ?? '');
-    _cfPass = TextEditingController();
-    // 地址回显用 cfUrl（用户自己的覆盖值）而不是 cfUrlResolved，否则会把
+    _backend = widget.config.selectedBackend;
+    _user = TextEditingController(text: widget.config.usernameOf(_backend) ?? '');
+    _pass = TextEditingController();
+    // 地址回显用 urlOverrideOf（用户自己的覆盖值）而不是 urlOf，否则会把
     // 内置默认显示成「用户填过的值」，用户以为自己改过。
-    _endpoint = TextEditingController(text: widget.config.cfUrl?.trim() ?? '');
+    _endpoint =
+        TextEditingController(text: widget.config.urlOverrideOf(_backend)?.trim() ?? '');
     _proxy = TextEditingController(text: widget.config.cfProxy ?? '');
+    _refreshLoginState();
   }
 
   @override
   void dispose() {
-    _cfUser.dispose();
-    _cfPass.dispose();
+    _user.dispose();
+    _pass.dispose();
     _endpoint.dispose();
     _proxy.dispose();
     super.dispose();
+  }
+
+  /// 重读当前后端的登录态（登录 / 登出 / 切后端后调用）。
+  Future<void> _refreshLoginState() async {
+    final ok = await widget.config.isLoggedIn(_backend);
+    if (!mounted) return;
+    setState(() => _loggedIn = ok);
   }
 
   void _snack(String text, {bool ok = true}) {
@@ -108,10 +131,26 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     return null;
   }
 
+  /// 切换同步后端：写回 [SyncConfig.selectedBackend]，表单 / 地址回显 /
+  /// 登录态全部换成该后端的数据（三个后端账号互相独立，不共用）。
+  Future<void> _selectBackend(SyncBackend b) async {
+    if (b == _backend) return;
+    await widget.config.setSelectedBackend(b);
+    if (!mounted) return;
+    setState(() {
+      _backend = b;
+      _user.text = widget.config.usernameOf(b) ?? '';
+      _pass.clear();
+      _endpoint.text = widget.config.urlOverrideOf(b)?.trim() ?? '';
+      _testResult = null; // 上一个后端的测试结果不适用
+    });
+    await _refreshLoginState();
+  }
+
   /// 保存地址与代理。
   ///
-  /// 同步 API 在 bootstrap 里一次性装配，改完不会自动重建（项目里已有
-  /// `_warnIfStaleApi` 处理这种情况），所以这里明确提示需重启。
+  /// 同步 API 在 bootstrap 里一次性装配，改完不会自动重建（保存后明确提示
+  /// 需重启），所以这里必须说清楚。
   Future<void> _saveEndpoint() async {
     final urlError = _validateEndpoint(_endpoint.text);
     if (urlError != null) {
@@ -125,7 +164,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     }
     setState(() => _busy = true);
     try {
-      await widget.config.setCfUrl(_endpoint.text.trim());
+      await widget.config.setUrl(_backend, _endpoint.text.trim());
       final proxy = _proxy.text.trim();
       await widget.config.setCfProxy(proxy);
       // 让当前进程立即生效（重启后由 bootstrap 从 prefs 读）。
@@ -140,7 +179,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     }
   }
 
-  /// 用当前输入框里的地址发一个 GET / 探测连通性。
+  /// 用当前输入框里的地址发一个 GET / 探测连通性（测当前选中后端）。
   ///
   /// 客户端走 [createDirectHttpClient]（DoH / 代理 / 探测逻辑与真实同步链路
   /// 完全一致），测出来的结论才有意义；换一个普通 HttpClient 会得到不一样
@@ -157,17 +196,21 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
       return;
     }
 
-    setState(() {
-      _busy = true;
-      _testResult = null;
-    });
-
     final typed = _endpoint.text.trim();
-    final url = typed.isEmpty ? widget.config.cfUrlResolved : typed;
+    final url = typed.isEmpty ? widget.config.urlOf(_backend) : typed;
+    if (url.isEmpty) {
+      _snack('${_backend.label} 尚未配置地址：请先填写完整地址再测试。', ok: false);
+      return;
+    }
     final typedProxy = _proxy.text.trim();
     final savedProxy = widget.config.cfProxy;
     // 测的就是「此刻输入框里的值」：代理同样临时套用，测完复原为已保存值。
     setUserProxy(typedProxy.isEmpty ? null : typedProxy);
+
+    setState(() {
+      _busy = true;
+      _testResult = null;
+    });
 
     HttpClient? client;
     final sw = Stopwatch()..start();
@@ -194,102 +237,76 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     }
   }
 
-  /// 登录/注册 CF 账号（方案 B 多租户）：成功后保存每用户令牌，普通用户无需填共享 token。
+  /// 登录/注册当前后端的账号（多租户）：成功后保存每用户令牌，普通用户无需填共享 token。
   Future<void> _account({required bool register}) async {
-    // 地址内置，用户无需填写（方案 B 已部署的 Worker）。
-    final url = widget.config.cfUrlResolved;
-    final username = _cfUser.text.trim();
-    final password = _cfPass.text;
+    final url = widget.config.urlOf(_backend).trim();
+    if (url.isEmpty) {
+      _snack('${_backend.label} 尚未配置地址，无法登录/注册。', ok: false);
+      return;
+    }
+    final username = _user.text.trim();
+    final password = _pass.text;
     if (username.isEmpty || password.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请输入用户名和密码。')),
-      );
+      _snack('请输入用户名和密码。', ok: false);
       return;
     }
     final api = SyncAccountApi(baseUrl: url);
     try {
       final session =
           register ? await api.register(username, password) : await api.login(username, password);
-      await widget.config.setCfUsername(username);
-      await widget.config.setCfUserToken(session.token);
-      _cfPass.clear();
+      await widget.config.setUsername(_backend, username);
+      await widget.config.setUserToken(_backend, session.token);
+      _pass.clear();
       if (!mounted) return;
       setState(() {});
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(register ? '注册并登录成功：$username' : '登录成功：$username'),
-          backgroundColor: Colors.green,
-        ),
-      );
+      await _refreshLoginState();
+      _snack(register ? '注册并登录成功：$username' : '登录成功：$username');
     } on SyncAccountApiException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${register ? '注册' : '登录'}失败：${e.message}'), backgroundColor: Colors.red),
-      );
+      _snack('${register ? '注册' : '登录'}失败：${e.message}', ok: false);
     } on Object catch (e) {
       // 兜底：任何未预期异常都要变成可见提示，不能静默（否则「点了没反应」）。
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${register ? '注册' : '登录'}失败：$e'), backgroundColor: Colors.red),
-      );
+      _snack('${register ? '注册' : '登录'}失败：$e', ok: false);
     } finally {
       api.close();
     }
   }
 
-  /// 退出 CF 账号：清本地用户名与每用户令牌。
-  Future<void> _logoutCf() async {
-    await widget.config.setCfUserToken(null);
-    await widget.config.setCfUsername(null);
-    _cfUser.clear();
+  /// 退出当前后端账号：清本地用户名与每用户令牌（不影响其他后端）。
+  Future<void> _logout() async {
+    await widget.config.setUserToken(_backend, null);
+    await widget.config.setUsername(_backend, null);
+    _user.clear();
+    _pass.clear();
     if (!mounted) return;
     setState(() {});
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('已退出 CF 账号。')),
-    );
+    await _refreshLoginState();
+    _snack('已退出 ${_backend.label} 账号。');
   }
 
-  /// 开发期手动同步：按目标（llm / CF）× 方向（上传 / 拉取）触发。
+  /// 开发期手动同步：对当前选中后端触发上传 / 拉取。
   ///
   /// 复用 [widget.scheduler.engine] 的本地 outbox / deviceId，仅覆盖其 [api]
-  /// 指向对应后端。拉取前强制游标归零（dev 期两个后端共用游标，避免漏拉）。
-  Future<void> _runSync({required bool toCf, required bool push}) async {
-    final url = toCf ? widget.config.cfUrlResolved : widget.config.llmUrl;
-    if (url.trim().isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(toCf ? '未配置 CF 同步地址。' : '未配置 llm_server 同步地址。'),
-        ),
-      );
+  /// 指向对应后端。拉取前强制游标归零（dev 期各后端共用游标，避免漏拉）。
+  Future<void> _runSync({required bool push}) async {
+    final backend = _backend;
+    final url = widget.config.urlOf(backend).trim();
+    if (url.isEmpty) {
+      _snack('${backend.label} 尚未配置地址，无法同步。', ok: false);
       return;
     }
-    String? token;
-    if (toCf) {
-      // CF 走账号登录（多租户）：取每用户令牌；未登录则提示先登录/注册。
-      final userToken = await widget.config.resolveCfUserToken();
-      if (userToken == null || userToken.isEmpty) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('请先在 Cloudflare 账号卡片登录/注册。')),
-        );
-        return;
-      }
-      token = userToken;
-    } else {
-      token = await widget.config.resolveToken(); // 可能为空（relay 开发期免 token）
+    // 每用户令牌按后端隔离取；未登录则提示先登录/注册。
+    final token = await widget.config.resolveUserToken(backend);
+    if (token == null || token.isEmpty) {
+      _snack('请先在 ${backend.label} 账号卡片登录/注册。', ok: false);
+      return;
     }
 
-    final api = HttpSyncApi(baseUrl: url.trim(), userToken: token ?? '');
+    final api = HttpSyncApi(baseUrl: url, userToken: token);
     final engine = widget.scheduler.engine;
     if (!push) {
       engine.updateLastPulledAt(DateTime.fromMillisecondsSinceEpoch(0, isUtc: true));
     }
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(push ? '正在上传…' : '正在拉取…')),
-    );
+    _snack(push ? '正在上传…' : '正在拉取…');
     await widget.statusStore.setStatus('syncing');
     try {
       if (push) {
@@ -309,14 +326,10 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
         await widget.statusStore.setStatus('ok');
         if (!mounted) return;
         final failedNote = failed > 0 ? '，失败 $failed 条' : '';
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              '上传完成：增量 ${inc.pushed} 条 + 快照 ${snap.pushed} 条，'
-              '共 $total 条$failedNote',
-            ),
-            backgroundColor: failed > 0 ? Colors.red : Colors.green,
-          ),
+        _snack(
+          '上传到 ${backend.label} 完成：增量 ${inc.pushed} 条 + 快照 ${snap.pushed} 条，'
+          '共 $total 条$failedNote',
+          ok: failed == 0,
         );
       } else {
         final report = await engine.pull(api: api);
@@ -326,35 +339,78 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
         // skipped 也是证据：它 = 「服务端确实存有本机自己上传的行」。
         // 只报 applied 的话，自己刚传上去的数据拉回来会显示「应用 0 条」，
         // 让人误以为拉取失败。
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              '拉取完成：应用 ${report.applied} 条变更，'
-              '跳过 ${report.skipped} 条（本机自己上传的）',
-            ),
-            backgroundColor: Colors.green,
-          ),
+        _snack(
+          '从 ${backend.label} 拉取完成：应用 ${report.applied} 条变更，'
+          '跳过 ${report.skipped} 条（本机自己上传的）',
         );
       }
     } on Object catch (e) {
       await widget.statusStore.setStatus('error:$e');
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(push ? '上传失败：$e' : '拉取失败：$e'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      _snack(push ? '上传失败：$e' : '拉取失败：$e', ok: false);
     }
+  }
+
+  /// 后端选择器：三个后端一行 Chip（Wrap 防窄屏溢出），选中态明显。
+  Widget _backendSelector() {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Icon(Icons.swap_horiz_outlined,
+                color: theme.colorScheme.primary, size: 20),
+            const SizedBox(width: 6),
+            const Text(
+              '同步后端',
+              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final b in SyncBackend.values)
+              ChoiceChip(
+                label: Text(_chipLabel(b)),
+                selected: b == _backend,
+                onSelected: (_) => _selectBackend(b),
+              ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Text(
+          '当前：${_backend.label} · '
+          '${_resolvedUrlText()}',
+          style: TextStyle(color: theme.hintColor, fontSize: 11),
+        ),
+      ],
+    );
+  }
+
+  /// Chip 文案；Vercel 内置域名还没回填时加「（待配置）」提示，
+  /// 回填后该提示自动消失（域名是编译期常量）。
+  String _chipLabel(SyncBackend b) {
+    if (b == SyncBackend.vercel &&
+        SyncConfig.kSyncVercelDefaultBaseUrl.isEmpty) {
+      return '${b.label}（待配置）';
+    }
+    return b.label;
+  }
+
+  String _resolvedUrlText() {
+    final url = widget.config.urlOf(_backend).trim();
+    return url.isEmpty ? '地址未配置' : url;
   }
 
   /// 「我的账号」卡片：顶部状态徽章（已登录/未登录）+ 账号信息 / 登录注册表单。
   ///
   /// 登录/注册成功后 `setState` 触发重建 → 徽章由灰「未登录」变绿「已登录」
   /// 并显示用户名，状态切换肉眼可辨；失败则该卡片保持「未登录」+ 红条提示。
-  Widget _cfAccountCard() {
-    final username = widget.config.cfUsername;
-    final loggedIn = username != null && username.isNotEmpty;
+  Widget _accountCard() {
     final theme = Theme.of(context);
     return Container(
       padding: const EdgeInsets.all(12),
@@ -373,37 +429,39 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
                 size: 22,
               ),
               const SizedBox(width: 6),
-              const Text(
-                '我的账号',
-                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+              Text(
+                '${_backend.label} 账号',
+                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
               ),
               const Spacer(),
               _StatusChip(
-                text: loggedIn ? '已登录' : '未登录',
-                ok: loggedIn,
+                text: _loggedIn ? '已登录' : '未登录',
+                ok: _loggedIn,
               ),
             ],
           ),
           const SizedBox(height: 10),
-          if (loggedIn) ...[
+          if (_loggedIn) ...[
             _ReadOnlyField(
-              label: 'Cloudflare 账号',
-              value: username,
-              note: '已登录（每用户令牌本机 SecretStore 保存）',
+              label: '已登录账号',
+              value: widget.config.usernameOf(_backend) ?? '',
+              note: '每用户令牌本机 SecretStore 保存（各后端账号互相独立）',
             ),
             const SizedBox(height: 8),
             FilledButton.tonal(
-              onPressed: _logoutCf,
+              onPressed: _logout,
               child: const Text('退出登录'),
             ),
           ] else ...[
             TextField(
-              controller: _cfUser,
+              controller: _user,
+              enabled: !_busy,
               decoration: const InputDecoration(labelText: '用户名'),
             ),
             const SizedBox(height: 8),
             TextField(
-              controller: _cfPass,
+              controller: _pass,
+              enabled: !_busy,
               obscureText: true,
               decoration: const InputDecoration(
                 labelText: '密码',
@@ -415,14 +473,14 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
               children: [
                 Expanded(
                   child: FilledButton(
-                    onPressed: () => _account(register: false),
+                    onPressed: _busy ? null : () => _account(register: false),
                     child: const Text('登录'),
                   ),
                 ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: OutlinedButton(
-                    onPressed: () => _account(register: true),
+                    onPressed: _busy ? null : () => _account(register: true),
                     child: const Text('注册'),
                   ),
                 ),
@@ -441,14 +499,57 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     );
   }
 
+  /// 上传 / 拉取按钮（对当前选中后端）。
+  ///
+  /// 后端没配地址时按钮禁用并给出明确原因——Vercel 域名待部署回填就是典型
+  /// 场景，不能静默失败。
+  Widget _syncButtons() {
+    final theme = Theme.of(context);
+    final urlReady = widget.config.urlOf(_backend).trim().isNotEmpty;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: FilledButton.icon(
+                onPressed: urlReady ? () => _runSync(push: true) : null,
+                icon: const Icon(Icons.cloud_upload_outlined),
+                label: Text('上传本地到 ${_backend.label}'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: FilledButton.icon(
+                onPressed: urlReady ? () => _runSync(push: false) : null,
+                icon: const Icon(Icons.cloud_download_outlined),
+                label: Text('从 ${_backend.label} 拉取'),
+              ),
+            ),
+          ],
+        ),
+        if (!urlReady)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              '${_backend.label} 尚未配置地址，暂不能同步'
+              '（Vercel 域名待部署完成后回填，其他后端可在下方自定义地址）。',
+              style: TextStyle(color: theme.hintColor, fontSize: 11),
+            ),
+          ),
+      ],
+    );
+  }
+
   /// 「服务器与网络」卡片：自定义同步地址 + 自定义 HTTP 代理。
   ///
   /// 存在的理由：实测有用户线路既被 DNS 投毒（返回黑洞 IP），又把 Cloudflare
   /// 的 IP 段整个封掉——连 DoH 拿到的真 IP 也 TCP 超时。这种环境里，换国内
   /// 中继（改地址）或走代理出国（填代理）是唯二出路，都应该**不用重新编译
-  /// App** 就能配。
+  /// App** 就能配。地址编辑的是当前选中后端。
   Widget _serverNetworkCard() {
     final theme = Theme.of(context);
+    final fallback = widget.config.urlOf(_backend).trim();
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -473,9 +574,10 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
             controller: _endpoint,
             enabled: !_busy,
             decoration: InputDecoration(
-              labelText: '同步服务器地址',
-              helperText:
-                  '留空则使用内置默认：${SyncConfig.kSyncCfDefaultBaseUrl}',
+              labelText: '同步服务器地址（${_backend.label}）',
+              helperText: fallback.isEmpty
+                  ? '该后端暂无内置默认地址，请填写完整地址'
+                  : '留空则使用内置默认：$fallback',
               helperMaxLines: 2,
             ),
           ),
@@ -485,7 +587,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
             enabled: !_busy,
             decoration: const InputDecoration(
               labelText: 'HTTP 代理',
-              helperText: '例如 127.0.0.1:7890，留空则直连/自动探测',
+              helperText: '例如 127.0.0.1:7890，留空则直连/自动探测（全局生效）',
             ),
           ),
           const SizedBox(height: 10),
@@ -577,52 +679,17 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // 登录卡片（Cloudflare 自助注册 / 登录）
-              _cfAccountCard(),
+              // 顶部：后端选择器（三选一，记住上次选择）
+              _backendSelector(),
+              const SizedBox(height: 16),
+              // 当前后端的账号卡片（自助注册 / 登录，各后端互相独立）
+              _accountCard(),
+              const SizedBox(height: 16),
+              // 上传 / 拉取（对当前选中后端）
+              _syncButtons(),
               const SizedBox(height: 16),
               // 「服务器与网络」卡片（自定义同步地址 / HTTP 代理）
               _serverNetworkCard(),
-              const SizedBox(height: 16),
-              // 手动同步：两个目标 × 上传 / 拉取 = 四个按钮
-              Row(
-                children: [
-                  Expanded(
-                    child: FilledButton.icon(
-                      onPressed: () => _runSync(toCf: false, push: true),
-                      icon: const Icon(Icons.cloud_upload_outlined),
-                      label: const Text('上传到 llmserver'),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: FilledButton.icon(
-                      onPressed: () => _runSync(toCf: true, push: true),
-                      icon: const Icon(Icons.cloud_upload_outlined),
-                      label: const Text('上传到 CF'),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: FilledButton.icon(
-                      onPressed: () => _runSync(toCf: false, push: false),
-                      icon: const Icon(Icons.cloud_download_outlined),
-                      label: const Text('从 llmserver 拉取'),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: FilledButton.icon(
-                      onPressed: () => _runSync(toCf: true, push: false),
-                      icon: const Icon(Icons.cloud_download_outlined),
-                      label: const Text('从 CF 拉取'),
-                    ),
-                  ),
-                ],
-              ),
             ],
           ),
         ),

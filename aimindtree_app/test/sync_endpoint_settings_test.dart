@@ -69,18 +69,22 @@ void main() {
       expect(config.cfProxy, '127.0.0.1:7890');
     });
 
-    test('clear() 一并复位 cfProxy（含 cfUrl / token）', () async {
-      await config.setCfUrl('https://my-relay.example.com');
+    test('clear() 一并复位 cfProxy（含地址 / 每用户令牌）', () async {
+      await config.setUrl(
+          SyncBackend.cloudflare, 'https://my-relay.example.com');
       await config.setCfProxy('127.0.0.1:7890');
-      await config.setCfToken('t');
+      await config.setUserToken(SyncBackend.cloudflare, 't');
       expect(config.cfProxy, '127.0.0.1:7890');
 
       await config.clear();
       expect(config.cfProxy, isNull);
-      expect(config.cfUrl, isNull);
-      expect(config.cfToken, isNull);
+      expect(config.urlOverrideOf(SyncBackend.cloudflare), isNull);
+      expect(await config.resolveUserToken(SyncBackend.cloudflare), isNull);
       // 地址清空后回落到内置默认（用户「什么都没配」的开箱体验）。
-      expect(config.cfUrlResolved, SyncConfig.kSyncCfDefaultBaseUrl);
+      expect(
+        config.urlOf(SyncBackend.cloudflare),
+        SyncConfig.kSyncCfDefaultBaseUrl,
+      );
     });
   });
 
@@ -308,7 +312,7 @@ void main() {
           File('lib/features/settings/sync_settings_section.dart').readAsStringSync();
       expect(source, contains('setCfProxy'));
       expect(source, contains('setUserProxy'));
-      expect(source, contains('setCfUrl'));
+      expect(source, contains('setUrl('));
       expect(source, contains('createDirectHttpClient'));
     });
   });

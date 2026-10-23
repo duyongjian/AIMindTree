@@ -1,9 +1,9 @@
 /// 任务 B / 任务 I 测试：
 ///
 /// B. `AppConfigService` 消费管理后台下发的同步配置（`GET /v1/app/config`
-///    的 `sync` 段）：
-///    ① 带 sync{base_url, enabled:true, token:'tok'} → SyncConfig.base_url
-///       写入、enabled pref=true、SecretStore 有 token；
+///    的 `sync` 段，多后端口径：写入「当前选中后端」）：
+///    ① 带 sync{base_url, token:'tok'} → 选中后端（默认 cloudflare）地址
+///       写入、SecretStore 每用户令牌键有 token；
 ///    ② 无 sync 段（旧服务）→ 本地值分毫不动（优雅降级）；
 ///    ③ token 为 null 但 token_set=true → 不动本地 token。
 ///
@@ -109,7 +109,7 @@ void main() {
         };
       }
 
-      test('① 带 sync{base_url,enabled:true,token} → 写 SyncConfig/prefs/SecretStore',
+      test('① 带 sync{base_url,token} → 写选中后端地址 / SecretStore 每用户令牌',
           () async {
         final base = await _startConfig(_payload(<String, Object?>{
           'base_url': 'https://sync.example.com/functions/v1/ai-proxy',
@@ -127,27 +127,29 @@ void main() {
           secretStore: store,
         );
 
-        // base_url 写入 prefs（SyncConfig.base_url）。
+        // base_url 写入「当前选中后端」的地址覆盖（默认 cloudflare → cf_url）。
         expect(
-          syncConfig.baseUrl,
+          syncConfig.urlOf(SyncBackend.cloudflare),
           'https://sync.example.com/functions/v1/ai-proxy',
         );
-        // enabled 作为默认写 aimindtree.sync.enabled。
-        expect(prefs.getBool('aimindtree.sync.enabled'), isTrue);
-        expect(syncConfig.enabled, isTrue);
-        // token 存入 SecretStore 并设 token_ref（sync_<ulid> 机制）。
-        final ref = syncConfig.tokenRef;
-        expect(ref, isNotNull);
-        expect(ref, startsWith('sync_'));
-        expect(await store.get(ref!), 'tok');
+        expect(
+          prefs.getString('aimindtree.sync.cf_url'),
+          'https://sync.example.com/functions/v1/ai-proxy',
+        );
+        // token 存入 SecretStore 的每用户令牌键（按后端隔离）。
+        expect(await store.get('aimindtree.sync.cf_user_token'), 'tok');
+        expect(
+          await syncConfig.resolveUserToken(SyncBackend.cloudflare),
+          'tok',
+        );
       });
 
       test('② 无 sync 段（旧服务）→ 本地值不动', () async {
-        // 预置本地值。
-        await syncConfig.setBaseUrl('http://local-sync:9999');
-        await syncConfig.setEnabled(false);
-        await store.set('sync_local', 'local-tok');
-        await syncConfig.setTokenRef('sync_local');
+        // 预置本地值（选中后端的地址 + 每用户令牌）。
+        await syncConfig.setUrl(
+            SyncBackend.cloudflare, 'http://local-sync:9999');
+        await syncConfig.setUsername(SyncBackend.cloudflare, 'local-user');
+        await store.set('aimindtree.sync.cf_user_token', 'local-tok');
 
         final base = await _startConfig(_payload(null));
         await AppConfigService.fetch(candidates: <String>[base]);
@@ -159,17 +161,19 @@ void main() {
           secretStore: store,
         );
 
-        expect(syncConfig.baseUrl, 'http://local-sync:9999');
-        expect(prefs.getBool('aimindtree.sync.enabled'), isFalse);
-        expect(syncConfig.tokenRef, 'sync_local');
-        expect(await store.get('sync_local'), 'local-tok');
+        expect(syncConfig.urlOf(SyncBackend.cloudflare), 'http://local-sync:9999');
+        expect(
+          await syncConfig.resolveUserToken(SyncBackend.cloudflare),
+          'local-tok',
+        );
+        expect(await store.get('aimindtree.sync.cf_user_token'), 'local-tok');
       });
 
       test('③ token 为 null 但 token_set=true → 不动本地 token；base_url 空不覆盖',
           () async {
-        await syncConfig.setBaseUrl('http://local-sync:9999');
-        await store.set('sync_local', 'local-tok');
-        await syncConfig.setTokenRef('sync_local');
+        await syncConfig.setUrl(
+            SyncBackend.cloudflare, 'http://local-sync:9999');
+        await store.set('aimindtree.sync.cf_user_token', 'local-tok');
 
         final base = await _startConfig(_payload(<String, Object?>{
           'base_url': '',
@@ -186,10 +190,13 @@ void main() {
         );
 
         // base_url 下发为空 → 保留本地值。
-        expect(syncConfig.baseUrl, 'http://local-sync:9999');
+        expect(syncConfig.urlOf(SyncBackend.cloudflare), 'http://local-sync:9999');
         // token_set=true 但无明文 → 本地 token 原样保留。
-        expect(syncConfig.tokenRef, 'sync_local');
-        expect(await store.get('sync_local'), 'local-tok');
+        expect(
+          await syncConfig.resolveUserToken(SyncBackend.cloudflare),
+          'local-tok',
+        );
+        expect(await store.get('aimindtree.sync.cf_user_token'), 'local-tok');
       });
     },
   );

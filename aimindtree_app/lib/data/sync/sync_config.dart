@@ -1,82 +1,175 @@
-/// SyncConfig：同步后端配置（T03）。
+/// SyncConfig：多后端同步配置（T03 演进：Cloudflare / CloudBase / Vercel）。
 ///
-/// - `aimindtree.sync.base_url`：服务端 URL（明文存 prefs）；
-/// - `aimindtree.sync.token_ref`：SecretStore 里的引用名；
-/// - `aimindtree.sync.enabled`：是否开启自动同步。
+/// 三个同步中继的 HTTP 契约逐字一致（同样的 5 端点、同样字段、同样 Bearer
+/// 鉴权），App 侧换后端只换地址；原 llm_server 同步目标已随「中继化」移除。
 ///
-/// token 本身不入 prefs，必须经 `SecretStore.resolveApiKey(token_ref)` 取。
+/// 存储口径：
+/// - 每个后端三件套独立存放：地址 / 用户名（明文 prefs）+ 每用户令牌
+///   （SecretStore，key 均带后端后缀，见 [SyncBackend.keySuffix]）；
+/// - **cloudflare 刻意沿用旧 key**（`aimindtree.sync.cf_url` /
+///   `cf_username` / `cf_user_token`），老用户升级后零迁移继续生效；
+/// - [selectedBackend] 记住上次选中的后端（pref 存枚举 name）；
+/// - HTTP 代理是全局设置（不随后端切换），key 沿用历史的
+///   `aimindtree.sync.cf_proxy`（改名会丢老用户已存代理）。
 library;
 
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/secret_store.dart';
 
+/// 同步后端枚举（设置页三选一）。
+enum SyncBackend {
+  cloudflare,
+  cloudbase,
+  vercel;
+
+  /// UI 展示名（中文）。
+  String get label => switch (this) {
+        SyncBackend.cloudflare => 'Cloudflare',
+        SyncBackend.cloudbase => '腾讯云 CloudBase',
+        SyncBackend.vercel => 'Vercel',
+      };
+
+  /// pref / SecretStore key 的稳定后缀（不随枚举顺序变化）。
+  ///
+  /// cloudflare 用 `cf` 是为了兼容老用户已存的数据（见类文档）。
+  String get keySuffix => switch (this) {
+        SyncBackend.cloudflare => 'cf',
+        SyncBackend.cloudbase => 'cb',
+        SyncBackend.vercel => 'vc',
+      };
+
+  /// 内置默认地址（用户未覆盖时回落）。
+  String get defaultBaseUrl => switch (this) {
+        SyncBackend.cloudflare => SyncConfig.kSyncCfDefaultBaseUrl,
+        SyncBackend.cloudbase => SyncConfig.kSyncCbDefaultBaseUrl,
+        SyncBackend.vercel => SyncConfig.kSyncVercelDefaultBaseUrl,
+      };
+}
+
 class SyncConfig {
   SyncConfig({required this.prefs, required this.secretStore});
   final SharedPreferences prefs;
   final SecretStore secretStore;
 
-  static const _kBaseUrl = 'aimindtree.sync.base_url';
-  static const _kTokenRef = 'aimindtree.sync.token_ref';
-  static const _kEnabled = 'aimindtree.sync.enabled';
-
-  // ---- Cloudflare 目标（方案 B：Worker + D1）----
-  static const _kCfUrl = 'aimindtree.sync.cf_url';
-  static const _kCfTokenRef = 'aimindtree.sync.cf_token_ref';
-  /// 开发期直存 token（不经 SecretStore；生产仍走 token_ref）。
-  static const _kCfToken = 'aimindtree.sync.cf_token';
-  /// 用户手动指定的 HTTP 代理（`host:port`）。
-  ///
-  /// 与地址同理的「逃生舱」：本机线路把 Cloudflare IP 段整个封掉时，用户
-  /// 可以在设置里配代理出国，无需重新编译 App。
-  static const _kCfProxy = 'aimindtree.sync.cf_proxy';
-
-  /// 未单独配置时的 llm_server 默认地址（与 kLlmServerDefaultBaseUrl 同源）。
-  static const String kSyncLlmServerDefaultBaseUrl = 'http://127.0.0.1:8787';
-
-  /// 内置 Cloudflare Worker 默认地址（方案 B 已部署）。
-  /// App 自带该地址，普通用户**无需填写**；若更换 Worker 域名，改这里即可
-  /// （用户仍可在设置里自定义覆盖，存到 [_kCfUrl]）。
+  /// 内置默认地址：Cloudflare Worker（sync_relay_cf，已部署）。
   static const String kSyncCfDefaultBaseUrl =
       'https://aimindtree-sync-relay.tuanx.workers.dev';
 
-  String? get baseUrl => prefs.getString(_kBaseUrl);
-  Future<void> setBaseUrl(String v) async => prefs.setString(_kBaseUrl, v);
+  /// 内置默认地址：腾讯云 CloudBase 同步中继（sync_relay_cn，已部署）。
+  static const String kSyncCbDefaultBaseUrl =
+      'https://mindtree-d7glv6crkd8e9fba9-1409358097.ap-shanghai.app.tcloudbase.com';
 
-  String? get tokenRef => prefs.getString(_kTokenRef);
-  Future<void> setTokenRef(String? v) async {
-    if (v == null) {
-      await prefs.remove(_kTokenRef);
+  /// 内置默认地址：Vercel 同步中继（sync_relay_vercel）。
+  ///
+  /// ⚠️ 域名待 Vercel 部署完成后由主理人回填；空串表示「尚未配置」——
+  /// [urlOf] 对 vercel 返回空串，UI 据此禁用上传/拉取并提示，不会静默失败。
+  /// 用户手填的覆盖值不受影响（优先于内置默认）。
+  static const String kSyncVercelDefaultBaseUrl = '';
+
+  /// 当前选中后端（pref 存枚举 name；读不到 / 脏值 → cloudflare）。
+  static const _kBackend = 'aimindtree.sync.backend';
+
+  /// 用户手动指定的 HTTP 代理（`host:port`）。
+  ///
+  /// 与地址同理的「逃生舱」：本机线路把 Cloudflare IP 段整个封掉时，用户
+  /// 可以在设置里配代理出国，无需重新编译 App。这是**全局**设置，不随后端
+  /// 切换；key 名沿用历史 `cf_proxy`（改名会丢老用户已存代理）。
+  static const _kProxy = 'aimindtree.sync.cf_proxy';
+
+  /// 历史遗留 key（llm_server 同步目标 / CF 直存共享 token，均已废弃）。
+  /// 仅在 [clear] 时顺带清理，避免「清空配置」后旧 key 残留造成困惑。
+  static const _kLegacyBaseUrl = 'aimindtree.sync.base_url';
+  static const _kLegacyTokenRef = 'aimindtree.sync.token_ref';
+  static const _kLegacyEnabled = 'aimindtree.sync.enabled';
+  static const _kLegacyCfToken = 'aimindtree.sync.cf_token';
+  static const _kLegacyCfTokenRef = 'aimindtree.sync.cf_token_ref';
+
+  // ---- 每后端 key 构造（形如 aimindtree.sync.<后缀>_url）----
+
+  static String _kUrl(SyncBackend b) => 'aimindtree.sync.${b.keySuffix}_url';
+  static String _kUsername(SyncBackend b) =>
+      'aimindtree.sync.${b.keySuffix}_username';
+  static String _kUserToken(SyncBackend b) =>
+      'aimindtree.sync.${b.keySuffix}_user_token';
+
+  // ---- 选中后端 ----
+
+  SyncBackend get selectedBackend {
+    final name = prefs.getString(_kBackend);
+    for (final b in SyncBackend.values) {
+      if (b.name == name) return b;
+    }
+    return SyncBackend.cloudflare;
+  }
+
+  Future<void> setSelectedBackend(SyncBackend b) async =>
+      prefs.setString(_kBackend, b.name);
+
+  // ---- 每后端：地址 ----
+
+  /// 用户手填的地址覆盖（未填 → null）。
+  ///
+  /// 设置页回显用这个（而不是 [urlOf]），否则会把内置默认显示成「用户填过
+  /// 的值」，让用户以为自己改过。
+  String? urlOverrideOf(SyncBackend b) => prefs.getString(_kUrl(b));
+
+  /// 后端实际地址：用户覆盖优先，未配置时回落到内置默认地址。
+  /// 普通用户开箱即用，无需在设置里填 URL；Vercel 域名未回填时返回空串。
+  String urlOf(SyncBackend b) {
+    final v = urlOverrideOf(b)?.trim();
+    return (v != null && v.isNotEmpty) ? v : b.defaultBaseUrl;
+  }
+
+  /// 设置 / 清除地址覆盖；空串（或纯空白）视为「清除覆盖」，回落到内置默认。
+  Future<void> setUrl(SyncBackend b, String v) async {
+    final trimmed = v.trim();
+    if (trimmed.isEmpty) {
+      await prefs.remove(_kUrl(b));
     } else {
-      await prefs.setString(_kTokenRef, v);
+      await prefs.setString(_kUrl(b), trimmed);
     }
   }
 
-  bool get enabled => prefs.getBool(_kEnabled) ?? false;
-  Future<void> setEnabled(bool v) async => prefs.setBool(_kEnabled, v);
+  // ---- 每后端：账号（用户名 + 每用户令牌）----
+  // 三个后端的账号体系互相独立（同一用户在 CF 与 CloudBase 上是不同账号），
+  // 用户名 / 令牌按后端隔离存储，A 后端登录不影响 B。
+  // 用户名明文落 prefs；每用户令牌经 SecretStore 保存（本机，不随 DB 上传）。
 
-  /// 取出实际 token（仅供 HttpSyncApi 构造用）。
-  Future<String?> resolveToken() async {
-    final ref = tokenRef;
-    if (ref == null) return null;
-    return secretStore.get(ref);
+  String? usernameOf(SyncBackend b) => prefs.getString(_kUsername(b));
+
+  /// 设置 / 清除用户名；null 或空白视为清除（pref 不留空串，避免歧义）。
+  Future<void> setUsername(SyncBackend b, String? v) async {
+    final trimmed = v?.trim();
+    if (trimmed == null || trimmed.isEmpty) {
+      await prefs.remove(_kUsername(b));
+    } else {
+      await prefs.setString(_kUsername(b), trimmed);
+    }
   }
 
-  // ---- Cloudflare 目标配置 ----
+  /// 取出后端每用户令牌（登录/注册后由 [setUserToken] 写入 SecretStore）。
+  Future<String?> resolveUserToken(SyncBackend b) async =>
+      secretStore.get(_kUserToken(b));
 
-  String? get cfUrl => prefs.getString(_kCfUrl);
-  Future<void> setCfUrl(String v) async => prefs.setString(_kCfUrl, v);
-
-  /// CF 目标实际地址：用户自定义优先，未配置时回落到内置默认地址。
-  /// 普通用户开箱即用，无需在设置里填 URL。
-  String get cfUrlResolved {
-    final v = cfUrl?.trim();
-    return (v != null && v.isNotEmpty) ? v : kSyncCfDefaultBaseUrl;
+  /// 登录/注册成功后保存每用户令牌；[token] 为 null/空串表示登出（清令牌）。
+  Future<void> setUserToken(SyncBackend b, String? token) async {
+    if (token == null || token.isEmpty) {
+      await secretStore.delete(_kUserToken(b));
+    } else {
+      await secretStore.set(_kUserToken(b), token);
+    }
   }
+
+  /// 后端是否处于已登录状态（用户名非空且本地存有令牌）。
+  Future<bool> isLoggedIn(SyncBackend b) async =>
+      (usernameOf(b)?.isNotEmpty ?? false) && (await resolveUserToken(b)) != null;
+
+  // ---- 全局：HTTP 代理（不随后端切换）----
 
   /// 用户手动指定的 HTTP 代理（`host:port`）；未设置（或只填了空白）→ null。
   String? get cfProxy {
-    final v = prefs.getString(_kCfProxy)?.trim();
+    final v = prefs.getString(_kProxy)?.trim();
     return (v == null || v.isEmpty) ? null : v;
   }
 
@@ -85,93 +178,27 @@ class SyncConfig {
   Future<void> setCfProxy(String? v) async {
     final trimmed = v?.trim() ?? '';
     if (trimmed.isEmpty) {
-      await prefs.remove(_kCfProxy);
+      await prefs.remove(_kProxy);
     } else {
-      await prefs.setString(_kCfProxy, trimmed);
+      await prefs.setString(_kProxy, trimmed);
     }
   }
 
-  String? get cfTokenRef => prefs.getString(_kCfTokenRef);
-  Future<void> setCfTokenRef(String? v) async {
-    if (v == null) {
-      await prefs.remove(_kCfTokenRef);
-    } else {
-      await prefs.setString(_kCfTokenRef, v);
-    }
-  }
-
-  /// 开发期直存 token（明文落 prefs，仅本机；生产请用 [cfTokenRef] + SecretStore）。
-  String? get cfToken => prefs.getString(_kCfToken);
-  Future<void> setCfToken(String? v) async {
-    if (v == null) {
-      await prefs.remove(_kCfToken);
-    } else {
-      await prefs.setString(_kCfToken, v);
-    }
-  }
-
-  // ---- Cloudflare 账号（方案 B，自助注册/登录，多租户隔离）----
-  // 普通用户用用户名+密码登录即可，无需填写任何共享 token。
-  // 用户名明文落 prefs；每用户令牌经 SecretStore 保存（本机，不随 DB 上传）。
-  static const _kCfUsername = 'aimindtree.sync.cf_username';
-  static const _kCfUserToken = 'aimindtree.sync.cf_user_token';
-
-  String? get cfUsername => prefs.getString(_kCfUsername);
-  Future<void> setCfUsername(String? v) async =>
-      v == null ? prefs.remove(_kCfUsername) : prefs.setString(_kCfUsername, v);
-
-  /// 取出 CF 每用户令牌（登录/注册后由 [setCfUserToken] 写入 SecretStore）。
-  Future<String?> resolveCfUserToken() async => secretStore.get(_kCfUserToken);
-
-  /// 登录/注册成功后保存每用户令牌；[token] 为 null 表示登出（清本地令牌）。
-  Future<void> setCfUserToken(String? token) async {
-    if (token == null) {
-      await secretStore.delete(_kCfUserToken);
-    } else {
-      await secretStore.set(_kCfUserToken, token);
-    }
-  }
-
-  /// CF 是否处于已登录状态（用户名非空且本地存有令牌）。
-  Future<bool> isCfLoggedIn() async =>
-      (cfUsername?.isNotEmpty ?? false) && (await resolveCfUserToken()) != null;
-
-  /// llm 目标 URL：用户未单独配时默认本机 llm_server（开发期免 token）。
-  String get llmUrl =>
-      (baseUrl?.isNotEmpty ?? false) ? baseUrl! : kSyncLlmServerDefaultBaseUrl;
-
-  /// 原「单一目标」是否就绪（baseUrl + tokenRef 都非空）。
-  bool get isConfigured => (baseUrl?.isNotEmpty ?? false) && (tokenRef?.isNotEmpty ?? false);
-
-  /// llm 目标是否可用（默认指向 localhost，永远可用）。
-  bool get isLlmConfigured => llmUrl.isNotEmpty;
-
-  /// CF 目标是否可用（地址恒有内置默认，故只看 token 是否就绪）。
-  bool get isCfConfigured =>
-      cfUrlResolved.isNotEmpty &&
-      ((cfTokenRef?.isNotEmpty ?? false) || (cfToken?.isNotEmpty ?? false));
-
-  /// 取出 CF token：优先 token_ref（SecretStore），回退开发期直存 token。
-  /// 两端都未设置时返回空串——对应 Worker 的「开放部署」（SYNC_TOKEN 留空放行），
-  /// 因此普通用户无需填写 token 也能与官方/个人开放中继互通。
-  Future<String?> resolveCfToken() async {
-    final ref = cfTokenRef;
-    if (ref != null) {
-      final fromStore = await secretStore.get(ref);
-      if (fromStore != null && fromStore.isNotEmpty) return fromStore;
-    }
-    final direct = cfToken;
-    if (direct != null && direct.isNotEmpty) return direct;
-    return '';
-  }
-
+  /// 清空全部同步配置：所有后端的地址 / 用户名 / 每用户令牌、选中后端
+  /// （回落 cloudflare）、手动代理，并顺带清理历史遗留 key。
   Future<void> clear() async {
-    await prefs.remove(_kBaseUrl);
-    await prefs.remove(_kTokenRef);
-    await prefs.remove(_kEnabled);
-    await prefs.remove(_kCfUrl);
-    await prefs.remove(_kCfTokenRef);
-    await prefs.remove(_kCfToken);
-    await prefs.remove(_kCfProxy);
+    for (final b in SyncBackend.values) {
+      await prefs.remove(_kUrl(b));
+      await prefs.remove(_kUsername(b));
+      await secretStore.delete(_kUserToken(b));
+    }
+    await prefs.remove(_kBackend);
+    await prefs.remove(_kProxy);
+    // 历史遗留 key（已废弃的 llm 目标 / CF 直存共享 token）。
+    await prefs.remove(_kLegacyBaseUrl);
+    await prefs.remove(_kLegacyTokenRef);
+    await prefs.remove(_kLegacyEnabled);
+    await prefs.remove(_kLegacyCfToken);
+    await prefs.remove(_kLegacyCfTokenRef);
   }
 }
