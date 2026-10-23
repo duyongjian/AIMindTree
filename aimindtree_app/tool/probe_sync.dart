@@ -23,6 +23,18 @@
 //     returns 104.21.x / 172.67.x -> DNS poisoning, DoH path is required and
 //     the probe is what keeps healthy machines on the normal path.
 //
+// Usage:
+//   dart run tool/probe_sync.dart
+//   dart run tool/probe_sync.dart --url=https://my-relay.workers.dev
+//   dart run tool/probe_sync.dart --url=https://sync.example.com --proxy=127.0.0.1:7890
+//
+// --url    full base URL of the sync endpoint to test (default is the built-in
+//          Cloudflare Worker below). Useful when the user has switched to a
+//          domestic relay from Settings > 服务器与网络.
+// --proxy  force a manual proxy (host:port) via setUserProxy(), i.e. exactly
+//          what the Settings field does. Env-var/auto-detected proxy is still
+//          applied when this is omitted.
+//
 // Run: /d/DevTools/flutter/bin/dart run tool/probe_sync.dart
 // (Dart lives outside PATH on this machine; HTTPS requests need no extra deps.)
 
@@ -33,13 +45,42 @@ import 'package:aimindtree_app/data/sync/direct_connect.dart';
 import 'package:aimindtree_app/data/sync/doh_resolver.dart';
 import 'package:aimindtree_app/data/sync/http_proxy.dart';
 
-/// The Cloudflare Workers relay actually used by the app.
-const String kHost = 'aimindtree-sync-relay.tuanx.workers.dev';
+/// The Cloudflare Workers relay actually used by the app (default target).
+const String kDefaultHost = 'aimindtree-sync-relay.tuanx.workers.dev';
 
 /// Budget for each diagnostic HTTP request.
 const Duration kRequestTimeout = Duration(seconds: 25);
 
-Future<void> main() async {
+/// Parses `--key=value` pairs; unknown keys are ignored (hand-written so this
+/// diagnostic tool stays dependency-free).
+Map<String, String> _parseArgs(List<String> args) {
+  final out = <String, String>{};
+  for (final arg in args) {
+    if (!arg.startsWith('--')) continue;
+    final body = arg.substring(2);
+    final idx = body.indexOf('=');
+    if (idx <= 0) continue;
+    out[body.substring(0, idx)] = body.substring(idx + 1);
+  }
+  return out;
+}
+
+Future<void> main(List<String> args) async {
+  final opts = _parseArgs(args);
+  // --url 可以带或不带 scheme；带上了大概率是用户在设置页填的那种完整地址。
+  final raw = opts['url'] ?? 'https://$kDefaultHost';
+  final base = Uri.parse(raw.contains('://') ? raw : 'https://$raw');
+  final host = base.host;
+  final port = base.hasPort ? base.port : 443;
+
+  final proxy = opts['proxy'];
+  stdout.writeln('[0] target = $host:$port');
+  if (proxy != null && proxy.trim().isNotEmpty) {
+    // 等价于设置页里那个「HTTP 代理」字段：手动代理优先级高于自动探测。
+    setUserProxy(proxy);
+    stdout.writeln('    manual proxy = $userProxyOverride');
+  }
+
   stdout.writeln('[1] init proxy...');
   await initSystemProxy();
   stdout.writeln('    detectedSystemProxy = ${detectedSystemProxy ?? "(none)"}');
@@ -58,10 +99,10 @@ Future<void> main() async {
   }
 
   stdout.writeln(
-    '[2] direct reachability (TCP + TLS handshake to $kHost:443)...',
+    '[2] direct reachability (TCP + TLS handshake to $host:$port)...',
   );
   final swProbe = Stopwatch()..start();
-  final reachable = await canReachDirect(kHost, 443, kReachabilityProbeTimeout);
+  final reachable = await canReachDirect(host, port, kReachabilityProbeTimeout);
   stdout.writeln(
     '    canReachDirect = $reachable (${swProbe.elapsedMilliseconds}ms)'
     '${reachable ? " -> no reroute, plain client used" : " -> DoH path enabled"}',
@@ -69,7 +110,7 @@ Future<void> main() async {
 
   stdout.writeln('[3] system DNS lookup...');
   try {
-    final list = await InternetAddress.lookup(kHost);
+    final list = await InternetAddress.lookup(host);
     stdout.writeln('    ${list.map((e) => e.address).toList()}');
   } on Object catch (e) {
     stdout.writeln('    DNS ERROR: $e');
@@ -77,7 +118,7 @@ Future<void> main() async {
 
   stdout.writeln('[4] DoH resolve (forced DIRECT, no proxy)...');
   try {
-    final ips = await sharedDoHResolver.resolveViaDoH(kHost);
+    final ips = await sharedDoHResolver.resolveViaDoH(host);
     stdout.writeln('    ips = $ips');
   } on Object catch (e) {
     stdout.writeln('    DoH ERROR: $e');
@@ -85,23 +126,25 @@ Future<void> main() async {
 
   await _probe(
     'sync client (createDirectHttpClient)',
-    await createDirectHttpClient('https://$kHost'),
+    await createDirectHttpClient(base.toString()),
+    base,
   );
   await _probe(
     'plain client (pre-change baseline)',
     HttpClient()
       ..connectionTimeout = const Duration(seconds: 20)
       ..findProxy = syncFindProxy,
+    base,
   );
 }
 
 /// Fire one real GET through [client] and print status / timing / body head.
-Future<void> _probe(String label, HttpClient client) async {
+Future<void> _probe(String label, HttpClient client, Uri base) async {
   stdout.writeln('[5] GET via $label ...');
   final sw = Stopwatch()..start();
   try {
     final req = await client
-        .getUrl(Uri.parse('https://$kHost/'))
+        .getUrl(base.replace(path: '/'))
         .timeout(kRequestTimeout);
     final resp = await req.close().timeout(kRequestTimeout);
     final body = await resp.transform(utf8.decoder).join();

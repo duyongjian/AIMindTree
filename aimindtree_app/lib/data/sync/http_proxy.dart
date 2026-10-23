@@ -9,6 +9,9 @@
 /// 2. Windows 系统代理注册表 `Internet Settings\ProxyServer`；
 /// 3. 常见本地代理端口探测（Clash 7897/7890、v2rayN 10809/10808、8080、8889）。
 ///
+/// 此外用户可在设置里手动指定代理（[setUserProxy]），其优先级高于上述全部
+/// 自动探测结果——见 [syncFindProxy]。
+///
 /// 手机端（Android/iOS）通常用 VPN 的 TUN/全局模式在系统层接管，无需本逻辑；
 /// 若未探测到，返回 DIRECT（与改前一致）。
 library;
@@ -20,6 +23,23 @@ String? _detectedProxy;
 
 /// 当前探测到的代理（`host:port`），null 表示不走代理（供调试/展示用）。
 String? get detectedSystemProxy => _detectedProxy;
+
+/// 用户在设置里手动指定的代理（`host:port`），null 表示未指定。
+///
+/// 优先级高于自动探测结果——自动探测可能误判（本地 7890 端口在听但实际
+/// 并不通），用户手动填的才是准的。
+String? _userProxy;
+
+/// 用户手动代理（已归一化为 `host:port`），null 表示未设置（供界面回显）。
+String? get userProxyOverride => _userProxy;
+
+/// 设置/清空用户手动代理：`http://127.0.0.1:7890` 之类的写法会被归一化成
+/// `127.0.0.1:7890`；null 或空白表示清空（回落自动探测 / 直连）。
+void setUserProxy(String? hostPort) {
+  final s = hostPort == null ? null : _stripScheme(hostPort);
+  final trimmed = s?.trim() ?? '';
+  _userProxy = trimmed.isEmpty ? null : trimmed;
+}
 
 /// 启动时调用一次：确定代理并缓存。幂等、绝不抛异常。
 Future<void> initSystemProxy() async {
@@ -57,12 +77,21 @@ Future<String?> _validated(String? hostPort) async {
   }
 }
 
-/// 供 `HttpClient.findProxy` 用的同步回调：本机/回环直连，其余走探测到的代理。
+/// 供 `HttpClient.findProxy` 用的同步回调。
+///
+/// 优先级（从高到低）：
+/// 1. 回环地址（localhost / 127.0.0.1 / ::1）→ 恒 `DIRECT`：本机服务必须
+///    直连，否则 llm_server 也会去挤代理；
+/// 2. 用户手动代理（[setUserProxy] / [userProxyOverride]）→ `PROXY host:port`；
+/// 3. 自动探测代理（[initSystemProxy] 的结果）→ `PROXY host:port`；
+/// 4. 都没有 → `DIRECT`（与「不识别代理」时的现状一致）。
 String syncFindProxy(Uri uri) {
   final host = uri.host;
   if (host == 'localhost' || host == '127.0.0.1' || host == '::1') {
     return 'DIRECT';
   }
+  final user = _userProxy;
+  if (user != null && user.isNotEmpty) return 'PROXY $user';
   final p = _detectedProxy;
   if (p == null || p.isEmpty) return 'DIRECT';
   return 'PROXY $p';

@@ -23,8 +23,13 @@ class SyncConfig {
   // ---- Cloudflare 目标（方案 B：Worker + D1）----
   static const _kCfUrl = 'aimindtree.sync.cf_url';
   static const _kCfTokenRef = 'aimindtree.sync.cf_token_ref';
-  // 开发期直存 token（不经 SecretStore；生产仍走 token_ref）。
+  /// 开发期直存 token（不经 SecretStore；生产仍走 token_ref）。
   static const _kCfToken = 'aimindtree.sync.cf_token';
+  /// 用户手动指定的 HTTP 代理（`host:port`）。
+  ///
+  /// 与地址同理的「逃生舱」：本机线路把 Cloudflare IP 段整个封掉时，用户
+  /// 可以在设置里配代理出国，无需重新编译 App。
+  static const _kCfProxy = 'aimindtree.sync.cf_proxy';
 
   /// 未单独配置时的 llm_server 默认地址（与 kLlmServerDefaultBaseUrl 同源）。
   static const String kSyncLlmServerDefaultBaseUrl = 'http://127.0.0.1:8787';
@@ -67,6 +72,23 @@ class SyncConfig {
   String get cfUrlResolved {
     final v = cfUrl?.trim();
     return (v != null && v.isNotEmpty) ? v : kSyncCfDefaultBaseUrl;
+  }
+
+  /// 用户手动指定的 HTTP 代理（`host:port`）；未设置（或只填了空白）→ null。
+  String? get cfProxy {
+    final v = prefs.getString(_kCfProxy)?.trim();
+    return (v == null || v.isEmpty) ? null : v;
+  }
+
+  /// 设置/清空手动代理；null 或空白表示「不走代理」（直接移除 pref，
+  /// 避免留下空串让「是否设置过」产生歧义）。
+  Future<void> setCfProxy(String? v) async {
+    final trimmed = v?.trim() ?? '';
+    if (trimmed.isEmpty) {
+      await prefs.remove(_kCfProxy);
+    } else {
+      await prefs.setString(_kCfProxy, trimmed);
+    }
   }
 
   String? get cfTokenRef => prefs.getString(_kCfTokenRef);
@@ -150,5 +172,6 @@ class SyncConfig {
     await prefs.remove(_kCfUrl);
     await prefs.remove(_kCfTokenRef);
     await prefs.remove(_kCfToken);
+    await prefs.remove(_kCfProxy);
   }
 }
