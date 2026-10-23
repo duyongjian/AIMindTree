@@ -282,7 +282,8 @@ curl -X POST https://<你的域名>/auth/register \
 | 项 | CF 版（worker.js） | 本版 |
 |----|-------------------|------|
 | `GET /` | 404 | **200 + 服务标识**（App「测试连接」需要） |
-| 密码散列算法名 | 源码里写成了非标准算法名（Web Crypto 只认 `PBKDF2`，实跑会 500） | `PBKDF2-SHA256`，Node 内置 crypto，100000 迭代 / 16 字节盐 / 32 字节输出 |
+| 密码散列实现 | Web Crypto `crypto.subtle`（`PBKDF2` + `SHA-256`，异步） | Node 内置 `crypto.pbkdf2Sync`（`sha256`，同步） |
+| 密码散列参数 | 随机 16 字节盐、10 万次迭代、256 bit 输出 → `saltHex:hashHex` | **完全一致**（同一个 PBKDF2 编码结论，与迭代次数/盐长无关地互通） |
 | 全量拉取 | D1 无条数上限 | 云数据库单次 `get()` 默认 100 条，**循环分页取回全部** |
 | 单条记录大小 | SQLite text | 文档型限制单文档 16 MB（envelope 远小于此） |
 
