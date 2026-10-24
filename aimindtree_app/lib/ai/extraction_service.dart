@@ -369,7 +369,7 @@ class ExtractionService {
     final database = db ?? AppDatabase();
     final store = secretStore ?? await FileSecretStore.defaultInstance();
     // 同步设备号：**必须**是「每台设备唯一且持久化」的值（[DeviceId] 存 prefs
-    // 的 ULID）。这里曾用常量 `'local-dev'` 兜底，而 main.dart 又是无参调用
+    // 的 ULID）。这里曾用常量 local-dev 兜底，而 main.dart 又是无参调用
     // bootstrap，结果 PC 与手机拿到**同一个**号码 → pull 的自回声过滤
     // （`sync_engine.dart` 的 `env.deviceId == deviceId`）把服务端**所有**行都
     // 当成「本机自己上传的」跳过，表现为「应用变更 0 条，跳过 N 条」，

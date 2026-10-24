@@ -352,7 +352,9 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         ? Note(
             contentMd: content,
             title: title,
-            deviceId: 'local-dev',
+            // 同步设备号：必须与仓库内其它写入路径同源（每台设备唯一），
+            // 否则本机上传的行会被 pull 的自回声过滤误判为「本机自己上传的」。
+            deviceId: widget.service.repo.deviceId,
           )
         : _note!.copyWith(
             title: title,
