@@ -90,5 +90,12 @@ export default async (request, context) => {
   const siteId =
     (context && context.site && context.site.id) ||
     request.headers.get('x-nf-site-id');
-  return handleFetch(logical, makeStore(siteId), context && context.env ? context.env : {});
+  // env 合并：Netlify 站点环境变量注入在 process.env（Lambda 环境变量）；
+  // context.env 为 v2 Context 直供（存在时优先）。SYNC_PULL_LOOKBACK_MS 等
+  // 运维可调项经 env 传入 handleFetch → effectiveSince 覆盖 lookback。
+  const env = {
+    ...(typeof process !== 'undefined' && process.env ? process.env : {}),
+    ...(context && context.env ? context.env : {}),
+  };
+  return handleFetch(logical, makeStore(siteId), env);
 };

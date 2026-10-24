@@ -23,7 +23,7 @@
  *    故下面从 ``node:crypto`` 取 ``webcrypto`` 兜底（2026-10-24 实测踩坑）。
  * 2. **存储用 Netlify Blobs（``@netlify/blobs``）**：KV 风格键值。本版走官方
  *    「API 访问」模式（显式 siteID + token，见 sync.mjs），读写直达 API 源站，
- *    即强一致；``kPullLookbackMs`` 的 30s 回退窗口仅作跨区/传播的冗余保险。
+ *    即强一致；``kPullLookbackMs`` 仅留 1s 覆盖同毫秒边界（详见其注释）。
  * 3. **Blobs 键名允许 Unicode（≤600B、不能以 / 开头）**：本版仍沿用另四版的
  *    UTF-16 hex 编码键名，保证键格式在五个后端间一致、可迁移。
  * 4. **请求体上限**：Netlify Functions 没有 EdgeOne 那种 1MB 硬限（平台更宽松），
@@ -65,13 +65,16 @@ const CORS_HEADERS = {
 const kMaxBodyBytes = 4 * 1024 * 1024;
 
 /**
- * pull 增量起点回退量（5s）。
+ * pull 增量起点回退量（1s）。
  *
- * Blobs 默认强一致（本版已开启 ``consistency:'strong'``），写入立即可读；降级
- * 最终一致时留 30s 余量以覆盖边缘缓存传播。测试里可经 store/env 把 lookback 置 0
- * 拿到严格增量语义。
+ * 本版走 Blobs API 访问模式：读写直达源站 = 强一致，且 ``since`` 用的是中继
+ * 自己赋值的 server_time（同源时钟、无偏斜），正常增量无需回退窗口。留 1s
+ * 只为覆盖边界：push 若恰落在上次 pull 的同一毫秒（server_time 相等），严格
+ * ``>`` 比较会漏掉这条。窗口内重复返回的 envelope 由 App 端自回声过滤 + LWW
+ * 幂等合并消化，无副作用。测试可经 store/env 的 ``SYNC_PULL_LOOKBACK_MS``
+ * 覆盖（置 0 拿严格增量语义）。
  */
-const kPullLookbackMs = 30 * 1000;
+const kPullLookbackMs = 1 * 1000;
 
 /** PBKDF2 迭代次数（与另四版一致，哈希值可互相移植）。 */
 const PBKDF2_ITER = 100000;
@@ -350,8 +353,9 @@ async function handlePush(request, store, ownerId) {
 /**
  * pull 的增量起点：``min(since, now - lookback)``。
  *
- * 对抗跨区域复制边界（见 [kPullLookbackMs]）。since 缺失/不可解析 → 全量。
- * lookback 可用 store/env 的 ``SYNC_PULL_LOOKBACK_MS`` 覆盖（测试置 0 拿严格语义）。
+ * lookback 仅覆盖同毫秒边界（见 [kPullLookbackMs]）；强一致模式下窗口内重复
+ * 返回由 App 幂等合并。since 缺失/不可解析 → 全量。lookback 可用 store/env 的
+ * ``SYNC_PULL_LOOKBACK_MS`` 覆盖（测试置 0 拿严格增量语义）。
  */
 export function effectiveSince(since, env) {
   const override = env && env.SYNC_PULL_LOOKBACK_MS;

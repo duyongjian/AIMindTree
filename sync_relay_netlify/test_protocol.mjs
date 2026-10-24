@@ -159,6 +159,24 @@ async function main() {
     check('incremental pull strict (since=now) empty', status === 200 && data.envelopes.length === 0);
   }
 
+  // 12b) 默认 lookback（1s）行为（2026-10-24 用户实测回归：push 后 30s 内的
+  // pull 曾把整个快照重投，表现为「只有快照没有增量」；窗口收紧到 1s 后）：
+  //   窗口内 since=刚拿到的 server_time 仍重复返回（App 端自回声 + LWW 幂等）；
+  //   窗口（>1s）过后同参数 pull 必须只返回新 envelope（严格增量）。
+  {
+    const { data: w } = await json(h(req('POST', '/sync/pull', { device_id: 'devA', since: serverTime }, envA)));
+    check('default lookback: within-window re-returns idempotently', w && w.envelopes.length === 2);
+    const { data: p2 } = await json(h(req('POST', '/sync/push', { device_id: 'devA', envelopes: [{ device_id: 'devA', entity_table: 'notes', entity_id: 'n3', op: 'upsert', payload: { title: 'A note 3' }, base_version: 0, updated_at: '2026-01-03T00:00:00Z', deleted_at: null }] }, envA)));
+    const t2 = p2 && p2.server_time;
+    await new Promise((r) => setTimeout(r, 1200)); // 等 1s 回退窗口过去
+    const { data: inc } = await json(h(req('POST', '/sync/pull', { device_id: 'devA', since: serverTime }, envA)));
+    check('default lookback: after-window pull returns only new envelope', inc && inc.envelopes.length === 1 && inc.envelopes[0].entity_id === 'n3');
+    const { data: inc2 } = await json(
+      handleFetch(req('POST', '/sync/pull', { device_id: 'devA', since: t2 }, envA), store, { SYNC_PULL_LOOKBACK_MS: '0' }),
+    );
+    check('strict pull after new push empty', inc2 && inc2.envelopes.length === 0);
+  }
+
   // 13) 多租户隔离：bob 看不到 alice 的数据
   {
     const envB = { Authorization: 'Bearer ' + tokenB };
