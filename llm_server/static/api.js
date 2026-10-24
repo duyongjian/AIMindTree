@@ -19,6 +19,7 @@ var ERROR_TEXT = {
   upstream_error: '上游返回异常',
   invalid_request: '请求不合法',
   internal: '服务端内部错误',
+  relay_not_configured: '云端中继未配置',
 };
 
 /** 可重试的错误码（超时/限流/不可达/上游错误/bad_json）。 */
@@ -75,13 +76,19 @@ function _request(method, path, body) {
       if (resp.status >= 200 && resp.status < 300) {
         return data;
       }
-      var err = (data && data.error) || {};
-      throw new ApiError(
+      // 错误体两种形态：① 本服务的 {error:{code,message,...}}；
+      // ② 中继原样透传的 {error:"user_not_found"}（字符串，M11 用）。
+      var rawErr = data && data.error;
+      var err = (rawErr && typeof rawErr === 'object') ? rawErr : {};
+      if (typeof rawErr === 'string') err = { code: 'upstream_error', message: rawErr };
+      var apiErr = new ApiError(
         err.message || ('HTTP ' + resp.status),
         err.code || (resp.status === 404 ? 'unknown_task' : 'internal'),
         resp.status,
         err.retryable
       );
+      apiErr.rawBody = text || ''; // 面板可直接显示上游原文（M11 要求不吞错误）
+      throw apiErr;
     });
   });
 }
@@ -89,6 +96,7 @@ function _request(method, path, body) {
 function apiGet(path) { return _request('GET', path, null); }
 function apiPost(path, body) { return _request('POST', path, body || {}); }
 function apiPut(path, body) { return _request('PUT', path, body || {}); }
+function apiDelete(path) { return _request('DELETE', path, null); }
 
 /* ---------------- 端点 ---------------- */
 
@@ -119,6 +127,30 @@ function adminLogs(params) {
 }
 function adminRoutes() { return apiGet('/v1/admin/routes'); }
 function saveRoutes(taskBackends) { return apiPut('/v1/admin/routes', { task_backends: taskBackends }); }
+
+/* ---------- M11 云端同步：中继管理 API 代理 ----------
+   配置：GET 只回 token_set / token_masked（令牌只写不读）；
+   数据：中继 body 原样透传（失败时 ApiError.rawBody 即上游原文）。 */
+function adminRelayConfig() { return apiGet('/v1/admin/relay/config'); }
+function saveRelayConfig(body) { return apiPut('/v1/admin/relay/config', body || {}); }
+function relayPing(backend) {
+  return apiGet('/v1/admin/relay/ping?backend=' + encodeURIComponent(backend || ''));
+}
+function relayStats(backend) {
+  return apiGet('/v1/admin/relay/stats?backend=' + encodeURIComponent(backend || ''));
+}
+function relayUsers(backend) {
+  return apiGet('/v1/admin/relay/users?backend=' + encodeURIComponent(backend || ''));
+}
+function relayReset(body) { return apiPost('/v1/admin/relay/reset', body || {}); }
+function relayDeleteUser(userId, backend) {
+  return apiDelete('/v1/admin/relay/user/' + encodeURIComponent(userId) +
+    '?backend=' + encodeURIComponent(backend || ''));
+}
+function relayExport(backend, userId) {
+  return apiGet('/v1/admin/relay/export?backend=' + encodeURIComponent(backend || '') +
+    (userId ? '&user_id=' + encodeURIComponent(userId) : ''));
+}
 function adminJobs(params) {
   var p = params || {};
   var qs = [];

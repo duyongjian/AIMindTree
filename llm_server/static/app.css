@@ -375,6 +375,34 @@ tr.job-detail pre {
   overflow: auto;
 }
 
+/* ---------------- M11 云端同步 ---------------- */
+
+.stat-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+.stat {
+  background: #f7f9fc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+.stat .n {
+  font-size: 20px;
+  font-weight: 700;
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stat .n.small { font-size: 12px; font-weight: 600; }
+.stat .l { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+tr.relay-row { cursor: pointer; }
+tr.relay-row:hover { background: #f5f7fb; }
+tr.relay-row.selected { background: var(--brand-soft); }
+td.mono[title] { cursor: copy; }
+
+.card.danger-zone { border-color: #f6c9c5; background: #fffbfb; }
+
 /* ---------------- 响应式 ---------------- */
 
 @media (max-width: 900px) {
@@ -403,4 +431,5 @@ tr.job-detail pre {
   .nav-item.active { border-left: none; border-bottom-color: var(--brand); }
   #main { height: auto; }
   .grid-2, .grid-4, .split { grid-template-columns: 1fr; }
+  .stat-grid { grid-template-columns: repeat(2, 1fr); }
 }

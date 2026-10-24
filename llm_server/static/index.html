@@ -28,6 +28,7 @@
 
       <div class="nav-group">运维</div>
       <a class="nav-item" href="#/m9" data-page="m9">备份与系统信息</a>
+      <a class="nav-item" href="#/m11" data-page="m11">云端同步</a>
     </nav>
     <div class="nav-foot">
       <span id="navVersion">—</span>
@@ -58,14 +59,20 @@
       <section class="page" data-page="m8" hidden></section>
       <section class="page" data-page="m9" hidden></section>
       <section class="page" data-page="m10" hidden></section>
+      <section class="page" data-page="m11" hidden></section>
     </main>
   </div>
 
+  <!-- 保住浏览器原生 prompt：api.js 里的全局 prompt(task, variant) 帮助函数会覆盖
+       window.prompt（同名全局函数声明），M11 危险区的「手输 RESET」要用原生的，
+       所以在加载 api.js **之前**先存一份引用。 -->
+  <script>window.__nativePrompt = window.prompt ? window.prompt.bind(window) : null;</script>
   <script src="/static/api.js"></script>
   <script src="/static/views-a.js"></script>
   <script src="/static/views-b.js"></script>
   <script src="/static/views-c.js"></script>
   <script src="/static/views-d.js"></script>
+  <script src="/static/views-e.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

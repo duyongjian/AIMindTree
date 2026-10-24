@@ -23,6 +23,10 @@
 8. 配置写入往返（``app`` / ``sync`` / per-backend / ``task_backends``）+ **还原**；
 8b. 同步配置端点 ``GET/PUT /v1/admin/sync``（形状 / 空串清空 / 缺 key 不修改 /
     非法值 400 / 无 token 明文回显）+ **还原**；
+8c. M11 云端同步 ``/v1/admin/relay/*``：模块注册（导航 / 模块表 / 视图脚本）+
+    配置端点（形状 / 令牌零明文 / 空串清空 / 缺 key 不修改 / 类型错 400）+
+    **代理转发**（起本地临时假中继：路径 / Bearer / body / 上游 4xx·5xx 原样
+    透传 / 不可达 502）+ **还原**；
 9. 静态资源挂载（``/admin``、``/static/*``）；
 10. 可选：真实链路 ``POST /v1/task/T1`` + ``POST /v1/chat``（blocking 与 SSE
     两条路径都要进埋点）（``--live``，需要本机 Ollama 在跑，约 60s）。
@@ -42,8 +46,11 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
@@ -765,6 +772,467 @@ def check_sync_endpoints(c: TestClient, secrets: dict[str, str]) -> None:
         print('  ↩️  settings.json 已还原')
 
 
+# ---------------------------------------------------------------- M11 假中继
+
+
+class _FakeRelay:
+    """临时「云端中继」（标准库 ``http.server``，绑 127.0.0.1 随机端口）。
+
+    进程内起线程即可访问（不跨进程，C7 不适用），只实现 M11 需要的 6 个管理
+    接口；每次请求的方法 / 路径 / Bearer / body 都记在 :attr:`requests` 里，
+    用来断言「llm_server 代理是否真的原样转发了」。
+
+    特例：``Authorization: Bearer boom-token`` 时一律回 500 —— 验证上游 5xx
+    会被**原样透传**（而不是被本地包装成别的状态码）。
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'
+
+            def _record(self, method: str) -> dict[str, Any]:
+                length = int(self.headers.get('Content-Length') or 0)
+                raw = self.rfile.read(length).decode('utf-8') if length else ''
+                try:
+                    body: Any = json.loads(raw) if raw else None
+                except ValueError:
+                    body = raw
+                item = {
+                    'method': method,
+                    'path': self.path,
+                    'auth': self.headers.get('Authorization', ''),
+                    'body': body,
+                }
+                outer.requests.append(item)
+                return item
+
+            def _send(self, status: int, payload: dict[str, Any]) -> None:
+                data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _dispatch(self, method: str) -> None:
+                item = self._record(method)
+                if item['auth'] == 'Bearer boom-token':
+                    self._send(
+                        500, {'error': {'code': 'internal', 'message': '假中继故意 500'}}
+                    )
+                    return
+                path = urlsplit(self.path).path
+                body = item['body'] if isinstance(item['body'], dict) else {}
+                if path == '/admin/ping':
+                    self._send(
+                        200,
+                        {'ok': True, 'storage': 'd1', 'server_time': '2026-10-24T00:00:00Z'},
+                    )
+                elif path == '/admin/stats':
+                    self._send(
+                        200,
+                        {
+                            'storage': 'd1',
+                            'users': 2,
+                            'tokens': 3,
+                            'envelopes': 7,
+                            'server_time': '2026-10-24T00:00:00Z',
+                            'per_user': [
+                                {
+                                    'user_id': 'u_1',
+                                    'username': 'alice',
+                                    'tokens': 2,
+                                    'envelopes': 5,
+                                    'last_server_time': '2026-10-24T00:00:00Z',
+                                }
+                            ],
+                        },
+                    )
+                elif path == '/admin/users':
+                    self._send(
+                        200,
+                        {
+                            'users': [
+                                {
+                                    'user_id': 'u_1',
+                                    'username': 'alice',
+                                    'created_at': '2026-10-01T00:00:00Z',
+                                    'tokens': 2,
+                                    'envelopes': 5,
+                                },
+                                {
+                                    'user_id': 'u_2',
+                                    'username': 'bob',
+                                    'created_at': '2026-10-02T00:00:00Z',
+                                    'tokens': 1,
+                                    'envelopes': 2,
+                                },
+                            ]
+                        },
+                    )
+                elif path == '/admin/reset':
+                    if body.get('confirm') != 'RESET':
+                        self._send(400, {'error': 'confirm_required'})
+                        return
+                    self._send(
+                        200,
+                        {
+                            'scope': body.get('scope'),
+                            'deleted': {'envelopes': 3, 'tokens': 2, 'users': 1},
+                        },
+                    )
+                elif path.startswith('/admin/user/'):
+                    if path[len('/admin/user/'):] == 'ghost':
+                        self._send(404, {'error': 'user_not_found'})
+                        return
+                    self._send(
+                        200, {'deleted': {'envelopes': 5, 'tokens': 1, 'users': 1}}
+                    )
+                elif path == '/admin/export':
+                    self._send(
+                        200,
+                        {
+                            'user_id': body.get('user_id') or 'u_1',
+                            'exported_at': '2026-10-24T00:00:00Z',
+                            'truncated': False,
+                            'envelopes': [],
+                            'users': [],
+                        },
+                    )
+                else:
+                    self._send(404, {'error': 'not_found'})
+
+            def do_GET(self) -> None:  # noqa: N802 - http.server 的命名约定
+                self._dispatch('GET')
+
+            def do_POST(self) -> None:  # noqa: N802
+                self._dispatch('POST')
+
+            def do_DELETE(self) -> None:  # noqa: N802
+                self._dispatch('DELETE')
+
+            def log_message(self, *args: Any) -> None:
+                """静音（默认会往 stderr 打访问日志，污染验收输出）。"""
+
+        self._server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.base_url = f'http://127.0.0.1:{self._server.server_address[1]}'
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def __enter__(self) -> _FakeRelay:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+    def last(self) -> dict[str, Any]:
+        return self.requests[-1] if self.requests else {}
+
+
+def check_relay_admin(c: TestClient, secrets: dict[str, str]) -> None:
+    print('\n[8c] M11 云端同步 —— /v1/admin/relay/*（注册 / 配置 / 代理转发）')
+    settings_path = _HERE / 'settings.json'
+    original: str | None = None
+    existed = settings_path.is_file()
+    if existed:
+        original = settings_path.read_text(encoding='utf-8')
+
+    token = 'verify-relay-admin-token-should-never-echo'
+    seen: list[str] = []  # 收集所有响应文本，最后统一做密钥/令牌零扩散断言
+    try:
+        # ---- 8c.1 M11 已注册：导航 / 模块表 / 视图脚本 ----
+        index_text = (_HERE / 'static' / 'index.html').read_text(encoding='utf-8')
+        app_js = (_HERE / 'static' / 'app.js').read_text(encoding='utf-8')
+        view_path = _HERE / 'static' / 'views-e.js'
+        check(
+            'data-page="m11"' in index_text and '云端同步' in index_text,
+            'index.html 注册 M11（导航项「云端同步」+ 视图容器）',
+        )
+        check(
+            'm11:' in app_js and 'renderRelay' in app_js,
+            'app.js 模块表含 m11 → renderRelay',
+        )
+        view_text = view_path.read_text(encoding='utf-8') if view_path.is_file() else ''
+        check(
+            view_path.is_file() and 'function renderRelay' in view_text,
+            'views-e.js 定义 renderRelay（M11 视图脚本可取到）',
+            f'{view_path.name} {len(view_text)} 字节',
+        )
+        rr = c.get('/static/views-e.js')
+        check(rr.status_code == 200, '/static/views-e.js → 200', f'实际 {rr.status_code}')
+        api_js_text = (_HERE / 'static' / 'api.js').read_text(encoding='utf-8')
+        check(
+            'function prompt(' in api_js_text,
+            'api.js 仍声明全局 prompt(task, variant)（M11 因此必须另取原生 prompt）',
+        )
+        check(
+            '__nativePrompt' in index_text
+            and index_text.index('__nativePrompt') < index_text.index('/static/api.js'),
+            'index.html 在加载 api.js **之前**存下原生 prompt（否则被同名全局函数覆盖）',
+        )
+        check(
+            'window.prompt(' not in view_text and '__nativePrompt' in view_text,
+            'views-e.js 不用 window.prompt（走 __nativePrompt → 手输 RESET 才能真的生效）',
+        )
+
+        # ---- 8c.2 GET 形状 + 令牌零明文 ----
+        r = c.get('/v1/admin/relay/config')
+        seen.append(r.text)
+        if not check(r.status_code == 200, 'GET /v1/admin/relay/config 返回 200',
+                     f'实际 {r.status_code}'):
+            return
+        backends = r.json().get('backends') or []
+        check(
+            isinstance(backends, list) and len(backends) >= 2,
+            'backends 是数组且含默认后端（cloudflare / netlify）',
+            str([b.get('name') for b in backends]),
+        )
+        keys = {'name', 'base_url', 'token_set', 'token_masked'}
+        check(all(keys <= set(b) for b in backends),
+              '每项含 name / base_url / token_set / token_masked', str(keys))
+        names = {b.get('name') for b in backends}
+        check({'cloudflare', 'netlify'} <= names, '五个中继后端恒在', str(sorted(names)))
+        cf0 = next(b for b in backends if b.get('name') == 'cloudflare')
+        check(
+            str(cf0.get('base_url') or '').startswith('https://'),
+            'cloudflare 默认 base_url 已兜底',
+            str(cf0.get('base_url')),
+        )
+        if cf0.get('token_set'):
+            skip('未配置时 token_masked=None', 'settings.json 里已有 cloudflare 令牌')
+        else:
+            check(cf0.get('token_masked') is None,
+                  '未配置令牌时 token_set=False、token_masked=None',
+                  str(cf0))
+
+        # ---- 8c.3 PUT 保存 → token_set / masked，且零明文 ----
+        r2 = c.put('/v1/admin/relay/config', json={
+            'backend': 'cloudflare',
+            'base_url': 'https://relay.example.test',
+            'token': token,
+        })
+        seen.append(r2.text)
+        if not check(r2.status_code == 200, 'PUT 保存返回 200',
+                     f'{r2.status_code} {r2.text[:120]}'):
+            return
+        cf = next(b for b in r2.json()['backends'] if b.get('name') == 'cloudflare')
+        check(cf.get('token_set') is True, 'PUT 后 token_set=True', str(cf))
+        check(
+            isinstance(cf.get('token_masked'), str) and bool(cf.get('token_masked')),
+            'PUT 后 token_masked 非空（前端 placeholder 用）',
+            str(cf.get('token_masked')),
+        )
+        check(cf.get('base_url') == 'https://relay.example.test', 'PUT 后 base_url 生效')
+        r2b = c.get('/v1/admin/relay/config')
+        seen.append(r2b.text)
+        check(
+            token not in r2.text and token not in r2b.text,
+            '配置响应零明文（PUT / GET 都不含令牌真值）',
+        )
+
+        # ---- 8c.4 缺 key = 不修改；类型错 / 未知后端 → 400 ----
+        r3 = c.put('/v1/admin/relay/config', json={
+            'backend': 'cloudflare', 'base_url': 'https://relay.example.test/v2',
+        })
+        seen.append(r3.text)
+        cf3 = next((b for b in (r3.json().get('backends') or [])
+                    if b.get('name') == 'cloudflare'), {})
+        check(
+            r3.status_code == 200 and cf3.get('token_set') is True
+            and cf3.get('base_url') == 'https://relay.example.test/v2',
+            'PUT 缺 token key → 令牌不修改（缺 key 语义）',
+            str(cf3),
+        )
+        for field, value in (('base_url', 5), ('token', ['x'])):
+            rb = c.put('/v1/admin/relay/config', json={'backend': 'cloudflare', field: value})
+            check(
+                rb.status_code == 400
+                and rb.json().get('error', {}).get('code') == 'invalid_request',
+                f'PUT {field}={value!r} → 400 invalid_request',
+                str(rb.status_code),
+            )
+        rb = c.put('/v1/admin/relay/config', json={'backend': 'no-such-backend'})
+        check(rb.status_code == 400, '未知 backend → 400', str(rb.status_code))
+
+        # ---- 8c.5 未配置后端 → 400 relay_not_configured ----
+        rn = c.get('/v1/admin/relay/stats?backend=vercel')
+        seen.append(rn.text)
+        check(
+            rn.status_code == 400
+            and rn.json().get('error', {}).get('code') == 'relay_not_configured',
+            '未配置后端（vercel）→ 400 relay_not_configured',
+            f'{rn.status_code} {rn.text[:120]}',
+        )
+
+        # ---- 8c.6 代理转发：本地假中继（路径 / Bearer / body / 状态码透传）----
+        with _FakeRelay() as fake:
+            c.put('/v1/admin/relay/config', json={
+                'backend': 'cloudflare', 'base_url': fake.base_url, 'token': token,
+            })
+
+            rp = c.get('/v1/admin/relay/ping?backend=cloudflare')
+            seen.append(rp.text)
+            req = fake.last()
+            check(
+                rp.status_code == 200 and req.get('path') == '/admin/ping',
+                '代理 ping：转发到 /admin/ping', str(req.get('path')),
+            )
+            check(
+                req.get('auth') == f'Bearer {token}',
+                '代理 ping：Authorization: Bearer <已保存令牌>',
+            )
+            check(
+                rp.json().get('storage') == 'd1' and rp.json().get('ok') is True,
+                '代理 ping：上游 body 原样返回',
+                rp.text[:120],
+            )
+
+            rs = c.get('/v1/admin/relay/stats?backend=cloudflare')
+            seen.append(rs.text)
+            body = rs.json()
+            check(
+                rs.status_code == 200 and body.get('users') == 2
+                and body.get('tokens') == 3 and body.get('envelopes') == 7
+                and body.get('storage') == 'd1',
+                '代理 stats：用户/令牌/行数/存储 逐字段透传',
+                json.dumps(body, ensure_ascii=False)[:160],
+            )
+            check(
+                bool(body.get('per_user')) and fake.last().get('path') == '/admin/stats',
+                '代理 stats：per_user 明细保留',
+            )
+
+            ru = c.get('/v1/admin/relay/users?backend=cloudflare')
+            seen.append(ru.text)
+            users = ru.json().get('users') or []
+            check(
+                len(users) == 2
+                and {'user_id', 'username', 'created_at', 'tokens', 'envelopes'}
+                <= set(users[0]),
+                '代理 users：列表字段原样透传（含 created_at / 计数）',
+                str(len(users)),
+            )
+
+            # reset：body 转发 + deleted 计数
+            rr2 = c.post('/v1/admin/relay/reset', json={
+                'backend': 'cloudflare', 'scope': 'envelopes', 'confirm': 'RESET',
+            })
+            seen.append(rr2.text)
+            req = fake.last()
+            check(
+                rr2.status_code == 200
+                and rr2.json().get('deleted')
+                == {'envelopes': 3, 'tokens': 2, 'users': 1},
+                '代理 reset：deleted 计数原样返回',
+                rr2.text[:160],
+            )
+            check(
+                req.get('method') == 'POST' and req.get('path') == '/admin/reset'
+                and req.get('body') == {'scope': 'envelopes', 'confirm': 'RESET'},
+                '代理 reset：body（scope + confirm）转发正确',
+                str(req.get('body')),
+            )
+
+            # scope=user 要带 user_id；缺 user_id 本地就 400（不必打扰上游）
+            c.post('/v1/admin/relay/reset', json={
+                'backend': 'cloudflare', 'scope': 'user', 'user_id': 'u_1',
+                'confirm': 'RESET',
+            })
+            check(
+                fake.last().get('body') == {
+                    'scope': 'user', 'confirm': 'RESET', 'user_id': 'u_1',
+                },
+                '代理 reset：scope=user 时带 user_id 转发',
+                str(fake.last().get('body')),
+            )
+            rbad = c.post('/v1/admin/relay/reset', json={
+                'backend': 'cloudflare', 'scope': 'user', 'confirm': 'RESET',
+            })
+            check(rbad.status_code == 400, 'scope=user 缺 user_id → 400', str(rbad.status_code))
+
+            # 上游 400 原样透传（confirm 不对 → confirm_required）
+            r400 = c.post('/v1/admin/relay/reset', json={
+                'backend': 'cloudflare', 'scope': 'all', 'confirm': 'nope',
+            })
+            seen.append(r400.text)
+            check(
+                r400.status_code == 400 and r400.json() == {'error': 'confirm_required'},
+                '上游 400 原样透传（confirm_required，body 不被改写）',
+                f'{r400.status_code} {r400.text[:120]}',
+            )
+
+            # DELETE：路径 / 不存在用户 404 透传
+            rd = c.delete('/v1/admin/relay/user/u_1?backend=cloudflare')
+            seen.append(rd.text)
+            check(
+                rd.status_code == 200
+                and fake.last().get('method') == 'DELETE'
+                and fake.last().get('path') == '/admin/user/u_1',
+                '代理 DELETE：/admin/user/{id} 路径正确',
+                str(fake.last().get('path')),
+            )
+            rd404 = c.delete('/v1/admin/relay/user/ghost?backend=cloudflare')
+            seen.append(rd404.text)
+            check(
+                rd404.status_code == 404
+                and rd404.json().get('error') == 'user_not_found',
+                '上游 404 原样透传（user_not_found）',
+                f'{rd404.status_code} {rd404.text[:120]}',
+            )
+
+            # export：query 透传
+            re_ = c.get('/v1/admin/relay/export?backend=cloudflare&user_id=u_1')
+            seen.append(re_.text)
+            check(
+                re_.status_code == 200 and 'exported_at' in re_.json()
+                and 'user_id=u_1' in str(fake.last().get('path')),
+                '代理 export：user_id 作为 query 转发',
+                str(fake.last().get('path')),
+            )
+
+            # 上游 500 原样透传（假中继对 boom-token 一律 500）
+            c.put('/v1/admin/relay/config', json={
+                'backend': 'netlify', 'base_url': fake.base_url, 'token': 'boom-token',
+            })
+            r500 = c.get('/v1/admin/relay/stats?backend=netlify')
+            seen.append(r500.text)
+            check(
+                r500.status_code == 500
+                and r500.json().get('error', {}).get('message') == '假中继故意 500',
+                '上游 500 原样透传（状态码 + body 都不改写）',
+                f'{r500.status_code} {r500.text[:120]}',
+            )
+
+        # ---- 8c.7 中继不可达 → 502 backend_unreachable（假中继已关闭）----
+        r502 = c.get('/v1/admin/relay/ping?backend=cloudflare')
+        seen.append(r502.text)
+        check(
+            r502.status_code == 502
+            and r502.json().get('error', {}).get('code') == 'backend_unreachable',
+            '中继不可达 → 502 backend_unreachable',
+            f'{r502.status_code} {r502.text[:160]}',
+        )
+        check(token not in r502.text, '错误消息不含令牌明文')
+
+        # ---- 8c.8 令牌 / .env 密钥零扩散 ----
+        blob = ''.join(seen)
+        check(token not in blob, 'relay 全部响应不含令牌明文（只 token_masked）')
+        assert_no_secret(blob, secrets, '/v1/admin/relay/*')
+    finally:
+        # 还原 settings.json（原本不存在则删除）+ 让内存配置回到还原后的状态
+        if existed and original is not None:
+            settings_path.write_text(original, encoding='utf-8')
+        elif settings_path.is_file():
+            settings_path.unlink()
+        c.post('/v1/admin/reload')
+        print('  ↩️  settings.json 已还原（relay_admin 段一并回滚）')
+
+
 def check_static(c: TestClient) -> None:
     print('\n[9] 静态资源挂载（AC-09）')
     index = _HERE / 'static' / 'index.html'
@@ -776,7 +1244,8 @@ def check_static(c: TestClient) -> None:
     check('<html' in r.text.lower(), '/admin 返回 HTML 骨架')
     r2 = c.get('/')
     check(r2.status_code == 200, 'GET / → 200', f'实际 {r2.status_code}')
-    for name in ('app.css', 'api.js', 'app.js', 'views-a.js', 'views-b.js', 'views-c.js', 'views-d.js'):
+    for name in ('app.css', 'api.js', 'app.js', 'views-a.js', 'views-b.js', 'views-c.js',
+                 'views-d.js', 'views-e.js'):
         path = _HERE / 'static' / name
         if not path.is_file():
             skip(f'/static/{name} → 200', '文件尚未创建')
@@ -892,6 +1361,7 @@ def main(argv: list[str] | None = None) -> int:
         check_jobs(c, secrets)
         check_config_roundtrip(c)
         check_sync_endpoints(c, secrets)
+        check_relay_admin(c, secrets)
         check_static(c)
         if live:
             check_live_t1(c)

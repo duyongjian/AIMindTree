@@ -1,7 +1,7 @@
 /* 应用壳：hash 路由 + 导航高亮 + 模块注册表 + 顶栏动作 + M9 占位。
    依赖 api.js（先加载）。
    导航分三大区（见 index.html）：① 配置 m2/m3/m4/m5/m8 ·
-   ② 观测 m1/m7/m10/m6 · ③ 运维 m9。 */
+   ② 观测 m1/m7/m10/m6 · ③ 运维 m9/m11。 */
 
 "use strict";
 
@@ -17,6 +17,7 @@ var MODULES = {
   m8: { title: '同步配置', hint: 'Supabase 同步地址 / 令牌 / 启用开关（settings.json · sync 段）', render: renderSync },
   m9: { title: '备份与系统信息', hint: 'P1：配置导出 / 导入', render: renderPlaceholder },
   m10: { title: '任务队列', hint: '批量型 AI 任务的实时队列：状态 / 进度 / 资源锁 / 取消（与 M7 日志互补）', render: renderJobs },
+  m11: { title: '云端同步', hint: '云端账号与同步数据（用户/行数/重置/导出）', render: renderRelay },
 };
 
 var currentPage = 'm1';

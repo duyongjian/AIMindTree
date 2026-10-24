@@ -74,10 +74,43 @@ DEFAULTS: dict[str, Any] = {
         'token': '',
         'relay_token': '',
     },
+    #: 云端同步中继的**管理 API** 配置（M11「云端同步」面板用）。
+    #: 按后端分别存 ``{base_url, token}``；token 只落盘，管理接口只回
+    #: ``token_set`` / ``token_masked``（与 ``sync`` 段同一套口径）。
+    #: ``base_url`` 留空 = 用 :data:`RELAY_ADMIN_DEFAULTS` 的默认地址。
+    #: 中继未配置 ``ADMIN_TOKEN`` 时，其 ``/admin/*`` 一律 404。
+    'relay_admin': {
+        'cloudflare': {
+            'base_url': 'https://aimindtree-sync-relay.tuanx.workers.dev',
+            'token': '',
+        },
+        'netlify': {
+            'base_url': 'https://aimindtree-sync-relay.netlify.app',
+            'token': '',
+        },
+        'vercel': {'base_url': '', 'token': ''},
+        'edgeone': {'base_url': '', 'token': ''},
+        'cloudbase': {'base_url': '', 'token': ''},
+    },
 }
 
 #: settings.json 里允许被覆盖的 per-backend 键（顺序即校验顺序）。
 BACKEND_OVERRIDE_KEYS = ('base_url', 'protocol', 'default_model', 'models', 'api_key')
+
+#: 云端同步中继的后端名（M11 面板下拉项，顺序即展示顺序）。
+RELAY_BACKENDS: tuple[str, ...] = (
+    'cloudflare',
+    'netlify',
+    'vercel',
+    'edgeone',
+    'cloudbase',
+)
+
+#: 各中继后端的默认管理 API 地址（``relay_admin.<name>.base_url`` 留空时兜底）。
+RELAY_ADMIN_DEFAULTS: dict[str, str] = {
+    'cloudflare': 'https://aimindtree-sync-relay.tuanx.workers.dev',
+    'netlify': 'https://aimindtree-sync-relay.netlify.app',
+}
 
 #: 合法协议（与 BackendConf.protocol 对齐）。
 VALID_PROTOCOLS = ('openai_compat', 'anthropic_compat')
@@ -160,6 +193,38 @@ def _split_task_backends(raw: Mapping[str, Any]) -> tuple[dict[str, str], dict[s
     return backends, models
 
 
+def _merge_relay_admin(
+    base: Mapping[str, Any] | None,
+    override: Mapping[str, Any] | None,
+) -> dict[str, dict[str, str]]:
+    """合并 ``relay_admin`` 段，返回 ``{后端名: {base_url, token}}``。
+
+    :data:`RELAY_BACKENDS` 里的五个后端**恒定存在**（缺省为空串），这样
+    ``GET /v1/admin/relay/config`` 的下拉项不会随配置文件抖动。
+    ``override`` 里只认 ``base_url`` / ``token`` 两个字符串键（类型不对就忽略，
+    具体报错由 PUT 端点负责）；``base_url`` 空串 = 回落默认地址（见
+    :meth:`Config.relay_conf`），``token`` 空串 = 清空。
+    """
+    out: dict[str, dict[str, str]] = {}
+    source = base or {}
+    for name in RELAY_BACKENDS:
+        item = {'base_url': '', 'token': ''}
+        cur = source.get(name)
+        if isinstance(cur, Mapping):
+            item['base_url'] = str(cur.get('base_url') or '').strip()
+            item['token'] = str(cur.get('token') or '')
+        out[name] = item
+    for name, sub in (override or {}).items():
+        key = str(name)
+        if key not in out or not isinstance(sub, Mapping):
+            continue
+        if isinstance(sub.get('base_url'), str):
+            out[key]['base_url'] = sub['base_url'].strip()
+        if isinstance(sub.get('token'), str):
+            out[key]['token'] = sub['token']
+    return out
+
+
 def _load_env(path: Path) -> dict[str, str]:
     """解析 ``.env``：``KEY=VALUE`` 行，``#`` 开头为注释。失败返回空 dict。"""
     env: dict[str, str] = {}
@@ -192,6 +257,10 @@ class Config:
         self.app: dict[str, Any] = dict(DEFAULTS['app'])
         #: 同步下发段（token 只落盘、永不回显）。
         self.sync: dict[str, Any] = dict(DEFAULTS['sync'])
+        #: 云端中继管理 API 段：``{后端名: {base_url, token}}``（token 只落盘）。
+        self.relay_admin: dict[str, dict[str, str]] = _merge_relay_admin(
+            DEFAULTS['relay_admin'], None
+        )
         self.timeouts: dict[str, Any] = dict(DEFAULTS['timeouts'])
         self.retry: dict[str, Any] = dict(DEFAULTS['retry'])
         #: 任务队列段（concurrency / retain）。
@@ -235,6 +304,9 @@ class Config:
         )
         self.app = _deep_merge(DEFAULTS['app'], merged.get('app') or {})
         self.sync = _deep_merge(DEFAULTS['sync'], merged.get('sync') or {})
+        self.relay_admin = _merge_relay_admin(
+            DEFAULTS['relay_admin'], merged.get('relay_admin') or {}
+        )
         self.timeouts = _deep_merge(DEFAULTS['timeouts'], merged.get('timeouts') or {})
         self.retry = _deep_merge(DEFAULTS['retry'], merged.get('retry') or {})
         self.jobs = _deep_merge(DEFAULTS['jobs'], merged.get('jobs') or {})
@@ -362,6 +434,20 @@ class Config:
                 out[key] = int(DEFAULTS['timeouts'][key])
         return out
 
+    def relay_conf(self, name: str) -> dict[str, str]:
+        """某云端中继后端的管理 API 配置 ``{base_url, token}``。
+
+        ``base_url`` 已做兜底（留空 → :data:`RELAY_ADMIN_DEFAULTS`）并去掉尾部
+        ``/``；``token`` 为**明文**，只允许用于拼 ``Authorization`` 头，
+        绝不回显 / 打日志。
+        """
+        key = str(name or '').strip()
+        item = dict((self.relay_admin or {}).get(key) or {})
+        base = str(item.get('base_url') or '').strip().rstrip('/')
+        if not base:
+            base = RELAY_ADMIN_DEFAULTS.get(key, '')
+        return {'base_url': base, 'token': str(item.get('token') or '').strip()}
+
     def settings_mtime(self) -> float:
         """``settings.json`` 的 mtime；不存在 / 不可读返回 ``0.0``。"""
         try:
@@ -390,6 +476,8 @@ class Config:
         self._settings_api_keys = {}
         self.app = _deep_merge(DEFAULTS['app'], raw.get('app') or {})
         self.sync = _deep_merge(DEFAULTS['sync'], raw.get('sync') or {})
+        # relay_admin：settings.json 覆盖 config.yaml（以当前内存值为底合并）
+        self.relay_admin = _merge_relay_admin(self.relay_admin, raw.get('relay_admin') or {})
 
         # ① 默认后端覆盖（必须在 ②③ 之前，保证落到正确后端）
         db = raw.get('default_backend')
@@ -467,7 +555,7 @@ class Config:
             data: 规范化后的覆盖层，允许字段：
                 ``default_backend`` / ``default_model`` / ``minimax_protocol`` /
                 ``backends: {name: {base_url, protocol, default_model, models, api_key}}`` /
-                ``app`` / ``sync`` / ``task_backends``。
+                ``app`` / ``sync`` / ``relay_admin`` / ``task_backends``。
                 只持久化这些字段，且与已有 settings.json **合并**（不整体覆盖）。
 
                 per-backend 键语义（写死）：键不存在 = 不改；``null`` = 删除覆盖
@@ -529,6 +617,19 @@ class Config:
             out['app'] = _deep_merge(out.get('app') or {}, data['app'])
         if isinstance(data.get('sync'), dict):
             out['sync'] = _deep_merge(out.get('sync') or {}, data['sync'])
+        if isinstance(data.get('relay_admin'), dict):
+            merged_relay: dict[str, Any] = dict(out.get('relay_admin') or {})
+            for name, sub in data['relay_admin'].items():
+                key = str(name)
+                if key not in RELAY_BACKENDS or not isinstance(sub, Mapping):
+                    continue
+                cur: dict[str, Any] = dict(merged_relay.get(key) or {})
+                if 'base_url' in sub:  # 空串 = 回落默认地址（不删键）
+                    cur['base_url'] = str(sub.get('base_url') or '').strip()
+                if 'token' in sub:  # 空串 = 清空令牌
+                    cur['token'] = str(sub.get('token') or '').strip()
+                merged_relay[key] = cur
+            out['relay_admin'] = merged_relay
         if isinstance(data.get('task_backends'), dict):
             out['task_backends'] = data['task_backends']
 
@@ -536,11 +637,17 @@ class Config:
             json.dumps(out, ensure_ascii=False, indent=2) + '\n', encoding='utf-8'
         )
         _log.info(
-            '已写入 settings.json（默认后端=%s，默认模型=%s，app=%s，sync_token_set=%s）',
+            '已写入 settings.json（默认后端=%s，默认模型=%s，app=%s，sync_token_set=%s，'
+            'relay_admin=%s）',
             out.get('default_backend'),
             out.get('default_model'),
             bool((out.get('app') or {}).get('service_name')),
             bool(str((out.get('sync') or {}).get('token') or '').strip()),
+            sorted(
+                name
+                for name, sub in (out.get('relay_admin') or {}).items()
+                if isinstance(sub, Mapping) and str(sub.get('token') or '').strip()
+            ),
         )
         return out
 

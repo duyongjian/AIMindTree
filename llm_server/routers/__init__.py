@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from routers import (
     admin,
+    admin_relay,
     app_config,
     chat,
     health,
@@ -29,12 +30,14 @@ def build_router() -> APIRouter:
     router.include_router(prompts.router)
     router.include_router(sync_relay.router)  # /sync/* 本地同步中继（方案 A）
     router.include_router(admin.router)
+    router.include_router(admin_relay.router)  # /v1/admin/relay/* 云端中继管理 API 代理（M11）
     return router
 
 
 __all__ = [
     'build_router',
     'admin',
+    'admin_relay',
     'app_config',
     'chat',
     'health',
