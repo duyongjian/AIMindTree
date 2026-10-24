@@ -3,12 +3,12 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档类型 | **测试方案**（不写测试代码；只定义「测什么 / 怎么测 / 断言什么」） |
-| 版本 | **v1.4** —— 落实 team-lead **最终裁决**（🔴 不再讨论）：命名 `listSessionsForKp` / `primarySessionForKp`、规格 B = 纯 `id ASC`、规格 C = 纯函数**绝不重排**、派生 id = 整体 16 字节 +1、R-0 = **既有测试一行不改**、M-6 = `insertMessageRow` 失败注入钩子、基线订正 602/134；v1.3.1 = 与 PRD v1.4 校准版对齐（新增 §3.4 排查清单）；**v1.3.2 = 锚点去行号化 + 实现落地巡检快照（§0.6）**；**v1.4 = T05 落地后按最终实现订正（签名改 2 字段 / 派生 id 改带进位 / 「再讲一次」恒 T6 / 基线 602→670、134→139 / 实测 68 条），详见下一行** |
-| **v1.4 变更** | **T05 已落地，按最终实现订正**：① §0.1 / §3.1.1 的 `buildSessionContext` 签名改为 **2 字段** `List<({String role, String content})>`（删 `at` / `id`——Dart 记录类型的可空命名字段不能省略构造，会逼所有调用点补参；「绝不重排」由此从约定升级为**结构保证**）；② **派生 id 口径修正**：`newDerivedUlid` 由「逐字节 `(b+1)&0xFF` 不进位」改为 **128 位大端 +1（带进位）**——旧写法会把 ULID 时间最高位也 +1，时间戳凭空 **+2^40 ms ≈ 35 年**，合并后的老讲解被挤到会话末尾；新写法**毫秒不变**、迁移消息落在**原位**。M8① / M11 六条断言同步改写；③ T8「再讲一次」**恒走 `AiTask.t6Explain`**（`_taskForSession()` 启发式已删除、不得恢复）；④ §0.6 两项「⏳ 待实现」（`isExplainMessage` / `buildSessionContext`）改判为 **✅ 已落地**；⑤ **基线刷新**：`flutter test` 602（48 文件）→ **670（51 文件）**、`analyze_inproc` 134 → **139 文件**；⑥ 三个测试文件**实测条数**：仓储 **27** / 纯函数 **35** / widget **6** = **68**（原规划约 28/24/14 ≈ 66）
+| 版本 | **v1.4** —— 落实 team-lead **最终裁决**（🔴 不再讨论）：命名 `listSessionsForKp` / `primarySessionForKp`、规格 B = 纯 `id ASC`、规格 C = 纯函数**绝不重排**、派生 id = 整体 16 字节 +1、R-0 = **既有测试一行不改**、M-6 = `insertMessageRow` 失败注入钩子、基线订正 602/134；v1.3.1 = 与 PRD v1.4 校准版对齐（新增 §3.4 排查清单）；**v1.3.2 = 锚点去行号化 + 实现落地巡检快照（§0.6）**；**v1.4 = T05 落地后按最终实现订正（签名改 2 字段 / 派生 id 改带进位 / 「再讲一次」恒 T6 / 基线 602→672、134→139 / 实测 68 条），详见下一行** |
+| **v1.4 变更** | **T05 已落地，按最终实现订正**：① §0.1 / §3.1.1 的 `buildSessionContext` 签名改为 **2 字段** `List<({String role, String content})>`（删 `at` / `id`——Dart 记录类型的可空命名字段不能省略构造，会逼所有调用点补参；「绝不重排」由此从约定升级为**结构保证**）；② **派生 id 口径修正**：`newDerivedUlid` 由「逐字节 `(b+1)&0xFF` 不进位」改为 **128 位大端 +1（带进位）**——旧写法会把 ULID 时间最高位也 +1，时间戳凭空 **+2^40 ms ≈ 35 年**，合并后的老讲解被挤到会话末尾；新写法**毫秒不变**、迁移消息落在**原位**。M8① / M11 六条断言同步改写；③ T8「再讲一次」**恒走 `AiTask.t6Explain`**（`_taskForSession()` 启发式已删除、不得恢复）；④ §0.6 两项「⏳ 待实现」（`isExplainMessage` / `buildSessionContext`）改判为 **✅ 已落地**；⑤ **基线刷新**：`flutter test` 602（48 文件）→ **672（51 文件）**、`analyze_inproc` 134 → **139 文件**；⑥ 三个测试文件**实测条数**：仓储 **27** / 纯函数 **35** / widget **8** = **70**（原规划约 28/24/14 ≈ 66）
 | 作者 | Edward（QA 工程师） |
 | 被测对象 | 老师模式会话化重构（PRD：`docs/TEACHER_SESSION_PRD.md` **v1.4 校准版**；设计：`docs/TEACHER_SESSION_DESIGN.md`） |
 | 代码基线 | `aimindtree_app/lib/features/teacher/teacher_page.dart`（510 行）、`aimindtree_app/lib/data/repositories/ai_session_repository.dart`（261 行） |
-| 门禁基线 | `flutter test` **670/670 通过**（51 个测试文件，2026-10-24 实测）；`tool/analyze_inproc.dart` **139 文件 → 0 error / 0 warning / 3 info**（实测） |
+| 门禁基线 | `flutter test` **672/672 通过**（51 个测试文件，2026-10-24 实测）；`tool/analyze_inproc.dart` **139 文件 → 0 error / 0 warning / 3 info**（实测） |
 | v1.1 变更 | ① API 命名统一为**设计文档**口径；② L2 注入规模改为 **10 条 / 5 轮 + ≤4000 字符**（规格 A）；③ 消息排序键改为**纯 `id ASC`**（规格 B）；④ `ChatMessage.modelId` 明确为**可选 / 允许 null**；⑤ 测试文件改为设计文档 §7.3 的 **3 个文件名**；⑥ 新增隐患 **R-0**（`AiSessionRepository` 的 `deviceId` 参数必须可选） |
 | v1.2 变更 | ① 方法名按架构师 21:27 定稿改为 `primarySessionForKp` / `listSessionsForKp`；② 纯函数签名更新为含 `at`/`id` 的记录类型，并新增**双分支排序契约**（§3.1.1.1）；③ 规格 B 记录为**待 team-lead 拍板**（PRD D2 逐字要 `updated_at ASC, id ASC`，team-lead 规格 B 要纯 `id ASC`）→ **M8 夹具做成对两者都稳健**，拍板后无需改测试；④ 边界用例补 E18 / E19；⑤ 合并矩阵补 **M11**（`newDerivedUlid` 双射性）；⑥ 风险点补 P27 / P28 / P29 |
 | v1.3 变更 | ① 命名全文统一为 **`listSessionsForKp` / `primarySessionForKp`**（team-lead 最终裁决；数据层工程师 T01a 正在按此施工）；② 规格 B **已定案 = 纯 `id ASC`**（不再是待拍板）；③ **规格 C：`buildSessionContext` 绝不重排** → E13 改判 + E17 强化为「Agent 旧实现参考对照」+ E18 / E19 改判；④ 派生 id 改为 **`newDerivedUlid(String sourceId)`（整体 16 字节逐字节 `(b+1)&0xFF`，必须取模）** → M11 断言改为 6 条、M8 保序断言改为「毫秒 +1」；⑤ **R-0 终裁：既有 `test/agent_features_test.dart` 一行不改**（`deviceId` 走可选参数），验收 grep 限定 `lib/`（`test/` 的 27 处 `'local-dev'` 是合法多设备夹具）；⑥ **M-6 终裁：`insertMessageRow` 可覆写钩子**（**禁止** `@visibleForTesting` / `@protected` → `meta:` 未声明会触发 lint → 门禁失败），M6 改用 `_FailingRepo` 注入；⑦ **基线订正**：`flutter test` 598 → **602/602（48 个测试文件）**、`analyze_inproc` 132 → **134 文件**；⑧ 风险点补 P30（取模）/ P31（字节层 +1）/ P32（失败注入） |
@@ -196,7 +196,7 @@ buildSessionContext(turns, maxMessages: 10, maxChars: 4000, header: <默认>)
 | --- | --- | --- | --- | --- |
 | 1 | `aimindtree_app/test/teacher_session_repo_test.dart` | 老师模式会话**仓储层 + 老数据合并**：墓碑过滤、主会话判定、列表隔离、合并矩阵、outbox 登记 | T1, T3, T4, T5, T7, T9, T11, T12 + N3, N8 | ~28 → **27（实测）** |
 | 2 | `aimindtree_app/test/teacher_session_context_test.dart` | **纯函数层**：`buildSessionContext`（L2 组装 + 规模裁剪 + 边界）+ `deriveSessionTitle`（标题派生） | **T6 纯函数层**、T10 + N1, N2 + §4 边界 | ~24 → **35（实测）** |
-| 3 | `aimindtree_app/test/teacher_page_widget_test.dart` | **老师模式页 widget**：历史回填、讲解标签容错、多轮记忆端到端、「再讲一次」追加、主会话删除接续 | T2, T3(补建), T5(页面序), **T6 端到端层**, T8 + N4, N5, N6, N7 | ~14 → **6（实测）** |
+| 3 | `aimindtree_app/test/teacher_page_widget_test.dart` | **老师模式页 widget**：历史回填、讲解标签容错、多轮记忆端到端、「再讲一次」追加、主会话删除接续 | T2, T3(补建), T5(页面序), **T6 端到端层**, T8 + N4, N5, N6, N7 | ~14 → **8（实测）** |
 
 **不新建 `test/support/` 目录**：仓库既有假 Provider 一律是**文件内私有**（`test/ai_task_route_test.dart:38-52` 的 `_FakeProvider`、`test/note_editor_selection_test.dart:94`、`test/t15_selection_extract_test.dart:61`）→ 本方案沿用该约定，把 `_FakeProvider` 直接写在 `teacher_page_widget_test.dart` 内（**只有这一个文件需要它**）。
 
@@ -658,7 +658,7 @@ testWidgets('T6：第 3 轮能引用第 1 轮的内容（多轮记忆生效）',
 | `test/sync_outbox_wiring_test.dart` | 全文件 | 上行接线（T9 的基础设施） |
 | `test/sync_row_map_test.dart` | 全文件 | 同步 payload 结构不变（PRD F3） |
 | `test/schema_migration_test.dart` | 全文件 | **未新增表结构变更**（PRD F4） |
-| **全量 `flutter test`** | **670/670 通过**（2026-10-24 实测，含本次新增 68 条） | 改造后必须 **≥ 670**，且 **0 失败**；且 **不新增 INFO**（设计文档 G17） |
+| **全量 `flutter test`** | **672/672 通过**（2026-10-24 实测，含本次新增 70 条） | 改造后必须 **≥ 672**，且 **0 失败**；且 **不新增 INFO**（设计文档 G17） |
 
 ### 6.2 可能因语义变更需要**复核**的既有测试（重点结论）
 
@@ -780,12 +780,12 @@ testWidgets('T6：第 3 轮能引用第 1 轮的内容（多轮记忆生效）',
 
 | 门禁 | 基线 | 实测命令输出 |
 | --- | --- | --- |
-| `flutter test` | **670 通过 / 0 失败**（51 个测试文件） | `00:21 +670: All tests passed!` |
+| `flutter test` | **672 通过 / 0 失败**（51 个测试文件） | `00:16 +672: All tests passed!` |
 | `test/agent_features_test.dart` | **15 条** | 与 `ai_job_service_notify_test.dart` 合计 `+17: All tests passed!` |
 | `test/ai_job_service_notify_test.dart` | **2 条** | 同上 |
 | `tool/analyze_inproc.dart` | **139 文件 → 0 error / 0 warning / 3 info** | `Analyzed 139 file(s) → 0 error(s), 0 warning(s), 3 info(s)` + `No issues found!` |
 
-> ✅ **PRD v1.4 头部「测试基线」已订正**为 `flutter test` **670/670（51 个测试文件）** + `analyze_inproc` **139 文件 / 0 error / 0 warning / 3 info**，与本文档 §8.1 一致（更早版本写的「213/213」是旧基线，已作废）。门禁口径 = **670**，且改后须 **≥ 670**。
+> ✅ **PRD v1.4 头部「测试基线」已订正**为 `flutter test` **672/672（51 个测试文件）** + `analyze_inproc` **139 文件 / 0 error / 0 warning / 3 info**，与本文档 §8.1 一致（更早版本写的「213/213」是旧基线，已作废）。门禁口径 = **672**，且改后须 **≥ 672**。
 > ⚠️ 门禁还要求 **不新增 INFO**（设计文档 G17）——当前 3 条 info 是存量（`agent_page.dart` / `knowledge_manage_page.dart` 的 `withOpacity` 弃用）。
 > ⚠️ **并发施工期门禁不可靠**：实测出现过「`flutter test` 602/602 全绿、但 `analyze_inproc` 报 **12 error**」的组合 —— 原因是**另一条任务正在改同一批文件**（读到半成品）。复测即回到 **0 error**。→ **门禁必须在「无人同时施工」的窗口跑**，且**报错时先确认是不是别人正在改**，再判定是回归还是瞬时态。
 > ⚠️ **`'local-dev'` 清理验收只扫 `lib/`**：`grep -rn "'local-dev'" aimindtree_app/lib` → **0 命中**（v1.3.2 复测确认）。**`test/` 目录里的 27 处是合法夹具（刻意模拟多设备），不许动** —— 实测分布：`sync_push_all_test.dart` 8 / `sync_outbox_wiring_test.dart` 8 / `sync_engine_test.dart` 6 / `sync_device_id_wiring_test.dart` 3 / `sync_row_map_test.dart` 2（明细见 §6 R-0）。
@@ -818,7 +818,7 @@ cd aimindtree_app && HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= \
 # ── 步骤 3：全量测试（门禁）
 cd aimindtree_app && HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= \
   D:/DevTools/flutter/bin/flutter.bat test
-# 期望：**≥ 670**，0 失败，0 编译错误
+# 期望：**≥ 672**，0 失败，0 编译错误
 
 # ── 步骤 4：Dart 静态门禁（error 与 warning **都算失败**；flutter analyze 不作门禁，存量有 info）
 cd aimindtree_app && D:/DevTools/flutter/bin/cache/dart-sdk/bin/dart.exe tool/analyze_inproc.dart
@@ -833,11 +833,11 @@ cd aimindtree_app && D:/DevTools/flutter/bin/cache/dart-sdk/bin/dart.exe tool/an
 | --- | --- |
 | `teacher_session_repo_test.dart` | ~28 → **27（实测）** |
 | `teacher_session_context_test.dart` | ~24 → **35（实测）** |
-| `teacher_page_widget_test.dart` | ~14 → **6（实测）** |
+| `teacher_page_widget_test.dart` | ~14 → **8（实测）** |
 | **新增小计** | **~66** |
-| **全量目标** | **≥ 670**（基线 602 + 实测新增 **68** 条），0 失败
+| **全量目标** | **≥ 672**（基线 602 + 实测新增 **70** 条），0 失败
 
-> 条数为规划值，实际以实现落地为准。**门禁的硬口径是「不低于 670 且 0 失败 + 3 个新增文件全绿」**；条数少于 68 时需说明是哪些用例被合并/省略。
+> 条数为规划值，实际以实现落地为准。**门禁的硬口径是「不低于 672 且 0 失败 + 3 个新增文件全绿」**；条数少于 70 时需说明是哪些用例被合并/省略。
 
 ---
 

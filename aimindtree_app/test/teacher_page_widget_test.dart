@@ -309,4 +309,62 @@ void main() {
     expect(find.text('新讲解'), findsOneWidget);
     expect(find.text('重新生成'), findsNothing); // ⑥ 文案是「再讲一次」
   });
+
+  testWidgets('T8 断言④ 用户自建会话点「再讲一次」→ 讲解写入该会话（不是主会话）',
+      (tester) async {
+    // 主会话先有一条历史讲解
+    final primary =
+        await sessions.createSessionForKp('kp-w8b', title: '链式法则 讲解');
+    await sessions.addMessage(
+        sessionId: primary.id, role: 'assistant', content: '主会话旧讲解',
+        modelId: 'dify-t6');
+
+    final fake = _FakeProvider(explainText: '新讲解B');
+    await pumpPage(tester, fake, kpId: 'kp-w8b');
+
+    // AppBar「新建会话」→ 切到用户自建会话
+    await tester.tap(find.byTooltip('新建会话'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('再讲一次'));
+    await tester.pumpAndSettle();
+
+    final list = await sessions.listSessionsForKp('kp-w8b');
+    final created = list.firstWhere((s) => s.id != primary.id);
+    final msgs = await sessions.listMessages(created.id);
+    expect(msgs, hasLength(1));
+    expect(msgs.single.content, '新讲解B'); // 写进**当前**会话
+    expect(msgs.single.modelId, 'dify-t6');
+    // 主会话不受影响（没有被覆盖、也没有被串写）
+    final primaryMsgs = await sessions.listMessages(primary.id);
+    expect(primaryMsgs, hasLength(1));
+    expect(primaryMsgs.single.content, '主会话旧讲解');
+  });
+
+  testWidgets('N4 只有 model_id=dify-t6 的消息才渲染「讲解」标签', (tester) async {
+    final e = Ulid(millis: 1000).toString();
+    final c = Ulid(millis: 2000).toString();
+    await insertSession(id: e, kpId: 'kp-n4', type: 'explain');
+    await insertSession(id: c, kpId: 'kp-n4', type: 'chat');
+    // 讲解（dify-t6）/ 追问回答（dify-t5）/ 老数据（modelId=null）/ 用户提问
+    await sessions.addMessage(
+        sessionId: e, role: 'assistant', content: '讲解正文', modelId: 'dify-t6');
+    await sessions.addMessage(
+        sessionId: e, role: 'assistant', content: '追问回答', modelId: 'dify-t5');
+    await sessions.addMessage(
+        sessionId: e, role: 'assistant', content: '老数据回答'); // modelId 为 null
+    await sessions.addMessage(
+        sessionId: c, role: 'user', content: '用户提问');
+
+    final fake = _FakeProvider();
+    await pumpPage(tester, fake, kpId: 'kp-n4');
+
+    // 四条消息都渲染出来了
+    expect(find.text('讲解正文'), findsOneWidget);
+    expect(find.text('追问回答'), findsOneWidget);
+    expect(find.text('老数据回答'), findsOneWidget);
+    expect(find.text('用户提问'), findsOneWidget);
+    // 但「讲解」标签只有 1 个（仅 dify-t6 那条）——modelId 为 null/异常值都不渲染
+    expect(find.text('讲解'), findsOneWidget);
+  });
 }
