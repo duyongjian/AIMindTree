@@ -68,11 +68,17 @@ abstract class AiProvider {
   ///
   /// Dify 实现映射 `/v1/workflows/run`（blocking，具名 inputs/outputs）；
   /// OpenAI/Anthropic 实现映射 chat completion（JSON mode + 三层保障）。
+  ///
+  /// [variant] 为**可选**参数，仅供「按任务装载提示词」的实现使用
+  /// （如 `LlmServerClient` 用 `variant='keypoints'` 选
+  /// `t1_extract__keypoints.md`，即同一任务码下的提示词变体）；
+  /// 不传不影响既有实现，Dify 类实现可直接忽略。
   Future<AiTaskResult> runTask(
     AiTask task,
     Map<String, dynamic> inputs, {
     String? user,
     Duration timeout = const Duration(seconds: 120),
+    String? variant,
   });
 
   /// 多轮流式对话。

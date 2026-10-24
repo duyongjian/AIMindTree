@@ -30,6 +30,7 @@ class _FakeProvider implements AiProvider {
     Map<String, dynamic> inputs, {
     String? user,
     Duration timeout = const Duration(seconds: 120),
+    String? variant,
   }) async =>
       AiTaskResult(content: '$id:${task.code}');
 

@@ -2,7 +2,9 @@
 ///
 /// 标题 + Markdown 正文（分屏：左编辑 / 右预览），底部：
 /// - 保存到 Drift；
-/// - **提取知识点 (T1)** —— 一键跑通 T1 流水线。
+/// - **提取知识点 (T1)** —— 一键跑通 T1 流水线（先选模式：仅知识点 /
+///   仅要点重点 / 两者都要；走 prompt variant，不是新任务码）；
+/// - **划词提取 (T15)** —— 选中一段正文 → 直接生成知识点，归属本笔记；
 /// - **插入图片**（T05）：选本地图片 → 附件库（base64 唯一权威存储）
 ///   → 正文插入 `aimindtree-asset://<id>` 引用 → 随笔记一起同步。
 library;
@@ -22,6 +24,17 @@ import 'image_source.dart';
 import 'markdown_actions.dart';
 import 'markdown_render.dart';
 import 'markdown_toolbar.dart';
+
+/// 划词提取的选中文字上限：超过就截断（提示词与上下文都按「一段」设计）。
+const int kSelectionMaxLength = 2000;
+
+/// T1 提示词变体（提取模式）→ 人话，用于状态栏回执。
+String _variantLabel(String variant) => switch (variant) {
+      '' => 'T1（仅知识点）',
+      'keypoints' => 'T1.keypoints（仅要点重点）',
+      'both' => 'T1.both（知识点+要点）',
+      _ => 'T1（$variant）',
+    };
 
 class NoteEditorPage extends StatefulWidget {
   const NoteEditorPage({
@@ -193,6 +206,142 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     }
   }
 
+  /// 当前正文选区对应的文字。
+  ///
+  /// 不依赖 `TextSelection.textContent`（该 API 并非所有 SDK 版本都有，
+  /// 且无法处理「光标越界」的异常态）：自己按 base/extent 归一化后截取，
+  /// 支持反向选区（先选尾部再往回拖）并把偏移夹取到正文范围内。
+  String _selectionText() {
+    final text = _bodyCtrl.text;
+    final sel = _bodyCtrl.selection;
+    final base = sel.baseOffset < 0 ? 0 : sel.baseOffset;
+    final extent = sel.extentOffset < 0 ? 0 : sel.extentOffset;
+    final start = (base <= extent ? base : extent).clamp(0, text.length);
+    final end = (base <= extent ? extent : base).clamp(0, text.length);
+    if (start >= end) return '';
+    return text.substring(start, end);
+  }
+
+  /// 划词提取（T15）：把正文里选中的一段文字直接变成一个知识点。
+  ///
+  /// 流程：读选区 → 空/过长校验 → 新笔记先落盘拿 id → 调
+  /// [ExtractionService.extractFromSelection] → 刷新知识点区。
+  /// **不清空选区**：提取完用户还能看到自己选的是哪一段。
+  Future<void> _onExtractFromSelection() async {
+    if (_busy) return;
+    final rawSelection = _selectionText().trim();
+    if (rawSelection.isEmpty) {
+      _snack('请先在正文中选中要提取的文字');
+      return;
+    }
+    var selection = rawSelection;
+    if (selection.length > kSelectionMaxLength) {
+      selection = selection.substring(0, kSelectionMaxLength);
+      _snack('选中文字过长，已截取前 $kSelectionMaxLength 字');
+    }
+
+    // 新笔记还没有 id：先保存一次（知识点必须归属已存在的笔记）。
+    if (_note == null) {
+      final id = await _save();
+      if (id.isEmpty || !mounted) {
+        // 保存失败：_save() 已把原因写进状态栏；这里必须把 _busy 还回去，
+        // 否则 AppBar 三个按钮会永久禁用（与 _onExtract 同款口径）。
+        if (mounted) setState(() => _busy = false);
+        return;
+      }
+    }
+
+    setState(() {
+      _busy = true;
+      _status = '划词提取…';
+    });
+    final res = await widget.service.extractFromSelection(
+      note: _note!,
+      selection: selection,
+    );
+    if (!mounted) return;
+    setState(() => _busy = false);
+    switch (res) {
+      case Success(value: final kp):
+        _status = '已提取：${kp.name}';
+        _snack('已提取：${kp.name}');
+        await _reloadKps();
+      case Failure():
+        _status = '❌ 划词提取失败：${res.message}';
+        _snack(res.message);
+    }
+  }
+
+  /// 底部提示条（划词提取的结果 / 失败原因）。
+  void _snack(String message) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 3)),
+    );
+  }
+
+  /// 提取模式选择（D）：仅知识点 / 仅要点重点 / 两者都要。
+  /// 返回 null = 用户取消（不提取）。
+  ///
+  /// 返回值是**提示词变体**（T1 的 variant，走 body 穿透），不是新任务码：
+  /// - `''` = 仅提取知识点（默认，不传 variant，服务端走 `t1_extract.md`）；
+  /// - `'keypoints'` = 仅提取要点重点（`t1_extract__keypoints.md`）；
+  /// - `'both'` = 两者都要（`t1_extract__both.md`）。
+  ///
+  /// 用 [RadioGroup] 统一托管选中态：`RadioListTile` 的 `groupValue` /
+  /// `onChanged` 在新版 Flutter 已弃用（RadioGroup 祖先接管），单点会刷
+  /// deprecated INFO，所以这里走新 API。
+  Future<String?> _pickExtractVariant() async {
+    var picked = ''; // 默认「仅知识点」
+    return showDialog<String>(
+      context: context,
+      builder: (BuildContext dialogContext) => StatefulBuilder(
+        builder: (BuildContext inner, void Function(void Function()) setSheet) {
+          return AlertDialog(
+            title: const Text('选择提取模式'),
+            contentPadding: const EdgeInsets.symmetric(vertical: 12),
+            content: RadioGroup<String>(
+              groupValue: picked,
+              onChanged: (String? v) => setSheet(() => picked = v ?? ''),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: const <Widget>[
+                  RadioListTile<String>(
+                    value: '',
+                    title: Text('仅知识点'),
+                    subtitle: Text('从笔记里提炼知识点（默认）'),
+                  ),
+                  RadioListTile<String>(
+                    value: 'keypoints',
+                    title: Text('仅要点重点'),
+                    subtitle: Text('只要要点重点，不生成知识点'),
+                  ),
+                  RadioListTile<String>(
+                    value: 'both',
+                    title: Text('知识点 + 要点'),
+                    subtitle: Text('两者都要，一次生成'),
+                  ),
+                ],
+              ),
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('取消'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(picked),
+                child: const Text('开始提取'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   Future<String> _save() async {
     final id = _note?.id;
     final content = _bodyCtrl.text;
@@ -241,6 +390,10 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   }
 
   Future<void> _onExtract() async {
+    // D：先选模式（仅知识点 / 仅要点重点 / 两者都要），取消则不提取。
+    final variant = await _pickExtractVariant();
+    if (variant == null || !mounted) return;
+
     setState(() {
       _busy = true;
       _status = '保存并提取…';
@@ -250,12 +403,15 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
       if (mounted) setState(() => _busy = false);
       return;
     }
-    setState(() => _status = '调用 Dify T1…');
+    setState(() => _status = '调用 $_variantLabel(variant)…');
     // 传当前笔记（_save 成功后 _note 已是最新保存态）：知识点归属本笔记，
     // 不再空降一篇新笔记（2026-10-24 用户实测 bug：旧笔记不显示提取结果）。
+    // variant 走 body 穿透：URL 仍是 /v1/task/T1，服务端按 (T1, variant)
+    // 选提示词变体。
     final res = await widget.service.extract(
       _bodyCtrl.text,
       existingNote: _note,
+      variant: variant,
     );
     if (!mounted) return;
     switch (res) {
@@ -330,6 +486,11 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
             onPressed: _busy ? null : _onExtract,
             icon: const Icon(Icons.auto_awesome),
             tooltip: '提取知识点 (T1)',
+          ),
+          IconButton(
+            onPressed: _busy ? null : _onExtractFromSelection,
+            icon: const Icon(Icons.auto_fix_high),
+            tooltip: '划词提取',
           ),
         ],
       ),

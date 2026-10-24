@@ -124,12 +124,18 @@ class LlmServerClient implements AiProvider {
   ///
   /// 服务端已做六层容错并回填 `parsed`；这里只在 `parsed` 为空时用
   /// [StructuredText] 再解一次（双保险，D10）。
+  ///
+  /// [variant] 走 **body 穿透**（与 [streamChat] 同口径）：服务端按
+  /// `(task, variant)` 二元组检索提示词，所以同一任务码可以有多份提示词变体
+  /// （如 T1 的 `keypoints` / `both`）。URL 里只放 `task.code`——变体不是
+  /// 新任务码，写进 URL 会拼出 `/v1/task/T1.keypoints` 这种不存在的端点。
   @override
   Future<AiTaskResult> runTask(
     AiTask task,
     Map<String, dynamic> inputs, {
     String? user,
     Duration timeout = const Duration(seconds: 120),
+    String? variant,
   }) async {
     final sw = Stopwatch()..start();
     final body = <String, dynamic>{
@@ -138,6 +144,7 @@ class LlmServerClient implements AiProvider {
       if (model != null && model!.isNotEmpty) 'model': model,
       'user': user ?? 'aimindtree-app',
       'timeout_s': timeout.inSeconds,
+      if (variant != null && variant.isNotEmpty) 'variant': variant,
     };
     final json = await _postJson('/v1/task/${task.code}', body, timeout);
     sw.stop();

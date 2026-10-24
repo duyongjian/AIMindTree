@@ -1,4 +1,4 @@
-/// 14 类 AI 任务统一枚举（ARCHITECTURE §6）。
+/// 15 类 AI 任务统一枚举（ARCHITECTURE §6）。
 ///
 /// `structured = true` → 走 `AiProvider.runTask`（一次性 + 结构化 outputs，
 /// 对应 Dify `/v1/workflows/run` blocking）；`false` → 走 `streamChat`
@@ -19,7 +19,8 @@ enum AiTask {
   t11Summary('T11', '总结', false),
   t12TitleTags('T12', '标题与标签', true),
   t13Similarity('T13', '知识点相似度', true),
-  t14KpDedup('T14', '知识点查重', true);
+  t14KpDedup('T14', '知识点查重', true),
+  t15KpFromSelection('T15', '划词提取知识点', true);
 
   const AiTask(this.code, this.label, this.structured);
 
@@ -30,7 +31,7 @@ enum AiTask {
   final bool structured;
 
   /// 纯本地任务（不经过任何 AI Provider）。
-  /// 当前 14 个任务均走 Provider（T4 亦走 DSL-first + 本地兜底），此字段预留。
+  /// 当前 15 个任务均走 Provider（T4 亦走 DSL-first + 本地兜底），此字段预留。
   bool get isLocalOnly => false;
 
   /// 会话类任务（多轮、可流式）。

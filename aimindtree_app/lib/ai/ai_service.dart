@@ -21,11 +21,17 @@ class AiService {
   static final AppLog _log = AppLog('ai_service');
 
   /// 一次性结构化任务（T1/T2/T3/T9/T12…）。
+  ///
+  /// [variant] 为**可选**参数，仅供「按任务装载提示词」的实现使用
+  /// （如 `LlmServerClient` 用 `variant='keypoints'` 选
+  /// `t1_extract__keypoints.md`，即同一任务码下的提示词变体）；
+  /// 不传不影响既有实现。
   Future<Result<AiTaskResult>> run(
     AiTask task,
     Map<String, dynamic> inputs, {
     String? user,
     Duration timeout = const Duration(seconds: 120),
+    String? variant,
   }) async {
     if (task.isLocalOnly) {
       return Failure(ArgumentError('${task.code} 是纯本地任务，不走 AiService'));
@@ -47,14 +53,14 @@ class AiService {
 
     try {
       var result = await provider.runTask(task, inputs,
-          user: user, timeout: timeout);
+          user: user, timeout: timeout, variant: variant);
 
       // 三层保障（轻量）：结构化任务解析失败 → 原样重跑一次。
       // Dify 工作流的输出契约由工作流定义保证，这里只兜模型偶发抽风。
       if (result.parsed == null) {
         _log.w('${task.code} 首次输出解析失败，重试一次');
         result = await provider.runTask(task, inputs,
-            user: user, timeout: timeout);
+            user: user, timeout: timeout, variant: variant);
       }
       return Success(result);
     } on Object catch (e, s) {

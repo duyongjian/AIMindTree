@@ -36,6 +36,7 @@ import 'ai_task_router.dart';
 import 'app_config_service.dart';
 import 'clients/llm_server_client.dart';
 import 'unavailable_ai_provider.dart';
+import '../features/knowledge/kp_dedup.dart';
 
 /// 本地 LLM 服务配置（P0 引导用，开箱即跑）。
 ///
@@ -96,10 +97,20 @@ class ExtractionService {
   /// （粘贴提取等无主场景）才走 [stageSaveNote] 存一篇新笔记。
   /// 2026-10-24 用户实测 bug：编辑器提取时没传当前笔记，知识点全挂到
   /// 空降的新笔记上，原笔记「本笔记提取的知识点」区永远空白。
+  ///
+  /// [variant]：T1 的提示词变体（用户勾选的提取模式），三态映射：
+  /// - 空串（默认）= 仅提取知识点 → 不传 variant，服务端走 `t1_extract.md`；
+  /// - `'keypoints'` = 仅提取要点重点 → `t1_extract__keypoints.md`；
+  /// - `'both'` = 两者都要 → `t1_extract__both.md`。
+  ///
+  /// 变体走 **body 穿透**（`run(variant: ...)` → `runTask(variant: ...)` →
+  /// POST body），**不是**新任务码：服务端按 `(task, variant)` 二元组检索
+  /// 提示词，URL 始终是 `/v1/task/T1`。
   Future<Result<ExtractionSaveResult>> extract(
     String noteContent, {
     String? notebookId,
     Note? existingNote,
+    String variant = '',
   }) async {
     final content = noteContent.trim();
     if (content.isEmpty) {
@@ -119,8 +130,13 @@ class ExtractionService {
       note = (saved as Success<Note>).value;
     }
 
-    // 2) 调 T1（AiService → 路由 → LLM Server /v1/task/T1）
-    final aiRes = await ai.run(AiTask.t1Extract, {'note_text': content});
+    // 2) 调提取任务（AiService → 路由 → LLM Server /v1/task/T1）。
+    //    [variant] 由调用方按用户勾选的模式传（'' / 'keypoints' / 'both'）。
+    final aiRes = await ai.run(
+      AiTask.t1Extract,
+      {'note_text': content},
+      variant: variant.isEmpty ? null : variant,
+    );
     if (aiRes is Failure<AiTaskResult>) {
       return Failure(aiRes.error, aiRes.stackTrace);
     }
@@ -132,6 +148,80 @@ class ExtractionService {
       t1: (aiRes as Success<AiTaskResult>).value,
       notebookId: notebookId,
     );
+  }
+
+  /// 划词提取（T15）：把正文中选中文字提炼成一个完整知识点，归属 [note]。
+  ///
+  /// 用户场景：在编辑器里选中一段文字 → 一键生成知识点。其余字段
+  /// （name / type / definition / prerequisites）由 LLM 结合整篇笔记判断，
+  /// 客户端只权威覆盖 **source_quote = 选中文字**：
+  /// - 选中文字必然逐字出现在原文中 → 锚点校验天然通过；
+  /// - LLM 改字 / 扩写 quote 也不会造成锚点漂移（幻觉防护）。
+  ///
+  /// 单条入库复用 [KnowledgeRepository.saveExtracted]（锚点校验 + PRD 铁律），
+  /// 成功后 fire-and-forget 触发一轮 T14 查重（与粘贴提取的 `_applyT1` 同款：
+  /// 划词也是「创建知识点」路径）。
+  Future<Result<KnowledgePoint>> extractFromSelection({
+    required Note note,
+    required String selection,
+  }) async {
+    final quote = selection.trim();
+    if (quote.isEmpty) {
+      return Failure(ArgumentError('选中的文字为空'));
+    }
+
+    // 1) 调 T15（单对象输出：{"knowledge_point": {...}}）
+    final aiRes = await ai.run(
+      AiTask.t15KpFromSelection,
+      <String, dynamic>{
+        'selection': quote,
+        'note_text': note.contentMd,
+      },
+    );
+    if (aiRes is Failure<AiTaskResult>) {
+      return Failure(aiRes.error, aiRes.stackTrace);
+    }
+    final aiResult = (aiRes as Success<AiTaskResult>).value;
+
+    // 2) 解析单对象（_mapToRaw 只认数组，这里先包一层，不改动它的口径）。
+    final raw = _mapSingleToRaw(aiResult);
+    if (raw == null) {
+      return Failure(
+        StateError('T15 返回结构无法解析为知识点：${_preview(aiResult.content)}'),
+      );
+    }
+
+    // 3) source_quote 无条件覆盖为选中文字（客户端权威，防 LLM 改字）。
+    final forced = RawKnowledgePoint(
+      name: raw.name,
+      type: raw.type,
+      definition: raw.definition,
+      sourceQuote: quote,
+      prerequisites: raw.prerequisites,
+      confidence: raw.confidence,
+    );
+
+    // 4) 单条入库（锚点校验 + 落库 + 同步入队都在里面）。
+    final saved = await repo.saveExtracted(
+      noteId: note.id,
+      noteContent: note.contentMd,
+      rawPoints: <RawKnowledgePoint>[forced],
+    );
+    if (saved is Failure<ExtractionSaveResult>) {
+      return Failure(saved.error, saved.stackTrace);
+    }
+    final result = (saved as Success<ExtractionSaveResult>).value;
+    if (result.saved.isEmpty) {
+      // 锚点校验失败（选中文字不在原文里）/ 名称为空 → 带原因回传。
+      final reason = result.rejected.isEmpty
+          ? '未入库（原因未知）'
+          : result.rejected.first.reason;
+      return Failure(StateError(reason));
+    }
+
+    // 5) 划词也是「创建知识点」路径：后台跑一轮查重（fire-and-forget）。
+    kpDedupSchedule(repo: repo, jobs: jobs);
+    return Success(result.saved.first);
   }
 
   /// 队列路径 · 第一步：存笔记，拿 noteId（资源锁 ``note:{id}`` 的依据）。
@@ -208,6 +298,36 @@ class ExtractionService {
         })
         .whereType<RawKnowledgePoint>()
         .toList();
+  }
+
+  /// 把 T15 的单对象输出映射为一条原始知识点。
+  ///
+  /// 认三种形态（容错，服务端提示词偶尔会走样）：
+  /// 1. `{"knowledge_point": {...}}`（契约形态）；
+  /// 2. `{"knowledge_points": [ {...} ]}`（误用了 T1 的数组契约）→ 取第一条；
+  /// 3. 裸对象 `{...}` / 裸数组 `[...]` → 取第一条。
+  /// 解析不出来返回 null（由调用方转 Failure）。
+  RawKnowledgePoint? _mapSingleToRaw(AiTaskResult result) {
+    final parsed = result.parsed;
+    List<dynamic>? list;
+    if (parsed is Map) {
+      final single = parsed['knowledge_point'];
+      if (single is Map) {
+        list = <dynamic>[single];
+      } else {
+        final many = parsed['knowledge_points'];
+        if (many is List) {
+          list = many;
+        } else if (parsed['name'] is String) {
+          list = <dynamic>[parsed]; // 裸对象
+        }
+      }
+    } else if (parsed is List) {
+      list = parsed; // 裸数组
+    }
+    if (list == null || list.isEmpty) return null;
+    final raws = _mapToRaw(list) ?? const <RawKnowledgePoint>[];
+    return raws.isEmpty ? null : raws.first;
   }
 
   String _deriveTitle(String content) {

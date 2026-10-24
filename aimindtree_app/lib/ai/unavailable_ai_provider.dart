@@ -33,6 +33,7 @@ class UnavailableAiProvider implements AiProvider {
     Map<String, dynamic> inputs, {
     String? user,
     Duration timeout = const Duration(seconds: 120),
+    String? variant,
   }) async {
     throw StateError(_message);
   }
