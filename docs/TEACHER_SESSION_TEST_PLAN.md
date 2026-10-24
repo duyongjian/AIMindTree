@@ -3,7 +3,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档类型 | **测试方案**（不写测试代码；只定义「测什么 / 怎么测 / 断言什么」） |
-| 版本 | **v1.3.1** —— 落实 team-lead **最终裁决**（🔴 不再讨论）：命名 `listSessionsForKp` / `primarySessionForKp`、规格 B = 纯 `id ASC`、规格 C = 纯函数**绝不重排**、派生 id = 整体 16 字节 +1、R-0 = **既有测试一行不改**、M-6 = `insertMessageRow` 失败注入钩子、基线订正 602/134；**v1.3.1 = 与 PRD v1.4 校准版对齐**（新增 §3.4 排查清单） |
+| 版本 | **v1.3.2** —— 落实 team-lead **最终裁决**（🔴 不再讨论）：命名 `listSessionsForKp` / `primarySessionForKp`、规格 B = 纯 `id ASC`、规格 C = 纯函数**绝不重排**、派生 id = 整体 16 字节 +1、R-0 = **既有测试一行不改**、M-6 = `insertMessageRow` 失败注入钩子、基线订正 602/134；v1.3.1 = 与 PRD v1.4 校准版对齐（新增 §3.4 排查清单）；**v1.3.2 = 锚点去行号化 + 实现落地巡检快照（§0.6）** |
 | 作者 | Edward（QA 工程师） |
 | 被测对象 | 老师模式会话化重构（PRD：`docs/TEACHER_SESSION_PRD.md` **v1.4 校准版**；设计：`docs/TEACHER_SESSION_DESIGN.md`） |
 | 代码基线 | `aimindtree_app/lib/features/teacher/teacher_page.dart`（510 行）、`aimindtree_app/lib/data/repositories/ai_session_repository.dart`（261 行） |
@@ -12,6 +12,7 @@
 | v1.2 变更 | ① 方法名按架构师 21:27 定稿改为 `primarySessionForKp` / `listSessionsForKp`；② 纯函数签名更新为含 `at`/`id` 的记录类型，并新增**双分支排序契约**（§3.1.1.1）；③ 规格 B 记录为**待 team-lead 拍板**（PRD D2 逐字要 `updated_at ASC, id ASC`，team-lead 规格 B 要纯 `id ASC`）→ **M8 夹具做成对两者都稳健**，拍板后无需改测试；④ 边界用例补 E18 / E19；⑤ 合并矩阵补 **M11**（`newDerivedUlid` 双射性）；⑥ 风险点补 P27 / P28 / P29 |
 | v1.3 变更 | ① 命名全文统一为 **`listSessionsForKp` / `primarySessionForKp`**（team-lead 最终裁决；数据层工程师 T01a 正在按此施工）；② 规格 B **已定案 = 纯 `id ASC`**（不再是待拍板）；③ **规格 C：`buildSessionContext` 绝不重排** → E13 改判 + E17 强化为「Agent 旧实现参考对照」+ E18 / E19 改判；④ 派生 id 改为 **`newDerivedUlid(String sourceId)`（整体 16 字节逐字节 `(b+1)&0xFF`，必须取模）** → M11 断言改为 6 条、M8 保序断言改为「毫秒 +1」；⑤ **R-0 终裁：既有 `test/agent_features_test.dart` 一行不改**（`deviceId` 走可选参数），验收 grep 限定 `lib/`（`test/` 的 27 处 `'local-dev'` 是合法多设备夹具）；⑥ **M-6 终裁：`insertMessageRow` 可覆写钩子**（**禁止** `@visibleForTesting` / `@protected` → `meta:` 未声明会触发 lint → 门禁失败），M6 改用 `_FailingRepo` 注入；⑦ **基线订正**：`flutter test` 598 → **602/602（48 个测试文件）**、`analyze_inproc` 132 → **134 文件**；⑧ 风险点补 P30（取模）/ P31（字节层 +1）/ P32（失败注入） |
 | **v1.3.1 变更** | 与 **PRD v1.4 校准版**对齐（PRD 已被 team-lead 修订，原「D2 待修订」的提示已失效）：① §0.3 / §6-R-3 的「PRD D2 待 team-lead 同步修订」→ 改为「**PRD v1.4 裁决 R-A 已同步**（D2 逐字写「纯 `id ASC`」）」；② 被测对象标注改为 PRD **v1.4**；③ §8.1 的「PRD §12 写 213/213 是旧基线」→ 改为「PRD v1.4 头部已订正为 602/134」；④ **新增 §3.4「T6 打不通时的排查清单」** —— 把 PRD v1.4 §7.4 的「L2 失效的三种典型形态」（历史快照取错时机 / 关键轮被 4000 字裁掉 / 注入块没落到 query）落成**可判别的断言**，附「纯函数层绿/红 → 定位到哪一环」的分诊路径；⑤ T7 断言点 ⑤ 补 PRD §4.1 的**口径区分**（会话列表排序 `updated_at DESC` ≠ 会话内消息流排序纯 `id ASC`）；⑥ 清掉 2 处已失效的「命名待澄清」提示 |
+| **v1.3.2 变更** | **实现已开工，文档随之校准**（数据层 T01a 已在 `lib/core/id.dart` +31 行、`ai_session_repository.dart` +354 行落地）：① **§0.4 锚点表去行号化** —— 「位置」列改为**以方法名/符号名为准**、行号降级为参考（仓储文件 261 → **579 行**，原行号全部漂移，且仍在施工会继续变），避免实现方按行号找不到代码；② 仓储侧 8 条锚点按 T01a 现状刷新（`ChatMessage.modelId` 已补 / `getOrCreateForKp` 已补 `deletedAt` + `ORDER BY` / `listMessages` 已改纯 `id ASC` 等）；③ **新增 §0.6「实现落地核对进度」** —— QA 对 T01a 工作区改动的逐条巡检快照：13 项契约**已符合**、2 项**待实现**（`isExplainMessage` 判别函数、`buildSessionContext` 纯函数），并附给实现方的 2 条提醒（判别函数落共享层、勿引入 `package:meta`）；④ §8.1 补「**并发施工期门禁不可靠**」告警（实测：施工中途 `analyze_inproc` 一度报 **12 error**，完工后复测 **0 error**） |
 
 > **本文档所有行号均已逐条打开文件核对**（见 §0.4），未凭印象书写。设计文档的行号引用同此。
 
@@ -62,7 +63,11 @@ buildSessionContext(turns, maxMessages: 10, maxChars: 4000, header: <默认>)
 - ⚠️ **连带影响**：`ChatMessage.createdAt` 仍来自 `r.updatedAt`（`ai_session_repository.dart:127`）→ 跨端「最近活跃时间」显示为迁移时刻是**已知偏差**（已登记为已知限制）。
 - ✅ **PRD v1.4 已同步**：§10.2.1 **裁决 R-A** 逐字写「**纯 `id ASC`**——老师模式侧消息列表**只按 id 升序**排序，**不引入 `updated_at` 参与排序**（**取代**旧口径 `updated_at ASC + id ASC`）」；验收 **D2** 也已改为「顺序按**纯 `id ASC`** 确定」→ **本文档与 PRD 已无口径差**。
 
-### 0.4 关键代码锚点（已逐行核对）
+### 0.4 关键代码锚点
+
+> ⚠️ **锚点定位规则（重要）**：下表的**「位置」列以 [方法名 / 符号名] 为准**，**行号仅供快速定位、且易随实现变动而失效**。
+> 原因：数据层（T01a）已在 `ai_session_repository.dart` 落地 **+318 行**（261 → **579 行**），原 261 行版本上的行号**全部漂移**；实现仍在施工中，行号会继续变。
+> **实现方请按方法名/符号名定位，不要按行号找代码。**（行号快照时间：T01a 施工中版本，`git diff` 未提交态。）
 
 | 位置 | 事实 | 影响的测试 |
 | --- | --- | --- |
@@ -77,14 +82,14 @@ buildSessionContext(turns, maxMessages: 10, maxChars: 4000, header: <默认>)
 | `teacher_page.dart:313` | 按钮文案 `const Text('重新生成')` → 改为「再讲一次」 | T8 |
 | `teacher_page.dart:342` | 空态文案 `'暂无讲解，点「重新生成」。'` → 改为「暂无讲解，点『再讲一次』」 | T2 |
 | `teacher_page.dart:483-510` | `_MessageBubble` **只吃 `role` + `content`** → 现结构无法渲染「讲解」标签 | N4 / T11 |
-| `ai_session_repository.dart:21-34` | `ChatMessage` 只有 `id/sessionId/role/content/createdAt`，**无 `modelId`** | T11 / N4（关键缺口，已由设计文档 §2.3 ③ 补齐） |
-| `ai_session_repository.dart:55-58` | `getOrCreateForKp` 查询：`where(kpId==? & type==?)` + `limit(1)`，**①漏 `deletedAt.isNull()` ②无 `ORDER BY`** | T1 / T3 |
-| `ai_session_repository.dart:119` | `listMessages` 排序 `orderBy([OrderingTerm.asc(t.updatedAt)])`，**无 id 次级排序** → 本次补 `id` 次级键（排序键最终口径见 **§0.3**） | T11 / M8 / R-3 |
-| `ai_session_repository.dart:172-184` | `listAgentSessions`：`type='chat' AND kp_id IS NULL AND deleted_at IS NULL`，排序 `updatedAt DESC, id DESC` | T7 / T12 |
-| `ai_session_repository.dart:189-202` | `renameSession`（写 `title` 列 + `_sync.upsertAiSession`） | T9 |
-| `ai_session_repository.dart:205-220` | `clearMessages`（消息软删，**逐条** `upsertAiMessage`） | T9 |
-| `ai_session_repository.dart:223-237` | `deleteSession`（会话软删 + `upsertAiSession` + `clearMessages`） | T9 |
-| `ai_session_repository.dart:253-260` | `_sessionTypeFor`：T7→`'tutor'`、T5→`'chat'`、T6→`'explain'` | R-2 |
+| `ai_session_repository.dart` → **`class ChatMessage`**（当前 `:21-43`） | 重构前只有 `id/sessionId/role/content/createdAt`，**无 `modelId`** → T01a **已补** `modelId`（`:28` 构造参数、`:43` 字段、`:220` 读取） | T11 / N4（缺口**已补齐**，测试需按「`modelId` 可为 null」写断言） |
+| `ai_session_repository.dart` → **`getOrCreateForKp`**（当前 `:120`） | 重构前：`where(kpId==? & type==?)` + `limit(1)`，**①漏 `deletedAt.isNull()` ②无 `ORDER BY`** → T01a **已修**（补 `deletedAt.isNull()` + `orderBy(id ASC)`） | T1 / T3（**已修复**，测试按修复后行为写） |
+| `ai_session_repository.dart` → **`listMessages`**（当前 `:208`） | 重构前排序 `orderBy([OrderingTerm.asc(t.updatedAt)])` → T01a **已改为纯 `id ASC`**（规格 B，§0.3） | T11 / M8 / R-3 |
+| `ai_session_repository.dart` → **`listAgentSessions`**（当前 `:490`） | `type='chat' AND kp_id IS NULL AND deleted_at IS NULL`，排序 `updatedAt DESC, id DESC` → **必须一行不改**（IC7） | T7 / T12 |
+| `ai_session_repository.dart` → **`renameSession`**（当前 `:507`） | 写 `title` 列 + `_sync.upsertAiSession` | T9 |
+| `ai_session_repository.dart` → **`clearMessages`**（当前 `:523`） | 消息软删，**逐条** `upsertAiMessage` | T9 |
+| `ai_session_repository.dart` → **`deleteSession`**（当前 `:541`） | 会话软删 + `upsertAiSession` + `clearMessages` | T9 |
+| `ai_session_repository.dart` → **`_sessionTypeFor`**（当前 `:571`） | T7→`'tutor'`、T5→`'chat'`、T6→`'explain'` → **不要动 T7 语义** | R-2 |
 | `agent_page.dart:182-195` | `deriveSessionTitle({storedTitle, messages})`，**:194 兜底硬编码 `return '新对话';`** | **T10 / IC1** |
 | `agent_page.dart:722-735` | `_buildSessionContext()`：**:726 取最近 12 条**、**:728 header**、:730 `用户：/AI：` ← **L2 的行为范本**（将被抽成公共纯函数） | **T6 纯函数层** |
 | `tables.dart:21` | `DateTimeColumn get updatedAt => dateTime().named('updated_at')();` → Drift 默认 **秒级**精度 | 全部时间断言（§4） |
@@ -119,6 +124,32 @@ buildSessionContext(turns, maxMessages: 10, maxChars: 4000, header: <默认>)
 | 派生 id | `newDerivedUlid(String sourceId)`：**源 id 的 16 字节逐字节 `(b + 1) & 0xFF`**（整体 +1、必须取模） | ✅ 已定案 |
 | R-0（既有测试） | `AiSessionRepository(this._db, {this.deviceId = ''})` → **既有 `test/agent_features_test.dart` 一行不改**（可选参数带默认值 → 原样可编译） | ✅ 已定案 |
 | M-6（失败注入） | 加**可覆写写入钩子** `insertMessageRow(AiMessagesCompanion row)`；**禁止** `@visibleForTesting` / `@protected`（`meta:` 未声明 → lint → 门禁失败），用**纯文档注释**标注「测试接缝」 | ✅ 已定案 |
+
+### 0.6 实现落地核对进度（QA 巡检快照）
+
+> QA 在实现施工中的**逐条巡检**结果。核对基准 = 本文档 §0.1–§0.5 的最终口径。
+> 快照对象：数据层 T01a 的**工作区未提交改动**（`lib/core/id.dart` +31 行、`lib/data/repositories/ai_session_repository.dart` +354 行）。
+> ⚠️ **该改动仍在施工中**，本表是**瞬时快照**，不构成验收结论。
+
+| 契约项 | 实现现状 | 核对结果 |
+| --- | --- | --- |
+| `newDerivedUlid(String sourceId)` | `lib/core/id.dart`：**单参数**（无 `millis`）、16 字节逐字节 `(bytes[i] + 1) & 0xFF`、注释写明双射/保序/幂等三条性质 | ✅ **完全符合**（M11 六条断言可直接照写） |
+| `AiSessionRepository(this._db, {this.deviceId = ''})` | 可选命名参数 + 默认值 | ✅ **符合** → 既有 `agent_features_test.dart` **一行不改**即可编译（R-0 达成） |
+| `insertMessageRow` 测试接缝 | 可覆写实例方法；**纯文档注释**、全文 `visibleForTesting` **0 处**；`addMessage` 与 `_migrateMessages` **两处都走它** | ✅ **符合**（M-6 达成；`meta:` 未引入 → 无 lint 风险） |
+| `listSessionsForKp(kpId)` | 过滤 `kpId == & deletedAt.isNull()`，排序 `updatedAt DESC, id DESC` | ✅ **符合**（PRD §4.1 会话列表口径） |
+| `primarySessionForKp(kpId)` | `orderBy(id ASC)` 取最小 id + `deletedAt.isNull()` | ✅ **符合**（T3） |
+| `createSessionForKp(kpId, {title = ''})` | 已实现 | ✅ 符合 |
+| `mergeLegacyExplain(kpId)` | 事务包裹 + 异常吞掉转 `failed`；方向 explain→chat；保留方 = **id 最小的 chat**；只有 explain → **原地归一**（id 不变） | ✅ **符合**（M1–M6 / M9 / M10） |
+| **IC3**（迁移字段原样保留） | 新行写 `updatedAt: Value(r.updatedAt)`、`modelId: Value(r.modelId)`、`role` / `contentMd` 原样，只改 `session_id` 与 `id` | ✅ **符合**（T11 / M8② / D2） |
+| **幂等** | 派生 id 已存在 → `continue` 跳过（且源行已软删 → 查询本就过滤掉）**双重保险** | ✅ **符合**（M10 / D12） |
+| **outbox 接线** | `_migrateMessages` 逐条 `upsertAiMessage(newId)`；归一化/软删走 `upsertAiSession` | ✅ **符合**（T9 / G19） |
+| **规格 B**（消息流纯 `id ASC`） | `listMessages` 与 `_migrateMessages` 均 `orderBy([asc(t.id)])`，**不含 `updated_at`** | ✅ **符合**（R-A / M8） |
+| `isExplainMessage` 判别函数 | **全仓 0 处命中** —— 尚未落地 | ⏳ **待实现**：T11 / N4 的唯一判别点，测试需等其到位（或按 `modelId == 'dify-t6'` 内联断言，但**判别逻辑必须只有一个来源**） |
+| `buildSessionContext` 纯函数 | 尚未落地（数据层之外，编排/共享层任务） | ⏳ 待实现：T6 核心 |
+
+> **给实现方的两条提醒**：
+> ① **`isExplainMessage` 必须落在共享层**（如 `lib/features/shared/` 或 `lib/core/`），**不要内联在 `teacher_page.dart` 里** —— 否则 Agent 侧与老师模式会出现两份判别逻辑，日后必然分叉（T11 的断言前提就是「唯一判别点」）。
+> ② **不要引入 `package:meta`** —— `pubspec.yaml` 未声明 `meta:`，`import 'package:meta/meta.dart'` 会触发 `depend_on_referenced_packages` lint → **门禁失败**。测试接缝一律用**纯文档注释**（当前实现已正确做到）。
 
 ---
 
@@ -744,6 +775,7 @@ testWidgets('T6：第 3 轮能引用第 1 轮的内容（多轮记忆生效）',
 
 > ✅ **PRD v1.4 头部「测试基线」已订正**为 `flutter test` **602/602（48 个测试文件）** + `analyze_inproc` **134 文件 / 0 error / 0 warning / 3 info**，与本文档 §8.1 一致（更早版本写的「213/213」是旧基线，已作废）。门禁口径 = **602**，且改后须 **≥ 602 + 新增条数**。
 > ⚠️ 门禁还要求 **不新增 INFO**（设计文档 G17）——当前 3 条 info 是存量（`agent_page.dart` / `knowledge_manage_page.dart` 的 `withOpacity` 弃用）。
+> ⚠️ **并发施工期门禁不可靠**：实测出现过「`flutter test` 602/602 全绿、但 `analyze_inproc` 报 **12 error**」的组合 —— 原因是**另一条任务正在改同一批文件**（读到半成品）。复测即回到 **0 error**。→ **门禁必须在「无人同时施工」的窗口跑**，且**报错时先确认是不是别人正在改**，再判定是回归还是瞬时态。
 > ⚠️ **`'local-dev'` 清理验收只扫 `lib/`**：`grep -rn "'local-dev'" aimindtree_app/lib` → **0 命中**。**`test/` 目录里的 27 处是合法夹具（刻意模拟多设备），不许动**（明细见 §6 R-0）。
 
 ### 8.2 执行顺序（改造完成后依次跑）
