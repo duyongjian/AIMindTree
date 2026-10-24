@@ -3,3 +3,8 @@
 # 之前只靠 core.autocrlf=true（本机 git 设置）→ 换机 / 关 autocrlf / 编辑器直接存盘就复发。
 # 用 -text 让 git 对 *.bat 原样存取 CRLF 字节，任何 autocrlf 设置都不再变形。
 *.bat -text
+
+# Shell 脚本必须 LF：shebang 若带 \r 会变成 `bad interpreter`，
+# 在 Git Bash 里报 `$'\r': command not found`。本机 core.autocrlf=true，
+# 编辑器另存一次就可能变 CRLF，故显式锁定。
+*.sh text eol=lf
