@@ -341,6 +341,76 @@ void main() {
     expect(primaryMsgs.single.content, '主会话旧讲解');
   });
 
+  // ==================== 会话面板（回归：重复 pop / 新建无效） ====================
+
+  /// 打开会话面板（AppBar 的「会话列表」按钮）。
+  Future<void> openSessionPanel(WidgetTester tester) async {
+    await tester.tap(find.byTooltip('会话列表'));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('R1 点会话项只是切换会话，不会退出老师模式页', (tester) async {
+    // 两条**已命名**的会话，各带一条可区分的消息，便于断言切到了哪一条。
+    final a = await sessions.createSessionForKp('kp-r1', title: '会话甲');
+    final b = await sessions.createSessionForKp('kp-r1', title: '会话乙');
+    await sessions.addMessage(
+        sessionId: a.id, role: 'assistant', content: '甲的消息',
+        modelId: 'dify-t6');
+    await sessions.addMessage(
+        sessionId: b.id, role: 'assistant', content: '乙的消息',
+        modelId: 'dify-t6');
+
+    final fake = _FakeProvider();
+    await pumpPage(tester, fake, kpId: 'kp-r1');
+    expect(find.text('老师模式 · 链式法则'), findsOneWidget);
+
+    // 看看当前停在哪一条（主会话的选法不在本用例的断言范围内）。
+    final startOnA = find.text('甲的消息').evaluate().isNotEmpty;
+    final otherTitle = startOnA ? '会话乙' : '会话甲';
+    final otherMsg = startOnA ? '乙的消息' : '甲的消息';
+
+    await openSessionPanel(tester);
+    await tester.tap(find.text(otherTitle));
+    await tester.pumpAndSettle();
+
+    // ★ 回归断言：页面还在（旧实现父页多 pop 了一次，会把 TeacherPage 自己弹掉）
+    expect(find.text('老师模式 · 链式法则'), findsOneWidget);
+    // 并且真的切到了被点中的那条会话
+    expect(find.text(otherMsg), findsOneWidget);
+  });
+
+  testWidgets('R2 面板里点「新建对话」真的新建一条并切过去', (tester) async {
+    // 先有一条带消息的主会话：这样进入时不会触发自动讲解，计数干净。
+    final primary =
+        await sessions.createSessionForKp('kp-r2', title: '链式法则 讲解');
+    await sessions.addMessage(
+        sessionId: primary.id, role: 'assistant', content: '已有讲解',
+        modelId: 'dify-t6');
+
+    final before = await sessions.listSessionsForKp('kp-r2');
+    expect(before, hasLength(1));
+
+    final fake = _FakeProvider();
+    await pumpPage(tester, fake, kpId: 'kp-r2');
+    expect(find.text('已有讲解'), findsOneWidget);
+
+    await openSessionPanel(tester);
+    await tester.tap(find.text('新建对话'));
+    await tester.pumpAndSettle();
+
+    // ★ 会话数 +1（旧实现接的是 _bootstrap()，主会话已存在 → 什么都不建）
+    final after = await sessions.listSessionsForKp('kp-r2');
+    expect(after.length, before.length + 1,
+        reason: '「新建对话」必须真的建一条会话');
+    final created = after.firstWhere((s) => s.id != primary.id);
+    expect(created.deletedAt, isNull);
+
+    // 页面仍在，且当前会话已切到新建的那条（空的非主会话 → 显示这条提示）
+    expect(find.text('老师模式 · 链式法则'), findsOneWidget);
+    expect(find.text('这个会话还没有内容，问点什么吧'), findsOneWidget);
+    expect(find.text('已有讲解'), findsNothing, reason: '已切走，不再渲染主会话的消息');
+  });
+
   testWidgets('N4 只有 model_id=dify-t6 的消息才渲染「讲解」标签', (tester) async {
     final e = Ulid(millis: 1000).toString();
     final c = Ulid(millis: 2000).toString();

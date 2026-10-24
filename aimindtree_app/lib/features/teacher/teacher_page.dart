@@ -240,23 +240,45 @@ class _TeacherPageState extends State<TeacherPage> {
         currentSessionId: _currentSessionId,
         primarySessionId: _primarySessionId,
         controller: _controller,
-        onCreated: () => _bootstrap(),
-        onSelected: (id) {
-          Navigator.pop(context);
-          _switchSession(id);
-        },
+        onCreated: () => _createAndSwitchSession(),
+        // ⚠️ 这里**不能**再 `Navigator.pop(context)`：弹层自己在 onTap 里已经
+        // 关掉了，父页再 pop 一次弹掉的就是 TeacherPage 自身的路由 → 直接
+        // 退回上一页（用户报「点会话就返回了知识点列表」）。
+        onSelected: (id) => _switchSession(id),
         onRenamed: () => _bootstrap(),
         onCleared: () => _reloadMessages(),
-        onDeleted: (result) {
-          Navigator.pop(context);
+        onDeleted: (result) async {
+          // 同上：弹层的删除分支在回调前已经 pop 过，这里不能再 pop。
           if (result.$1 != null) {
-            _switchSession(result.$1!);
+            await _switchSession(result.$1!);
           } else {
-            _bootstrap();
+            await _bootstrap();
           }
+          // 已删的那条不能留在内存列表里，否则重开面板还看得见它。
+          await _refreshSessions();
         },
       ),
     );
+  }
+
+  /// 新建一条用户会话并切过去（会话面板「新建对话」与 AppBar「新建会话」共用）。
+  ///
+  /// ★ 不能复用 [_bootstrap]：它只做「合并老数据 → 取主会话」，主会话已存在时
+  ///   压根不会新建任何会话 —— 这就是「点新建对话毫无反应」的根因。
+  Future<void> _createAndSwitchSession() async {
+    final session = await _controller.createUserSession();
+    if (!mounted) return;
+    // 刷新列表，否则重开面板看不到刚建的这条。
+    await _refreshSessions();
+    await _switchSession(session.id);
+    _ticket('新会话');
+  }
+
+  /// 重新拉一次会话列表（新建 / 删除后都能立刻反映到面板里）。
+  Future<void> _refreshSessions() async {
+    final list = await widget.sessions.listSessionsForKp(widget.kp.id);
+    if (!mounted) return;
+    setState(() => _sessions = list);
   }
 
   Future<void> _switchSession(String sessionId) async {
@@ -292,12 +314,7 @@ class _TeacherPageState extends State<TeacherPage> {
           IconButton(
             icon: const Icon(Icons.add_comment_outlined),
             tooltip: '新建会话',
-            onPressed: () async {
-              final session = await _controller.createUserSession();
-              if (!mounted) return;
-              await _switchSession(session.id);
-              _ticket('新会话');
-            },
+            onPressed: () => _createAndSwitchSession(),
           ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert),
