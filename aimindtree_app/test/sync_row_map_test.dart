@@ -239,12 +239,23 @@ const Map<String, (String, String)> kSyncTableAdapters =
 /// 这张表。否则新增列会静默丢失（`canvas_nodes.pinned` 就是前车之鉴）。
 /// 所以这个常量不是「可选的白名单」，而是**必须逐项说明理由**的账本。
 ///
+/// ⚠️ 每条排除项都标了**列默认值**，这不是装饰：它决定「该键缺失时 insert
+/// 会落成什么」。而 `sync_engine.dart` 的 `_applyUpdate` 是**先删后插**
+/// → 对端 payload 里没这个键 = 该列被**重置成列默认**。所以排除一个非空
+/// 默认值的列，等于「对端那一份永远是这个默认值」；排除一个可空列，
+/// 等于「对端那一份永远是 null」。
+///
 /// 现有排除项（全部集中在 2 张表）：
-/// - `notes.content_hash` —— 正文内容哈希，属**本地派生的冗余列**：
-///   对端按 `content_md` 同步后自行重算即可，上行没有意义。
-/// - `ai_sessions.model_id` / `tutor_state` / `difficulty` —— 老师模式
-///   设计 §5.1 明确记录「有意不上行」：pull 时被重置为默认。本项目当前
-///   不用这三列，无害。
+/// - `notes.content_hash`（列默认 `''`）—— 正文内容哈希，属**本地派生的
+///   冗余列**：对端按 `content_md` 同步后自行重算即可，上行没有意义。
+///   ⚠️ 代价：对端那一份的 `content_hash` 恒为 `''`。今天全仓没有任何
+///   比较逻辑读它（只有写入 + 读回模型），所以无害；**但将来若拿它判断
+///   「内容是否变过」，对端会永远判「变了」** → 无谓重抽取 / 重索引。
+///   （更好的解法是把它补上行，但那要改 `lib/`，超出本护栏的范围。）
+/// - `ai_sessions.model_id`（可空，默认 null）/ `ai_sessions.tutor_state`
+///   （列默认 `'{}'`）/ `ai_sessions.difficulty`（可空，默认 null）——
+///   老师模式设计 §5.1 明确记录「有意不上行」：pull 时被重置为默认。
+///   本项目当前不用这三列，无害。
 const Map<String, Set<String>> kSyncExcludedColumns = <String, Set<String>>{
   'notes': <String>{'content_hash'},
   'ai_sessions': <String>{'difficulty', 'model_id', 'tutor_state'},
