@@ -12,7 +12,7 @@
 | v1.2 变更 | ① 方法名按架构师 21:27 定稿改为 `primarySessionForKp` / `listSessionsForKp`；② 纯函数签名更新为含 `at`/`id` 的记录类型，并新增**双分支排序契约**（§3.1.1.1）；③ 规格 B 记录为**待 team-lead 拍板**（PRD D2 逐字要 `updated_at ASC, id ASC`，team-lead 规格 B 要纯 `id ASC`）→ **M8 夹具做成对两者都稳健**，拍板后无需改测试；④ 边界用例补 E18 / E19；⑤ 合并矩阵补 **M11**（`newDerivedUlid` 双射性）；⑥ 风险点补 P27 / P28 / P29 |
 | v1.3 变更 | ① 命名全文统一为 **`listSessionsForKp` / `primarySessionForKp`**（team-lead 最终裁决；数据层工程师 T01a 正在按此施工）；② 规格 B **已定案 = 纯 `id ASC`**（不再是待拍板）；③ **规格 C：`buildSessionContext` 绝不重排** → E13 改判 + E17 强化为「Agent 旧实现参考对照」+ E18 / E19 改判；④ 派生 id 改为 **`newDerivedUlid(String sourceId)`（整体 16 字节逐字节 `(b+1)&0xFF`，必须取模）** → M11 断言改为 6 条、M8 保序断言改为「毫秒 +1」；⑤ **R-0 终裁：既有 `test/agent_features_test.dart` 一行不改**（`deviceId` 走可选参数），验收 grep 限定 `lib/`（`test/` 的 27 处 `'local-dev'` 是合法多设备夹具）；⑥ **M-6 终裁：`insertMessageRow` 可覆写钩子**（**禁止** `@visibleForTesting` / `@protected` → `meta:` 未声明会触发 lint → 门禁失败），M6 改用 `_FailingRepo` 注入；⑦ **基线订正**：`flutter test` 598 → **602/602（48 个测试文件）**、`analyze_inproc` 132 → **134 文件**；⑧ 风险点补 P30（取模）/ P31（字节层 +1）/ P32（失败注入） |
 | **v1.3.1 变更** | 与 **PRD v1.4 校准版**对齐（PRD 已被 team-lead 修订，原「D2 待修订」的提示已失效）：① §0.3 / §6-R-3 的「PRD D2 待 team-lead 同步修订」→ 改为「**PRD v1.4 裁决 R-A 已同步**（D2 逐字写「纯 `id ASC`」）」；② 被测对象标注改为 PRD **v1.4**；③ §8.1 的「PRD §12 写 213/213 是旧基线」→ 改为「PRD v1.4 头部已订正为 602/134」；④ **新增 §3.4「T6 打不通时的排查清单」** —— 把 PRD v1.4 §7.4 的「L2 失效的三种典型形态」（历史快照取错时机 / 关键轮被 4000 字裁掉 / 注入块没落到 query）落成**可判别的断言**，附「纯函数层绿/红 → 定位到哪一环」的分诊路径；⑤ T7 断言点 ⑤ 补 PRD §4.1 的**口径区分**（会话列表排序 `updated_at DESC` ≠ 会话内消息流排序纯 `id ASC`）；⑥ 清掉 2 处已失效的「命名待澄清」提示 |
-| **v1.3.2 变更** | **实现已开工，文档随之校准**（数据层 T01a 已在 `lib/core/id.dart` +31 行、`ai_session_repository.dart` +354 行落地）：① **§0.4 锚点表去行号化** —— 「位置」列改为**以方法名/符号名为准**、行号降级为参考（仓储文件 261 → **579 行**，原行号全部漂移，且仍在施工会继续变），避免实现方按行号找不到代码；② 仓储侧 8 条锚点按 T01a 现状刷新（`ChatMessage.modelId` 已补 / `getOrCreateForKp` 已补 `deletedAt` + `ORDER BY` / `listMessages` 已改纯 `id ASC` 等）；③ **新增 §0.6「实现落地核对进度」** —— QA 对 T01a 工作区改动的逐条巡检快照：13 项契约**已符合**、2 项**待实现**（`isExplainMessage` 判别函数、`buildSessionContext` 纯函数），并附给实现方的 2 条提醒（判别函数落共享层、勿引入 `package:meta`）；④ §8.1 补「**并发施工期门禁不可靠**」告警（实测：施工中途 `analyze_inproc` 一度报 **12 error**，完工后复测 **0 error**） |
+| **v1.3.2 变更** | **实现已开工，文档随之校准**（数据层 T01a 已在 `lib/core/id.dart` +31 行、`ai_session_repository.dart` +354 行落地）：① **§0.4 锚点表去行号化** —— 「位置」列改为**以方法名/符号名为准**、行号降级为参考（仓储文件 261 → **579 行**，原行号全部漂移，且仍在施工会继续变），避免实现方按行号找不到代码；② 仓储侧 8 条锚点按 T01a 现状刷新（`ChatMessage.modelId` 已补 / `getOrCreateForKp` 已补 `deletedAt` + `ORDER BY` / `listMessages` 已改纯 `id ASC` 等）；③ **新增 §0.6「实现落地核对进度」** —— QA 对 T01a 工作区改动的逐条巡检快照：13 项契约**已符合**、2 项**待实现**（`isExplainMessage` 判别函数、`buildSessionContext` 纯函数），并附给实现方的 2 条提醒（判别函数落共享层、勿引入 `package:meta`）；④ §8.1 补「**并发施工期门禁不可靠**」告警（实测：施工中途 `analyze_inproc` 一度报 **12 error**，完工后复测 **0 error**）；⑤ **§6 R-0 升级为「已实证验证」** —— T01a 的 `deviceId` 可选参数落地后定向跑 `test/agent_features_test.dart` = **`00:05 +15: All tests passed!`**（15 条全绿、**零改动**）→「既有测试一行不改」从纸面推断变成可验证事实，最坏风险（连坐 15 条全红）已排除；⑥ §8.1 的 `lib/` 清理 grep 复测确认 **0 命中**，`test/` 的 **27 处**分布逐文件核对无误（8/8/6/3/2） |
 
 > **本文档所有行号均已逐条打开文件核对**（见 §0.4），未凭印象书写。设计文档的行号引用同此。
 
@@ -658,6 +658,9 @@ testWidgets('T6：第 3 轮能引用第 1 轮的内容（多轮记忆生效）',
 
 - 规格：`AiSessionRepository(this._db, {this.deviceId = ''})` —— `deviceId` **带默认值**。
 - **结论：既有 `test/agent_features_test.dart:40` 的 `AiSessionRepository(db)` 原样即可编译** → 🔴 **明确不改 `test/agent_features_test.dart`**（既有测试零改动是本仓硬约束 IC7；可选参数已能表达同样的测试意图）。**设计文档 §7.2 的「T04 改 1 行」已作废。**
+- ✅✅ **已实证验证（v1.3.2 补记）**：T01a 把 `deviceId` 改成可选命名参数**已经落地**，我随即定向跑了既有文件 —— **`00:05 +15: All tests passed!`**（15 条**全绿、零改动**）。
+  → **R-0 从「预测」升级为「实测通过」**：**「既有测试一行不改」这条硬约束已可验证地成立**，不再是纸面推断。
+  → **推论**：R-0 达成 = 「`deviceId` 必填会连坐 15 条全红」这个**最坏风险已排除**；同理 R-1 / R-4（`getOrCreateForKp` 签名、`ChatMessage` 构造参数）只要也走「可选 / 带默认值」，就不会连坐。
 - **验收 grep（去掉 `test/` 目录！）**：`grep -rn "'local-dev'" aimindtree_app/lib` → **0 命中**。
   ⚠️ **`test/` 目录里的 27 处 `'local-dev'` 是合法夹具，不许动**：`sync_push_all_test.dart` 8 处、`sync_outbox_wiring_test.dart` 8 处、`sync_engine_test.dart` 6 处、`sync_device_id_wiring_test.dart` 3 处、`sync_row_map_test.dart` 2 处 —— 它们**刻意模拟多设备**。
 - **本方案新建的 3 个测试文件**用真实 deviceId 时**显式**写 `AiSessionRepository(db, deviceId: 'test-device')`（**新文件**不受「不改既有测试」约束）。
@@ -776,7 +779,7 @@ testWidgets('T6：第 3 轮能引用第 1 轮的内容（多轮记忆生效）',
 > ✅ **PRD v1.4 头部「测试基线」已订正**为 `flutter test` **602/602（48 个测试文件）** + `analyze_inproc` **134 文件 / 0 error / 0 warning / 3 info**，与本文档 §8.1 一致（更早版本写的「213/213」是旧基线，已作废）。门禁口径 = **602**，且改后须 **≥ 602 + 新增条数**。
 > ⚠️ 门禁还要求 **不新增 INFO**（设计文档 G17）——当前 3 条 info 是存量（`agent_page.dart` / `knowledge_manage_page.dart` 的 `withOpacity` 弃用）。
 > ⚠️ **并发施工期门禁不可靠**：实测出现过「`flutter test` 602/602 全绿、但 `analyze_inproc` 报 **12 error**」的组合 —— 原因是**另一条任务正在改同一批文件**（读到半成品）。复测即回到 **0 error**。→ **门禁必须在「无人同时施工」的窗口跑**，且**报错时先确认是不是别人正在改**，再判定是回归还是瞬时态。
-> ⚠️ **`'local-dev'` 清理验收只扫 `lib/`**：`grep -rn "'local-dev'" aimindtree_app/lib` → **0 命中**。**`test/` 目录里的 27 处是合法夹具（刻意模拟多设备），不许动**（明细见 §6 R-0）。
+> ⚠️ **`'local-dev'` 清理验收只扫 `lib/`**：`grep -rn "'local-dev'" aimindtree_app/lib` → **0 命中**（v1.3.2 复测确认）。**`test/` 目录里的 27 处是合法夹具（刻意模拟多设备），不许动** —— 实测分布：`sync_push_all_test.dart` 8 / `sync_outbox_wiring_test.dart` 8 / `sync_engine_test.dart` 6 / `sync_device_id_wiring_test.dart` 3 / `sync_row_map_test.dart` 2（明细见 §6 R-0）。
 
 ### 8.2 执行顺序（改造完成后依次跑）
 
