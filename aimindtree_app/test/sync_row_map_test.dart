@@ -293,6 +293,45 @@ Future<Set<String>> _realColumns(AppDatabase db, String table) async {
   };
 }
 
+/// 第四腿的**唯一断言点**。
+///
+/// 逐表用例与端到端反证**都走这里** → 断言只有一处。
+///
+/// ⚠️ 为什么必须抽成函数（architect-2 实测证伪了旧写法）：
+/// 旧写法是「逐表循环里直接写 expect，端到端那条自己调 `_compareColumns`
+/// 再自己断言」—— 那是**两份代码**。把逐表循环里那条 `expect(diff.missing,
+/// isEmpty)` 短路掉（`if (false)` 包一层），端到端那条**照样绿**：
+/// 它验证的是纯函数，不是护栏真正会红的地方。
+/// 统一到本函数后，谁把这里的 missing 断言删掉或改成恒真，
+/// 端到端那条**必然跟着红** —— 这才叫「护栏会红」。
+Future<void> _assertColumnContract(AppDatabase db, String table) async {
+  final real = await _realColumns(db, table);
+  final excluded = kSyncExcludedColumns[table] ?? const <String>{};
+  final contract = kSyncTableKeys[table]!;
+
+  final diff = _compareColumns(
+    realColumns: real,
+    excluded: excluded,
+    contract: contract,
+  );
+
+  expect(
+    diff.missing,
+    isEmpty,
+    reason: '$table：drift 新增了列但没进 payload → 该列会静默丢失。\n'
+        '  漏上行的列: ${diff.missing}\n'
+        '  处理方式二选一：① 在 sync_row_map.dart 写它 + 在 '
+        'sync_engine.dart 读它 + 在 kSyncTableKeys 里加它；'
+        '② 若有意不上行，把它写进 kSyncExcludedColumns 并说明理由。',
+  );
+  expect(
+    diff.extra,
+    isEmpty,
+    reason: '$table：契约里写了 drift 不存在的列 → 列名拼错或列已被删。\n'
+        '  多余的列: ${diff.extra}',
+  );
+}
+
 /// 第四腿的核心比较：把 drift 真实列集与 payload 契约对齐。
 ///
 /// 返回两个差集：
@@ -391,6 +430,13 @@ Map<String, Set<String>> _extractReadKeys(String src) {
 // ============ 落库探针 ============
 
 /// 一张表的「非默认值探测」用例。
+///
+/// ⚠️ **纪律：探测值必须与该列的默认值异值。**
+/// 闭环腿比的是「payload 里的值」vs「落库后的值」——若探测值恰好等于列
+/// 默认值，那么「这个键压根没被读」也会回落成同一个默认值 → **断言恒真**，
+/// 该列就失去了区分度（`canvas_nodes.pinned` 用 `false` 区分默认 `true`、
+/// `notes.content_hash` 用 `'probe-hash'` 区分默认 `''`，都是这个道理）。
+/// 新增探测项时请先确认该列的默认值，再挑一个**刻意不同**的值。
 class _KeyProbe {
   const _KeyProbe({
     required this.table,
@@ -865,31 +911,7 @@ void main() {
 
     for (final table in kSyncTableKeys.keys) {
       test('$table: 真实列集 − 排除集 == 契约键集', () async {
-        final real = await _realColumns(db, table);
-        final excluded = kSyncExcludedColumns[table] ?? const <String>{};
-        final contract = kSyncTableKeys[table]!;
-
-        final diff = _compareColumns(
-          realColumns: real,
-          excluded: excluded,
-          contract: contract,
-        );
-
-        expect(
-          diff.missing,
-          isEmpty,
-          reason: '$table：drift 新增了列但没进 payload → 该列会静默丢失。\n'
-              '  漏上行的列: ${diff.missing}\n'
-              '  处理方式二选一：① 在 sync_row_map.dart 写它 + 在 '
-              'sync_engine.dart 读它 + 在 kSyncTableKeys 里加它；'
-              '② 若有意不上行，把它写进 kSyncExcludedColumns 并说明理由。',
-        );
-        expect(
-          diff.extra,
-          isEmpty,
-          reason: '$table：契约里写了 drift 不存在的列 → 列名拼错或列已被删。\n'
-              '  多余的列: ${diff.extra}',
-        );
+        await _assertColumnContract(db, table);
       });
     }
 
@@ -990,29 +1012,34 @@ void main() {
       );
     });
 
-    test('端到端：真实库里真加一列 → 真实链路必须报出它（护栏真会红）', () async {
+    test('端到端：真实库里真加一列 → 真实断言路径必须报出它（护栏真会红）',
+        () async {
       // 上面几条是**元测试**：用构造出来的集合验证 _compareColumns 本身正确。
       // 但它们不证明「真实断言路径」会红——所以这一条**真在库里加一列**，
-      // 再走真实的 PRAGMA 链路，把「护栏会红」这件事永久钉住：
+      // 再走**同一个** [_assertColumnContract]（逐表用例走的那个），
+      // 把「护栏会红」这件事永久钉住：
       // 将来若有人把第四腿改成恒真断言（例如把 missing 断言删掉、或改成
       // 只断言 extra），这一条会跟着红。
+      //
+      // ⚠️ 这里**必须**走 [_assertColumnContract] 而不是自己调
+      // `_compareColumns` 再自己断言：后者是「两份代码」，护栏真正会红的
+      // 地方（逐表那条）与自证会红的地方（这里）就分家了——
+      // architect-2 实测证伪过旧写法：短路掉逐表那条断言后，旧版端到端
+      // 那条**照样全绿**。
       final db = AppDatabase(NativeDatabase.memory());
       addTearDown(db.close);
       await db.customStatement(
           'ALTER TABLE mastery_records ADD COLUMN probe_e2e_col TEXT');
 
-      // ① PRAGMA 真的看得到新列（前提：PRAGMA 链路有效）。
+      // ① 前提：PRAGMA 真的看得到新列（否则后面测的不是「护栏会不会红」）。
       final real = await _realColumns(db, 'mastery_records');
       expect(real, contains('probe_e2e_col'));
 
-      // ② 真实契约 vs 真实列集 → 必须报出这一列漏上行。
-      final diff = _compareColumns(
-        realColumns: real,
-        excluded: const <String>{},
-        contract: kSyncTableKeys['mastery_records']!,
+      // ② 走**真实断言路径**：新增列没进 payload → 必须抛 TestFailure。
+      await expectLater(
+        _assertColumnContract(db, 'mastery_records'),
+        throwsA(isA<TestFailure>()),
       );
-      expect(diff.missing, <String>{'probe_e2e_col'});
-      expect(diff.extra, isEmpty);
     });
   });
 
