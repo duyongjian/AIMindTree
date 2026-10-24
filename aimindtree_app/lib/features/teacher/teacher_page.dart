@@ -104,12 +104,18 @@ class _TeacherPageState extends State<TeacherPage> {
 
   Future<void> _generateExplainOnce({required String sessionId}) async {
     final history = await widget.sessions.listMessages(sessionId);
+    // 「讲解」恒走 T6：本方法只有两个调用点（空主会话的自动讲解 / 用户点
+    // 「再讲一次」），两者语义都是「产出一段讲解」，不随会话里是否已有讲解
+    // 而改变任务码（旧实现走 _taskForSession，会在已有讲解时退化成 T5 追问，
+    // 导致「再讲一次」其实问了一个追问）。
+    const task = AiTask.t6Explain;
     final query = _controller.buildQuery(
       history: history,
-      task: _taskForSession(sessionId),
+      task: task,
       currentQuestion: '',
     );
 
+    // 先把「生成中」的气泡状态立起来，再发请求。
     setState(() {
       _askBusy = true;
       _error = null;
@@ -118,7 +124,7 @@ class _TeacherPageState extends State<TeacherPage> {
 
     final buf = StringBuffer();
     try {
-      await for (final chunk in widget.ai.chat(_taskForSession(sessionId), query)) {
+      await for (final chunk in widget.ai.chat(task, query)) {
         if (chunk.delta != null) buf.write(chunk.delta);
         if (chunk.done) break;
       }
@@ -140,14 +146,6 @@ class _TeacherPageState extends State<TeacherPage> {
       setState(() => _askBusy = false);
       _ticket('会话进行中');
     }
-  }
-
-  AiTask _taskForSession(String sessionId) {
-    // 判断当前会话是否已有讲解消息：若有则返回 t5Ask，否则返回 t6Explain
-    // （简化：以主会话是否为首次使用来判断）
-    final isPrimary = sessionId == _primarySessionId;
-    final hasExplain = _messages.any((m) => m.modelId == 'dify-t6');
-    return isPrimary && !hasExplain ? AiTask.t6Explain : AiTask.t5Ask;
   }
 
   Future<void> _send() async {
@@ -241,12 +239,14 @@ class _TeacherPageState extends State<TeacherPage> {
         sessions: _sessions,
         currentSessionId: _currentSessionId,
         primarySessionId: _primarySessionId,
+        controller: _controller,
         onCreated: () => _bootstrap(),
         onSelected: (id) {
           Navigator.pop(context);
           _switchSession(id);
         },
         onRenamed: () => _bootstrap(),
+        onCleared: () => _reloadMessages(),
         onDeleted: (result) {
           Navigator.pop(context);
           if (result.$1 != null) {
@@ -607,9 +607,11 @@ class _SessionManagerSheet extends StatelessWidget {
     required this.sessions,
     required this.currentSessionId,
     required this.primarySessionId,
+    required this.controller,
     required this.onCreated,
     required this.onSelected,
     required this.onRenamed,
+    required this.onCleared,
     required this.onDeleted,
   });
 
@@ -617,9 +619,11 @@ class _SessionManagerSheet extends StatelessWidget {
   final List<AiSessionRow> sessions;
   final String? currentSessionId;
   final String? primarySessionId;
+  final TeacherSessionController controller;
   final VoidCallback onCreated;
   final ValueChanged<String> onSelected;
   final VoidCallback onRenamed;
+  final VoidCallback onCleared;
   final ValueChanged<(String?, String, String)> onDeleted;
 
   @override
@@ -628,7 +632,9 @@ class _SessionManagerSheet extends StatelessWidget {
       initialChildSize: 0.7,
       maxChildSize: 0.9,
       minChildSize: 0.3,
-      builder: (_, controller) => Column(
+      // ⚠️ 形参名不得叫 controller：本 sheet 有一个同名的会话控制器字段，
+      // 会被这个 ScrollController 形参遮蔽。
+      builder: (_, scrollCtrl) => Column(
         children: [
           Container(
             padding: const EdgeInsets.all(16),
@@ -663,7 +669,7 @@ class _SessionManagerSheet extends StatelessWidget {
           ),
           Expanded(
             child: ListView.builder(
-              controller: controller,
+              controller: scrollCtrl,
               itemCount: sessions.length,
               itemBuilder: (_, i) {
                 final s = sessions[i];
@@ -716,7 +722,11 @@ class _SessionManagerSheet extends StatelessWidget {
                           initial: s.title,
                         );
                         if (newTitle != null && newTitle.isNotEmpty) {
-                          // TODO: 调用 controller.renameSession
+                          await controller.renameSession(s.id, newTitle);
+                          if (context.mounted) {
+                            Navigator.pop(context);
+                            onRenamed();
+                          }
                         }
                       } else if (value == 'clear') {
                         final confirmed = await confirmDialog(
@@ -725,7 +735,11 @@ class _SessionManagerSheet extends StatelessWidget {
                           message: '会话会保留，消息不可恢复。',
                         );
                         if (confirmed) {
-                          // TODO: 调用 controller.clearSession
+                          await controller.clearSession(s.id);
+                          if (context.mounted) {
+                            Navigator.pop(context);
+                            onCleared();
+                          }
                         }
                       } else if (value == 'delete') {
                         final isPrimarySession = s.id == primarySessionId;
@@ -739,7 +753,14 @@ class _SessionManagerSheet extends StatelessWidget {
                           message: message,
                         );
                         if (confirmed) {
-                          // TODO: 调用 controller.deleteSession
+                          final result = await controller.deleteSession(
+                            sessionId: s.id,
+                            context: context,
+                          );
+                          if (context.mounted) {
+                            Navigator.pop(context);
+                            onDeleted(result);
+                          }
                         }
                       }
                     },
