@@ -219,7 +219,7 @@ void main() {
     expect(stub.variants, <String>['both']);
   });
 
-  testWidgets('默认「仅知识点」→ 不传 variant（保旧行为）', (tester) async {
+  testWidgets('默认「仅知识点」→ 不带变体（保旧行为）', (tester) async {
     await tester.pumpWidget(MaterialApp(
       home: NoteEditorPage(service: makeService(), db: db),
     ));
@@ -236,7 +236,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(stub.tasks, <AiTask>[AiTask.t1Extract]);
-    expect(stub.variants.single, isNull);
+    expect(stub.variants.single, '');
   });
 
   test('源码守卫：划词入口 + 模式弹窗 + variant 痕迹留在编辑器里', () {

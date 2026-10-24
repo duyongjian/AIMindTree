@@ -1,4 +1,4 @@
-/// AiService：13 类任务的统一入口（ARCHITECTURE §6）。
+/// AiService：15 类任务的统一入口（ARCHITECTURE §6）。
 ///
 /// 职责：按 [AiTask] 选调用形态（runTask / streamChat）、经 [AiTaskRouter]
 /// 路由到具体 Provider、结构化输出解析兜底（三层保障的轻量实现）。

@@ -320,7 +320,7 @@ void main() {
       ));
     });
 
-    test('不传 variant → 走 T1 且 variant 为 null（旧行为不变）', () async {
+    test('不传 variant → 走 T1 且 variant 为空（旧行为不变）', () async {
       final res = await repo.saveNote(Note(id: 'n1', contentMd: content));
       final note = (res as Success<Note>).value;
 
@@ -328,24 +328,18 @@ void main() {
 
       expect(r, isA<Success<ExtractionSaveResult>>());
       expect(stub.tasks, <AiTask>[AiTask.t1Extract]);
-      expect(stub.variants.single, isNull);
+      // 空串 = 不带变体（客户端只在非空时写进 body → 保旧行为）。
+      expect(stub.variants.single, '');
       final out = (r as Success<ExtractionSaveResult>).value;
       expect(out.savedCount, 1);
       expect(out.saved.single.name, '导数');
     });
 
-    test('三态映射："" → null；keypoints / both 原样穿透', () async {
+    test('三态映射："" / keypoints / both 原样穿透，任务码始终是 T1', () async {
       final res = await repo.saveNote(Note(id: 'n1', contentMd: content));
       final note = (res as Success<Note>).value;
 
-      // 显式传空串 = 「仅知识点」，与不传等价（都不带 variant）。
-      final r0 = await makeService()
-          .extract(content, existingNote: note, variant: '');
-      expect(r0, isA<Success<ExtractionSaveResult>>());
-      expect(stub.tasks.last, AiTask.t1Extract);
-      expect(stub.variants.last, isNull);
-
-      for (final v in <String>['keypoints', 'both']) {
+      for (final v in <String>['', 'keypoints', 'both']) {
         stub.tasks.clear();
         stub.variants.clear();
         stub.inputs.clear();

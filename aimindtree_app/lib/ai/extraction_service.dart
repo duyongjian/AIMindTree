@@ -133,10 +133,11 @@ class ExtractionService {
 
     // 2) 调提取任务（AiService → 路由 → LLM Server /v1/task/T1）。
     //    [variant] 由调用方按用户勾选的模式传（'' / 'keypoints' / 'both'）。
+    //    空串 = 不带变体（客户端只在 variant 非空时写进 body，保旧行为）。
     final aiRes = await ai.run(
       AiTask.t1Extract,
       {'note_text': content},
-      variant: variant.isEmpty ? null : variant,
+      variant: variant,
     );
     if (aiRes is Failure<AiTaskResult>) {
       return Failure(aiRes.error, aiRes.stackTrace);
