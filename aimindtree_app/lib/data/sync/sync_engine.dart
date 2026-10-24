@@ -864,6 +864,7 @@ SyncEngine({
         notebookId: Value(p['notebook_id'] as String?),
         title: Value((p['title'] as String?) ?? ''),
         contentMd: Value((p['content_md'] as String?) ?? ''),
+        contentHash: Value((p['content_hash'] as String?) ?? ''),
         updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),

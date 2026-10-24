@@ -57,6 +57,7 @@ const Map<String, Set<String>> kSyncTableKeys = <String, Set<String>>{
     'notebook_id',
     'title',
     'content_md',
+    'content_hash',
     'updated_at',
     'version',
     'device_id',
@@ -245,19 +246,24 @@ const Map<String, (String, String)> kSyncTableAdapters =
 /// 默认值的列，等于「对端那一份永远是这个默认值」；排除一个可空列，
 /// 等于「对端那一份永远是 null」。
 ///
-/// 现有排除项（全部集中在 2 张表）：
-/// - `notes.content_hash`（列默认 `''`）—— 正文内容哈希，属**本地派生的
-///   冗余列**：对端按 `content_md` 同步后自行重算即可，上行没有意义。
-///   ⚠️ 代价：对端那一份的 `content_hash` 恒为 `''`。今天全仓没有任何
-///   比较逻辑读它（只有写入 + 读回模型），所以无害；**但将来若拿它判断
-///   「内容是否变过」，对端会永远判「变了」** → 无谓重抽取 / 重索引。
-///   （更好的解法是把它补上行，但那要改 `lib/`，超出本护栏的范围。）
+/// 现有排除项（**只剩 1 个条目、集中在 1 张表**，且全部有据可查）：
 /// - `ai_sessions.model_id`（可空，默认 null）/ `ai_sessions.tutor_state`
 ///   （列默认 `'{}'`）/ `ai_sessions.difficulty`（可空，默认 null）——
 ///   老师模式设计 §5.1 明确记录「有意不上行」：pull 时被重置为默认。
 ///   本项目当前不用这三列，无害。
+///
+/// （历史条目 `notes.content_hash` 已于本轮**改为纳入 payload**，不再排除；
+/// 下面单独说明它为什么值得从排除集里拿掉。）
+///
+/// ── 为什么 `notes.content_hash` 要补上行、而不是留在排除集里 ──
+/// 该列**至今没有任何代码计算过它**：`Note.contentHash` 的模型默认值是 `''`，
+/// 全仓每个 `Note(...)` 构造点都不传值 → **今天本地和对端都恒为 `''`**，
+/// 上行本身没有实际信息量（它是一个「从没被实现的功能」留下的死列）。
+/// 但补上行的意义在于：**将来谁实现「内容是否变过」的哈希比较时，它会自动
+/// 跨端正确**，不必再回头改同步层——否则一旦漏改，第四腿会因为它已在排除集
+/// 里而**一直放行** → 未来实现者拿不到任何信号，无声出错。
+/// 真正待办是「把哈希算出来」（那是另一个功能，不在本护栏范围）。
 const Map<String, Set<String>> kSyncExcludedColumns = <String, Set<String>>{
-  'notes': <String>{'content_hash'},
   'ai_sessions': <String>{'difficulty', 'model_id', 'tutor_state'},
 };
 
@@ -451,6 +457,10 @@ final List<_KeyProbe> _probes = <_KeyProbe>[
       'notebook_id': 'probe-notebook',
       'title': 'probe-title',
       'content_md': '# probe 正文',
+      // ⚠️ 探测值必须**非空**：列默认是 `''`，若探测值也取 `''` → 键漏了
+      // 也回落 `''` → 断言恒真、探针没有区分度（同 canvas_nodes.pinned
+      // 用 `false` 区分默认 `true` 的道理）。
+      'content_hash': 'probe-hash',
       'deleted_at': _probeDeletedAt,
     },
     read: (db, id) async {
@@ -461,6 +471,7 @@ final List<_KeyProbe> _probes = <_KeyProbe>[
         'notebook_id': r.notebookId,
         'title': r.title,
         'content_md': r.contentMd,
+        'content_hash': r.contentHash,
         'updated_at': r.updatedAt,
         'version': r.version,
         'device_id': r.deviceId,

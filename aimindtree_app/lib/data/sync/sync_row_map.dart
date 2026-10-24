@@ -30,6 +30,7 @@ Map<String, dynamic> noteRowToMap(NoteRow r) => {
       'notebook_id': r.notebookId,
       'title': r.title,
       'content_md': r.contentMd,
+      'content_hash': r.contentHash,
       'updated_at': r.updatedAt,
       'version': r.version,
       'device_id': r.deviceId,
