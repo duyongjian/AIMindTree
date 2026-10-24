@@ -12,7 +12,8 @@
       ``{"name":"力","level":1}``（形状不对，会让上层误判成功）。
 
 **B. 提示词契约**
-    14 个任务的 structured / json_output / output_key / inputs 必须与 App 侧
+    18 个任务（含 T1 的 keypoints/both 两个变体与 T14/T15）的
+    structured / json_output / output_key / inputs 必须与 App 侧
     解析器契约一致（字段名逐字对齐）。已加载的逐个校验，未加载的列为 INFO。
 
 **C. App 端 inputs ↔ front-matter inputs 双向对账**（防静默丢弃）
@@ -175,6 +176,13 @@ EXPECTED_CONTRACT: dict[str, tuple[bool, bool, str | None, tuple[str, ...]]] = {
     'T11': (False, False, None, ('query',)),
     'T12': (True, True, 'title_tags', ('content',)),
     'T13': (True, True, 'similarities', ('pairs',)),
+    'T14': (True, True, 'duplicates', ('pairs',)),
+    # T1 的两个变体（variant 走 body，与主形态同为 knowledge_points 数组契约）：
+    # keypoints = 只提取「要点重点」；both = 知识点 + 要点都要。
+    'T1.keypoints': (True, True, 'knowledge_points', ('note_text',)),
+    'T1.both': (True, True, 'knowledge_points', ('note_text',)),
+    # T15 划词提取：单对象契约（output_key 单数），App 端 _mapSingleToRaw 解析。
+    'T15': (True, True, 'knowledge_point', ('selection', 'note_text')),
 }
 
 
@@ -202,11 +210,20 @@ APP_INPUTS: dict[str, tuple[str, ...] | None] = {
     'T11': None,         # P2 未接线
     'T12': None,         # P2 未接线
     'T13': None,         # P2 未接线
+    'T14': ('pairs',),
+    'T1.keypoints': ('note_text',),
+    'T1.both': ('note_text',),
+    'T15': ('selection', 'note_text'),
 }
 
 #: App 端调用点（报错时给出确切位置，省得再翻代码）。
 APP_CALL_SITES: dict[str, str] = {
-    'T1': 'lib/ai/extraction_service.dart:95  ai.run(T1, {"note_text": ...})',
+    'T1': 'lib/ai/extraction_service.dart  extract()  ai.run(T1, {"note_text": ...})',
+    # T1 变体：同一调用点，variant 走 body（tasks.py:96 只认 body）。
+    'T1.keypoints': 'lib/ai/extraction_service.dart  extract(variant: "keypoints")',
+    'T1.both': 'lib/ai/extraction_service.dart  extract(variant: "both")',
+    # T15 划词提取：单对象输出，客户端权威覆盖 source_quote=选中文字。
+    'T15': 'lib/ai/extraction_service.dart  extractFromSelection()  ai.run(T15, {"selection", "note_text"})',
     # T3 的 points 是 JSON 字符串：按组连线（:233）会在每个元素里多带
     # group / group_order / foundation_level 三个附加字段，字段名对外仍是 points，
     # 但提示词正文必须说明其含义（见 t3_prerequisite.md 第 7 条）。
@@ -598,6 +615,125 @@ def run_sync_checks() -> tuple[int, int]:
 
 # ---------------------------------------------------------------- main
 
+# ------------------------------------------------ F. T1 变体解析（TestClient）
+
+
+def run_variant_resolution_checks() -> tuple[int, int]:
+    """F. ``POST /v1/task`` 的 variant 解析语义（回归护栏）。
+
+    提示词按 ``(task, variant)`` 二元组注册：T1 的 keypoints/both 变体
+    front-matter 是 ``task: T1`` + ``variant: keypoints|both``，服务端
+    **只从 body 读 variant**（routers/tasks.py:96）。曾经有实现把变体塞进
+    任务码（``AiTask('T1.keypoints')`` → ``POST /v1/task/T1.keypoints``），
+    服务端按 ``('T1.KEYPOINTS', None)`` 检索不到 → unknown_task，整条提取
+    链路静默死亡。本节把两种形态的语义钉死：
+
+    1. ``POST /v1/task/T1`` + body ``{"variant": "keypoints"}`` → 越过提示词
+       解析：缺 inputs 时报 ``missing_input``（**不是** unknown_task）；
+    2. 同上 ``"both"``；
+    3. ``POST /v1/task/T15`` → ``missing_input``，文案含 selection/note_text；
+    4. 反例：``POST /v1/task/T1.keypoints``（点号码 + 无 variant）→
+       ``unknown_task``（点号形态只是 index.yaml / 本文件的逻辑键，
+       **不是** URL 任务码）；
+    5. ``POST /v1/task/T1`` 无 variant → 主形态仍解析成功（保旧行为）。
+
+    探针选「缺 inputs」：``require_inputs`` 在 ``registry.get`` 之后
+    （tasks.py:99 → :105），``missing_input`` 即证明提示词已解析成功，
+    全程不调模型、不外网。
+    """
+    import tempfile
+
+    from fastapi.testclient import TestClient
+
+    from server import create_app
+
+    failures = 0
+    total = 0
+
+    def expect(cond: bool, name: str, detail: str = '') -> None:
+        nonlocal failures, total
+        total += 1
+        if cond:
+            print(f'  ✅ {name}' + (f'  —— {detail}' if detail else ''))
+        else:
+            failures += 1
+            print(f'  ❌ {name}' + (f'\n      {detail}' if detail else ''))
+
+    d = tempfile.mkdtemp(prefix='aimindtree_variant_')
+    cfg_path = Path(d) / 'config.yaml'
+    cfg_path.write_text(_SAMPLE_CONFIG_YAML, encoding='utf-8')
+
+    app = create_app(cfg_path)
+    with TestClient(app) as c:
+
+        def probe(task_code: str, variant: str | None = None):
+            body: dict = {'inputs': {}}
+            if variant:
+                body['variant'] = variant
+            return c.post(f'/v1/task/{task_code}', json=body)
+
+        def err_of(r) -> dict:
+            return (r.json().get('error') or {}) if r.status_code != 200 else {}
+
+        def show(r) -> str:
+            err = err_of(r)
+            return f'{r.status_code} {err.get("code")} {str(err.get("message"))[:70]}'
+
+        # ① keypoints 变体（body 形态）
+        r = probe('T1', 'keypoints')
+        err = err_of(r)
+        expect(
+            r.status_code == 400
+                and err.get('code') == 'missing_input'
+                and 'note_text' in str(err.get('message', '')),
+            'T1 + variant=keypoints → 提示词解析成功（missing_input 探针）',
+            show(r),
+        )
+
+        # ② both 变体（body 形态）
+        r = probe('T1', 'both')
+        err = err_of(r)
+        expect(
+            r.status_code == 400
+                and err.get('code') == 'missing_input'
+                and 'note_text' in str(err.get('message', '')),
+            'T1 + variant=both → 提示词解析成功（missing_input 探针）',
+            show(r),
+        )
+
+        # ③ T15 独立任务码（单对象契约）
+        r = probe('T15')
+        err = err_of(r)
+        expect(
+            r.status_code == 400
+                and err.get('code') == 'missing_input'
+                and 'selection' in str(err.get('message', ''))
+                and 'note_text' in str(err.get('message', '')),
+            'T15 → 提示词解析成功（missing_input 含 selection/note_text）',
+            show(r),
+        )
+
+        # ④ 反例：点号任务码必须失败（变体不许塞进 URL）
+        r = probe('T1.keypoints')
+        err = err_of(r)
+        expect(
+            r.status_code == 400 and err.get('code') == 'unknown_task',
+            '反例：T1.keypoints 点号任务码 → unknown_task',
+            show(r),
+        )
+
+        # ⑤ 主形态不传 variant 仍解析成功（保旧行为）
+        r = probe('T1')
+        err = err_of(r)
+        expect(
+            r.status_code == 400 and err.get('code') == 'missing_input',
+            'T1 无 variant → 主形态仍解析成功（保旧行为）',
+            show(r),
+        )
+
+    return failures, total
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     started = time.time()
@@ -633,6 +769,12 @@ def main(argv: list[str] | None = None) -> int:
     sync_failures, sync_total = run_sync_checks()
 
     print()
+    print('=' * 72)
+    print('F. T1 变体解析（POST /v1/task 的 variant 语义）')
+    print('=' * 72)
+    variant_failures, variant_total = run_variant_resolution_checks()
+
+    print()
     print('-' * 72)
     print(f'提示词目录：{store.dir}')
     print(f'已加载 {store.count()} 个，跳过 {len(store.skipped)}，错误 {len(store.errors)}')
@@ -647,7 +789,8 @@ def main(argv: list[str] | None = None) -> int:
         f'/{len(APP_INPUTS) - unwired} 通过（未接线 {unwired}），'
         f'管理后台 {_ADMIN_TOTAL - admin_failures}'
         f'/{_ADMIN_TOTAL} 通过，'
-        f'同步配置 {sync_total - sync_failures}/{sync_total} 通过'
+        f'同步配置 {sync_total - sync_failures}/{sync_total} 通过，'
+        f'变体解析 {variant_total - variant_failures}/{variant_total} 通过'
     )
     print(f'耗时 {time.time() - started:.2f}s')
 
@@ -658,6 +801,7 @@ def main(argv: list[str] | None = None) -> int:
         or store.errors
         or admin_failures
         or sync_failures
+        or variant_failures
     ):
         print('❌ selftest FAILED')
         print(f'   反例提醒：截断样本绝不能产出 {_ANTI_INNER_FRAGMENT} 这种内层片段。')

@@ -4,6 +4,8 @@
 # 这里若与 md 的 front-matter 不一致，服务端会以 md 为准并打 WARN 日志。
 
 T1: t1_extract.md
+T1.keypoints: t1_extract__keypoints.md
+T1.both: t1_extract__both.md
 T2: t2_normalize.md
 T3: t3_prerequisite.md
 T4: t4_gap_analysis.md
@@ -18,3 +20,4 @@ T11: t11_summary.md
 T12: t12_title_tags.md
 T13: t13_similarity.md
 T14: t14_kp_dedup.md
+T15: t15_kp_from_selection.md
