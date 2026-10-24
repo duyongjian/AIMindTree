@@ -69,6 +69,9 @@ buildSessionContext(turns, maxMessages: 10, maxChars: 4000, header: <默认>)
 > ⚠️ **锚点定位规则（重要）**：下表的**「位置」列以 [方法名 / 符号名] 为准**，**行号仅供快速定位、且易随实现变动而失效**。
 > 原因：数据层（T01a）已在 `ai_session_repository.dart` 落地 **+318 行**（261 → **579 行**），原 261 行版本上的行号**全部漂移**；实现仍在施工中，行号会继续变。
 > **实现方请按方法名/符号名定位，不要按行号找代码。**（行号快照时间：T01a 施工中版本，`git diff` 未提交态。）
+>
+> ⚠️ **`teacher_page.dart` 那一组锚点是「重构前」的问题陈述**（T03 已把该页整页重写为单会话流）：`_explainText`、双 `TabBar`、`:154-157` 的 `fullQuery` 等**符号已不复存在**。
+> 它们保留下来的价值是**说明「为什么需要这条测试」**（根因），**不是**当前代码位置——当前实现以 `teacher_session_controller.dart` 与 T03 后的 `teacher_page.dart` 为准。
 
 | 位置 | 事实 | 影响的测试 |
 | --- | --- | --- |
@@ -85,14 +88,18 @@ buildSessionContext(turns, maxMessages: 10, maxChars: 4000, header: <默认>)
 | `teacher_page.dart:483-510` | `_MessageBubble` **只吃 `role` + `content`** → 现结构无法渲染「讲解」标签 | N4 / T11 |
 | `ai_session_repository.dart` → **`class ChatMessage`**（当前 `:21-43`） | 重构前只有 `id/sessionId/role/content/createdAt`，**无 `modelId`** → T01a **已补** `modelId`（`:28` 构造参数、`:43` 字段、`:220` 读取） | T11 / N4（缺口**已补齐**，测试需按「`modelId` 可为 null」写断言） |
 | `ai_session_repository.dart` → **`getOrCreateForKp`**（当前 `:120`） | 重构前：`where(kpId==? & type==?)` + `limit(1)`，**①漏 `deletedAt.isNull()` ②无 `ORDER BY`** → T01a **已修**（补 `deletedAt.isNull()` + `orderBy(id ASC)`） | T1 / T3（**已修复**，测试按修复后行为写） |
+| `ai_session_repository.dart` → **`listSessionsForKp`**（当前 `:240`） | 按 `kpId` 过滤 **+ `deletedAt.isNull()`**，**不按 `type` 过滤**（合并失败残留的 `explain` 行必须可见）；排序 `updatedAt DESC, id DESC` | T7 / T12 / M1–M9 |
+| `ai_session_repository.dart` → **`primarySessionForKp`**（当前 `:256`） | `type='chat'` + `deletedAt.isNull()` + `orderBy(id ASC)` 取 **id 最小**者；无则返回 `null`（补建由 controller 层负责） | T3 / T5 |
+| `ai_session_repository.dart` → **`createSessionForKp`**（当前 `:271`） | 新建 `type='chat'` 会话（`title` 默认空 → 运行时派生）；**纯本地写，不依赖 AI 可用性** | T3 / M1–M9 |
+| `ai_session_repository.dart` → **`mergeLegacyExplain`**（当前 `:313`） | 事务包裹；方向固定 **explain→chat**；无 chat 时把**最早那条 explain 原地归一**（**id 不变**，因此它天然就是主会话），其余迁移后软删；任何异常 → **整事务回滚** + 转 `failed`（不抛给调用方） | M1–M9 |
 | `ai_session_repository.dart` → **`listMessages`**（当前 `:208`） | 重构前排序 `orderBy([OrderingTerm.asc(t.updatedAt)])` → T01a **已改为纯 `id ASC`**（规格 B，§0.3） | T11 / M8 / R-3 |
 | `ai_session_repository.dart` → **`listAgentSessions`**（当前 `:490`） | `type='chat' AND kp_id IS NULL AND deleted_at IS NULL`，排序 `updatedAt DESC, id DESC` → **必须一行不改**（IC7） | T7 / T12 |
 | `ai_session_repository.dart` → **`renameSession`**（当前 `:507`） | 写 `title` 列 + `_sync.upsertAiSession` | T9 |
 | `ai_session_repository.dart` → **`clearMessages`**（当前 `:523`） | 消息软删，**逐条** `upsertAiMessage` | T9 |
 | `ai_session_repository.dart` → **`deleteSession`**（当前 `:541`） | 会话软删 + `upsertAiSession` + `clearMessages` | T9 |
 | `ai_session_repository.dart` → **`_sessionTypeFor`**（当前 `:571`） | T7→`'tutor'`、T5→`'chat'`、T6→`'explain'` → **不要动 T7 语义** | R-2 |
-| `agent_page.dart:182-195` | `deriveSessionTitle({storedTitle, messages})`，**:194 兜底硬编码 `return '新对话';`** | **T10 / IC1** |
-| `agent_page.dart:722-735` | `_buildSessionContext()`：**:726 取最近 12 条**、**:728 header**、:730 `用户：/AI：` ← **L2 的行为范本**（将被抽成公共纯函数） | **T6 纯函数层** |
+| **`features/shared/session_ui.dart` → `deriveSessionTitle`**（当前 `:27`） | 已由 `agent_page.dart` **迁出**（T02）：签名加**可选** `fallbackTitle`（默认 `'新对话'`），默认参数下行为**逐字等价**；`agent_page.dart:38` import + `:42` **re-export** → **既有 import 路径与既有测试零改动** | **T10 / IC1** |
+| **`features/shared/session_context.dart` → `buildSessionContext`**（当前 `:32`） | 原私有 `agent_page._buildSessionContext()`（**:726 取最近 12 条** / :728 header / :730 `用户：/AI：`）**已抽出为公共纯函数**（T02）；Agent 侧调用点 `agent_page.dart:449`（默认 `maxMessages=12` / `maxChars=0` → **输出逐字相同**）← **L2 的行为范本** | **T6 纯函数层** |
 | `tables.dart:21` | `DateTimeColumn get updatedAt => dateTime().named('updated_at')();` → Drift 默认 **秒级**精度 | 全部时间断言（§4） |
 | `tables.dart:236-250` | `AiSessions` 列：`type/target_ref/title/kp_id(nullable)/model_id(nullable)/tutor_state/difficulty` + SyncMeta；**无 `created_at`** | T3 / R-7 |
 | `tables.dart:254-263` | `AiMessages` 列：`session_id/role/content_md/tokens/latency_ms/model_id(nullable)` + SyncMeta；**全库零索引** | T11 |
@@ -298,7 +305,7 @@ buildSessionContext(turns, maxMessages: 10, maxChars: 4000, header: <默认>)
 | 层级 | 🧬 纯函数单测 |
 | 文件 | `test/teacher_session_context_test.dart` |
 | 准备数据 | 无（纯函数） |
-| 断言点 | ① `deriveSessionTitle(storedTitle: '', messages: const [])` **== `'新对话'`**（默认兜底不变，`agent_page.dart:194`）；② 新增可选参数 `fallbackTitle: 'X 讲解'` → 返回 `'X 讲解'`；③ **不传** `fallbackTitle` 时仍 `'新对话'`（默认行为**逐字等价**，IC1 / G11）；④ `storedTitle` 非空 → **优先返回它**（即使也传了 `fallbackTitle`）；⑤ 首条 user 消息 >24 字 → 长度 25 且 `endsWith('…')`；⑥ 多行消息只取**首行**；⑦ 老师模式侧 `fallbackTitle: '${kp.name} 讲解'`（设计文档 §3.5 `:777`）；⑧ 合并失败残留的 explain 会话 → 回落 `'${kp.name} 讲解（历史）'`（设计文档 §10-Q3 `:1261`）；⑨ `test/agent_features_test.dart:359-373` **原样通过** |
+| 断言点 | ① `deriveSessionTitle(storedTitle: '', messages: const [])` **== `'新对话'`**（默认兜底不变，`features/shared/session_ui.dart:27` 的默认 `fallbackTitle = '新对话'`）；② 新增可选参数 `fallbackTitle: 'X 讲解'` → 返回 `'X 讲解'`；③ **不传** `fallbackTitle` 时仍 `'新对话'`（默认行为**逐字等价**，IC1 / G11）；④ `storedTitle` 非空 → **优先返回它**（即使也传了 `fallbackTitle`）；⑤ 首条 user 消息 >24 字 → 长度 25 且 `endsWith('…')`；⑥ 多行消息只取**首行**；⑦ 老师模式侧 `fallbackTitle: '${kp.name} 讲解'`（设计文档 §3.5 `:777`）；⑧ 合并失败残留的 explain 会话 → 回落 `'${kp.name} 讲解（历史）'`（设计文档 §10-Q3 `:1261`）；⑨ `test/agent_features_test.dart:359-373` **原样通过** |
 | 依赖 | `String deriveSessionTitle({required String storedTitle, required List<ChatMessage> messages, String fallbackTitle = '新对话'})`（设计文档 §3.5 `:754`）。⚠️ **只允许新增可选参数；签名与默认行为不得改**（IC1 / G11） |
 
 ### T11 — 合并时被移动消息的 `model_id` / `role` / `content_md` / `updated_at` **原样保留**（**可容忍 null**）
@@ -356,12 +363,12 @@ String buildSessionContext(
 | **输出顺序 = 调用方传入顺序** | `buildSessionContext` **严格按 `turns` 的传入顺序**输出，**不做任何重排**（既不按 `at` 排，也不按 `id` 排） |
 | **为什么** | 排序权威在**数据层** `listMessages`（规格 B = **纯 `id ASC`**）；而 `at`（= `updated_at`）**跨端会被同步覆盖**（增量推送用 outbox 创建时间覆盖 envelope，`sync_engine.dart:183`；pull 时 `_hydrate` `sync_engine.dart:744-751` 再覆盖对端行）→ **不可信**。若纯函数按 `at` 重排，会与 id 序**打架**，把正确顺序打乱 |
 | **谁保证顺序正确** | 调用方传入有序数据。Agent 侧传 `_history`（本身就是追加序）；老师模式侧传 `listMessages` 的结果（已按 `id ASC` 排好） |
-| **Agent 侧兼容** | Agent 的内部消息类型 `_Msg`（`agent_page.dart:260-264`）**没有时间戳字段** → 传入条目 `at` 必为 null → 「不重排」天然满足 **Agent 现状行为逐字不变**（控制 Agent 回归风险） |
+| **Agent 侧兼容** | Agent 的内部消息类型 `_Msg`（**`agent_page.dart:185-186`**，只有 `role` / `content`）**没有时间戳字段**；而 `buildSessionContext` 的记录**也不含 `at` / `id`** → 「不重排」是**结构保证**，**Agent 现状行为逐字不变**（控制 Agent 回归风险） |
 
 > **这条契约对测试的直接要求**（护栏写法已按最终裁决调整，不再是「两条排序分支」）：
 > 1. **乱序传入 → 输出保持传入顺序**（断言 `indexOf(第1条) < indexOf(第2条)`，与传入序一致）——若实现偷偷按 `at` 重排，这条会红；
 > 2. `at` / `id` 全 null → **不崩** + 顺序 == 传入序；
-> 3. ★ **Agent 侧旧实现参考对照**（用迁移前 `_buildSessionContext()` 的逻辑写一份**参考实现**在测试内，断言输出**逐字相同**）——**这一条才是最强护栏**，务必写。
+> 3. ★ **Agent 侧旧实现参考对照**（按契约在测试内写一份**参考实现** `_referenceBuildSessionContext`，断言输出**逐字相同**；原 `agent_page._buildSessionContext()` 已抽出为 `buildSessionContext`）——**这一条才是最强护栏**，务必写。
 > 详见 §4 的 E13 / E17 / E18 / E19。
 
 #### 3.1.2 断言「历史确实被带上」——**内容特征，不是字符串长度**
@@ -591,7 +598,7 @@ testWidgets('T6：第 3 轮能引用第 1 轮的内容（多轮记忆生效）',
 | E14 | **历史与本轮问题重复** | 本轮问题 == 历史某条 | 本轮问题**不在 `turns` 内** → l2 里只有 1 份；query 里出现 2 份（前文块 + 当前问题段）→ 断言 `l2` 中该内容出现 1 次 |
 | E15 | **L1 本身超长** | `kp.definition` = 3000 字 | **L1 永不裁**（L1 不在 `buildSessionContext` 的职责内）；历史被裁到 0；断言 `kp.definition` **完整**在 query 里 |
 | E16 | **角色标注格式** | 任意 | 与 `agent_page._buildSessionContext()` 同形：`用户：xxx` / `AI：xxx`，每行一条；断言两个 `RegExp` 命中数 == 对应消息条数 |
-| E17 | ★★ **Agent 侧旧实现参考对照（最强护栏）** | `buildSessionContext(turns)`（默认 `maxMessages: 12`、`maxChars: 0`），`turns` 取自 Agent 的 `_Msg` 形态（**`at`/`id` 全 null**） | 在测试内用**迁移前 `agent_page._buildSessionContext()` 的逻辑**写一份**参考实现**，断言两者输出**逐字相同**（`expect(actual, reference)`）；<br>⚠️ 这条同时覆盖：① 绝不重排（Agent 传的就是追加序）；② `at`/`id` 全 null 不崩；③ **Agent 侧行为零变化**（设计文档 T01 的验收口径）→ **必须写，优先级最高** |
+| E17 | ★★ **Agent 侧旧实现参考对照（最强护栏）** | `buildSessionContext(turns)`（默认 `maxMessages: 12`、`maxChars: 0`），`turns` 取自 Agent 的 `_Msg` 形态（**`at`/`id` 全 null**） | 在测试内按该**契约**写一份**参考实现**（`teacher_session_context_test.dart` 的 `_referenceBuildSessionContext`；私有方法 `agent_page._buildSessionContext()` 已抽出为 `buildSessionContext`，**测试不再依赖 `agent_page` 的源码位置**），断言两者输出**逐字相同**（`expect(actual, reference)`）；<br>⚠️ 这条同时覆盖：① 绝不重排（Agent 传的就是追加序）；② `at`/`id` 全 null 不崩；③ **Agent 侧行为零变化**（设计文档 T01 的验收口径）→ **必须写，优先级最高** |
 | E18 | **`at` / `id` 字段全缺失不崩** | 条目只给 `role` + `content`（`at`/`id` 均 null） | **不抛异常**；输出顺序 == 传入顺序（不重排）；断言：内容齐全 + 顺序一致 |
 | E19 | **`at` 非空而 `id` 为 null** | `at` 有值、`id` 为 null | **不抛异常**；且**仍然不重排** → 输出顺序 == 传入顺序（**即使 `at` 与传入序相反也不排序**）→ 断言：顺序与传入序一致 |
 
@@ -712,9 +719,10 @@ testWidgets('T6：第 3 轮能引用第 1 轮的内容（多轮记忆生效）',
 - ⚠️ **若把既有构造参数改成必填** → `agent_features_test.dart` 编译失败 → 连带 15 条全红。**约束：`ChatMessage` 的既有参数必须全部保持可选/默认值。**
 - ⚠️ **`modelId` 必须是可选的**（null 合法）→ T11 的断言必须写成**可容忍 null** 的形式（`expect(newRow.modelId, sourceRow.modelId)`），**不得**假设它一定非空；N4 也必须覆盖 `modelId == null` 的容错渲染。
 
-#### R-5 `deriveSessionTitle`（`agent_page.dart:182-195`）
+#### R-5 `deriveSessionTitle`（**`features/shared/session_ui.dart:27`**；已由 `agent_page.dart:182-195` 迁出）
 
-- 只能**新增可选参数** `String fallbackTitle = '新对话'`，默认值仍 `'新对话'`（`:194`）。
+- ✅ **已按 T02 落地**：搬迁到 `features/shared/session_ui.dart`，只**新增可选参数** `String fallbackTitle = '新对话'`，默认值仍 `'新对话'` → 默认参数下行为**逐字等价**。
+- `agent_page.dart:38` import + `:42` **re-export** → 既有 import 路径与既有测试**零改动**（正是本节末条要求的做法）。
 - 既有测试 `agent_features_test.dart:359-373` 锁定：无消息 → `'新对话'`；超长 → 长度 25 + 结尾 `'…'`。加可选参数**不影响**它原样通过 → T10 专项锁死。
 - ⚠️ 若 `agent_page.dart` 的搬迁（设计文档 T01：`deriveSessionTitle` 用 `import` + `export` 搬到共享位置）导致 `test/agent_features_test.dart` 出现 import 错误 → **优先用 `export` 解决（保持 import 路径不变）**，**不得**改测试的 import 路径（那会掩盖公共 API 的破坏，设计文档 §7.2 末条）。
 
