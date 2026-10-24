@@ -1,0 +1,33 @@
+# Netlify 部署配置 · AIMindTree 同步中继
+#
+# 部署方式（控制台/API，不靠浏览器插件点选）：
+#   1. 在 Netlify 控制台「Import from Git」选 GitHub 仓库 AIMindTree，根目录填
+#      `sync_relay_netlify`（只部署这个子目录）。或 CLI：`npx netlify link` + `npx netlify deploy`。
+#   2. 本文件已声明 functions 目录与 rewrite 路由，无需额外配置即可部署。
+#   3. 默认是 preview 部署；确认无误后 `npx netlify deploy --prod` 推生产。
+#
+# 路由说明：Netlify Functions 不像 Vercel 有 `api/[[...path]]` 文件级 catch-all，
+# 因此用 rewrite（200）把 `/`、`/auth/*`、`/sync/*` 全部转发到同一个函数
+# `.netlify/functions/sync`。rewrite 是内部代理，函数内 `request.url` 仍保留原始
+# 路径（如 `/auth/register`），relay.js 据此分发，契约与另四版逐字一致。
+
+[build]
+  # 纯 Functions 项目，无需构建命令；publish 指向一个占位目录（Netlify 要求 publish 存在）。
+  publish = "public"
+  functions = "netlify/functions"
+
+# 把同步中继的所有路径收口到同一个 Netlify Function（rewrite，非 301）。
+[[redirects]]
+  from = "/"
+  to = "/.netlify/functions/sync"
+  status = 200
+
+[[redirects]]
+  from = "/auth/*"
+  to = "/.netlify/functions/sync"
+  status = 200
+
+[[redirects]]
+  from = "/sync/*"
+  to = "/.netlify/functions/sync"
+  status = 200

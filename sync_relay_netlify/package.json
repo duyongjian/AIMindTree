@@ -1,0 +1,16 @@
+{
+  "name": "aimindtree-sync-relay-netlify",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AIMindTree 同步中继 · Netlify 版（Functions + Blobs，契约兼容 CF / CloudBase / Vercel / EdgeOne）",
+  "scripts": {
+    "test": "node test_protocol.mjs"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^8.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
