@@ -40,3 +40,10 @@
   from = "/sync/*"
   to = "/.netlify/functions/sync/sync/:splat"
   status = 200
+
+# 管理接口（/admin/ping、/admin/stats、/admin/users、/admin/reset、
+# /admin/user/:id、/admin/export）：同一函数分发，默认关闭，靠 ADMIN_TOKEN 开启。
+[[redirects]]
+  from = "/admin/*"
+  to = "/.netlify/functions/sync/admin/:splat"
+  status = 200

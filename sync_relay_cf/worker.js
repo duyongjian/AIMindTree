@@ -12,6 +12,12 @@
  * - ``POST /sync/pull``   ``{device_id, since|null}``      → ``{envelopes:[...], server_time}``
  * - ``GET  /sync/manifest``                             → ``{count}``
  *
+ * 管理接口（与 Netlify 版逐字一致，供本地管理后台调用；``Authorization: Bearer
+ * <ADMIN_TOKEN>``，未配置 ADMIN_TOKEN 时全部 404，令牌不符 401）：
+ * - ``GET  /admin/ping`` / ``/admin/stats`` / ``/admin/users`` / ``/admin/export``
+ * - ``POST /admin/reset`` ``{scope, user_id?, confirm:"RESET"}``
+ * - ``DELETE /admin/user/{id}``
+ *
  * envelope 字段（与 App ``SyncEnvelope`` 一致）：
  * ``device_id / entity_table / entity_id / op / payload / base_version /
  * updated_at / deleted_at``。服务端只存每个 (owner_id, entity_table, entity_id)
@@ -289,6 +295,344 @@ async function handleManifest(env, ownerId) {
   return jsonResponse({ count: row ? row.count : 0 });
 }
 
+// ---------------- 管理接口（/admin/*） ----------------
+//
+// 供「本地管理后台」巡检/清理用，与用户侧契约完全隔离（/auth/*、/sync/* 语义零变化）。
+//
+// 默认关闭：只有配置了环境变量 ``ADMIN_TOKEN`` 才启用；未配置/空串时所有
+// /admin/* 一律 404（端点连存在性都不暴露），配了但令牌不符则 401。
+// 令牌比较走 [safeEqual]（定长常量时间），避免时序侧信道。
+
+/** per_user / users 列表上限（按 envelopes 降序取前 N）。 */
+const ADMIN_LIST_MAX = 100;
+
+/** export 单次返回的 envelope 上限。 */
+const ADMIN_EXPORT_MAX = 10000;
+
+/** 读取配置的 ADMIN_TOKEN；未配置或全空白视作「端点关闭」。 */
+function adminTokenOf(env) {
+  const t = env && env.ADMIN_TOKEN;
+  return typeof t === 'string' ? t.trim() : '';
+}
+
+/** 401 响应：带 WWW-Authenticate，便于管理端区分「令牌不对」与「端点未开启」。 */
+function adminUnauthorizedResponse() {
+  return new Response(JSON.stringify({ error: 'unauthorized' }), {
+    status: 401,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'WWW-Authenticate': 'Bearer',
+      ...CORS_HEADERS,
+    },
+  });
+}
+
+/**
+ * 管理鉴权：通过返回 null，否则返回应直接下发的 Response。
+ *
+ * 注意顺序：先判「是否配置」（未配置 → 404 隐藏端点），再判令牌（不符 → 401）。
+ */
+function guardAdmin(request, env) {
+  const expected = adminTokenOf(env);
+  if (!expected) return jsonResponse({ error: 'not_found' }, 404);
+  const auth = request.headers.get('Authorization') || '';
+  const token = auth.toLowerCase().startsWith('bearer ')
+    ? auth.slice('bearer '.length).trim()
+    : '';
+  if (!token || !safeEqual(token, expected)) return adminUnauthorizedResponse();
+  return null;
+}
+
+/** 从可能带部署前缀的路径里切出 ``/admin`` 之后的子路径；不含则 null。 */
+function adminSubPath(path) {
+  const idx = path.indexOf('/admin/');
+  if (idx >= 0) return path.slice(idx + '/admin'.length);
+  if (path === '/admin' || path.endsWith('/admin')) return '/';
+  return null;
+}
+
+// --- 统计用的三个聚合查询（均为只读，供 stats / users 复用） ---
+
+/** 全部账号（不含 pw_hash）。 */
+async function adminListUsers(env) {
+  const rows = await env.DB.prepare(
+    'SELECT id, username, created_at FROM sync_users'
+  ).all();
+  return (rows.results || []).map((r) => ({
+    user_id: r.id,
+    username: r.username == null ? null : r.username,
+    created_at: r.created_at == null ? null : r.created_at,
+  }));
+}
+
+/** ``{ user_id: 令牌数 }``。 */
+async function adminTokenCounts(env) {
+  const rows = await env.DB.prepare(
+    'SELECT user_id, COUNT(*) AS c FROM sync_tokens GROUP BY user_id'
+  ).all();
+  const out = new Map();
+  for (const r of rows.results || []) {
+    out.set(r.user_id, Number(r.c) || 0);
+  }
+  return out;
+}
+
+/** ``{ owner_id: {count, last} }``（last = 该 owner 最新的 server_time）。 */
+async function adminEnvelopeAgg(env) {
+  const rows = await env.DB.prepare(
+    'SELECT owner_id, COUNT(*) AS c, MAX(server_time) AS latest ' +
+      'FROM sync_envelopes GROUP BY owner_id'
+  ).all();
+  const out = new Map();
+  for (const r of rows.results || []) {
+    out.set(r.owner_id, {
+      count: Number(r.c) || 0,
+      last: r.latest == null ? null : String(r.latest),
+    });
+  }
+  return out;
+}
+
+/** 单表计数（col 为空 = 全表）。 */
+async function adminCount(env, table, col, val) {
+  const sql = col
+    ? `SELECT COUNT(*) AS c FROM ${table} WHERE ${col} = ?`
+    : `SELECT COUNT(*) AS c FROM ${table}`;
+  const stmt = col ? env.DB.prepare(sql).bind(val) : env.DB.prepare(sql);
+  const row = await stmt.first();
+  return row ? Number(row.c) || 0 : 0;
+}
+
+/** 单表删除（col 为空 = 清空整表）。 */
+async function adminDelete(env, table, col, val) {
+  const sql = col
+    ? `DELETE FROM ${table} WHERE ${col} = ?`
+    : `DELETE FROM ${table}`;
+  const stmt = col ? env.DB.prepare(sql).bind(val) : env.DB.prepare(sql);
+  await stmt.run();
+}
+
+/**
+ * per_user 聚合：以账号表为主，再补上「有 envelope 但账号已不存在」的孤儿
+ * owner（username 为 null），按 envelopes 降序、user_id 升序，最多 100 条。
+ */
+function adminBuildPerUser(users, tokenCounts, envAgg) {
+  const rows = [];
+  const seen = new Set();
+  for (const u of users) {
+    seen.add(u.user_id);
+    const agg = envAgg.get(u.user_id) || { count: 0, last: null };
+    rows.push({
+      user_id: u.user_id,
+      username: u.username,
+      tokens: tokenCounts.get(u.user_id) || 0,
+      envelopes: agg.count,
+      last_server_time: agg.last,
+    });
+  }
+  for (const [ownerId, agg] of envAgg) {
+    if (seen.has(ownerId)) continue;
+    rows.push({
+      user_id: ownerId,
+      username: null,
+      tokens: tokenCounts.get(ownerId) || 0,
+      envelopes: agg.count,
+      last_server_time: agg.last,
+    });
+  }
+  rows.sort((a, b) =>
+    b.envelopes !== a.envelopes
+      ? b.envelopes - a.envelopes
+      : a.user_id < b.user_id
+        ? -1
+        : a.user_id > b.user_id
+          ? 1
+          : 0
+  );
+  return rows.slice(0, ADMIN_LIST_MAX);
+}
+
+/** GET /admin/ping —— 存活 + 存储后端标识。 */
+function handleAdminPing() {
+  return jsonResponse({
+    ok: true,
+    storage: 'd1',
+    server_time: nowIso(),
+  });
+}
+
+/** GET /admin/stats —— 全局计数 + 按用户的用量（最多 100 条）。 */
+async function handleAdminStats(env) {
+  const users = await adminListUsers(env);
+  const tokenCounts = await adminTokenCounts(env);
+  const envAgg = await adminEnvelopeAgg(env);
+
+  let tokens = 0;
+  for (const c of tokenCounts.values()) tokens += c;
+  let envelopes = 0;
+  for (const a of envAgg.values()) envelopes += a.count;
+
+  return jsonResponse({
+    storage: 'd1',
+    users: users.length,
+    tokens,
+    envelopes,
+    server_time: nowIso(),
+    per_user: adminBuildPerUser(users, tokenCounts, envAgg),
+  });
+}
+
+/** GET /admin/users —— 账号列表（含用量），按 envelopes 降序，最多 100 条。 */
+async function handleAdminUsers(env) {
+  const users = await adminListUsers(env);
+  const tokenCounts = await adminTokenCounts(env);
+  const envAgg = await adminEnvelopeAgg(env);
+
+  const list = users.map((u) => {
+    const agg = envAgg.get(u.user_id) || { count: 0, last: null };
+    return {
+      user_id: u.user_id,
+      username: u.username,
+      created_at: u.created_at,
+      tokens: tokenCounts.get(u.user_id) || 0,
+      envelopes: agg.count,
+    };
+  });
+  list.sort((a, b) =>
+    b.envelopes !== a.envelopes
+      ? b.envelopes - a.envelopes
+      : a.user_id < b.user_id
+        ? -1
+        : a.user_id > b.user_id
+          ? 1
+          : 0
+  );
+  return jsonResponse({ users: list.slice(0, ADMIN_LIST_MAX) });
+}
+
+/**
+ * POST /admin/reset —— 清库（all / envelopes / user）。
+ *
+ * 计数用 ``SELECT COUNT(*)`` + ``DELETE`` 两步（不依赖 RETURNING），因此重复调用
+ * 第二次计数自然为 0，天然幂等。
+ */
+async function handleAdminReset(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: 'invalid json' }, 400);
+  }
+  const confirm = body && body.confirm != null ? String(body.confirm) : '';
+  const scope = body && body.scope != null ? String(body.scope) : '';
+  const userId = body && body.user_id != null ? String(body.user_id) : '';
+
+  // 校验顺序与契约一致：先确认口令，再看 scope 合法性，最后看 user_id 是否缺失。
+  if (confirm !== 'RESET') return jsonResponse({ error: 'confirm_required' }, 400);
+  if (scope === 'user') {
+    if (!userId) return jsonResponse({ error: 'user_id_required' }, 400);
+  } else if (scope !== 'all' && scope !== 'envelopes') {
+    return jsonResponse({ error: 'invalid_scope' }, 400);
+  }
+
+  const deleted = { envelopes: 0, tokens: 0, users: 0 };
+
+  if (scope === 'all') {
+    deleted.envelopes = await adminCount(env, 'sync_envelopes');
+    deleted.tokens = await adminCount(env, 'sync_tokens');
+    deleted.users = await adminCount(env, 'sync_users');
+    await adminDelete(env, 'sync_envelopes');
+    await adminDelete(env, 'sync_tokens');
+    await adminDelete(env, 'sync_users');
+  } else if (scope === 'envelopes') {
+    deleted.envelopes = await adminCount(env, 'sync_envelopes');
+    await adminDelete(env, 'sync_envelopes');
+  } else {
+    deleted.envelopes = await adminCount(env, 'sync_envelopes', 'owner_id', userId);
+    deleted.tokens = await adminCount(env, 'sync_tokens', 'user_id', userId);
+    deleted.users = await adminCount(env, 'sync_users', 'id', userId);
+    await adminDelete(env, 'sync_envelopes', 'owner_id', userId);
+    await adminDelete(env, 'sync_tokens', 'user_id', userId);
+    await adminDelete(env, 'sync_users', 'id', userId);
+  }
+
+  return jsonResponse({ scope, deleted });
+}
+
+/** DELETE /admin/user/{id} —— 删单个账号及其数据；账号不存在 → 404。 */
+async function handleAdminDeleteUser(env, userId) {
+  const exists = await env.DB.prepare(
+    'SELECT id FROM sync_users WHERE id = ?'
+  ).bind(userId).first();
+  if (!exists) return jsonResponse({ error: 'user_not_found' }, 404);
+
+  const envelopes = await adminCount(env, 'sync_envelopes', 'owner_id', userId);
+  const tokens = await adminCount(env, 'sync_tokens', 'user_id', userId);
+  await adminDelete(env, 'sync_envelopes', 'owner_id', userId);
+  await adminDelete(env, 'sync_tokens', 'user_id', userId);
+  await adminDelete(env, 'sync_users', 'id', userId);
+  return jsonResponse({ deleted: { envelopes, tokens, users: 1 } });
+}
+
+/**
+ * GET /admin/export?user_id= —— 导出 envelope 快照（信封形状与 rowToEnvelope 一致）。
+ *
+ * 单次最多 10000 条，多取 1 条用于判定 truncated（避免再跑一次 COUNT）。
+ */
+async function handleAdminExport(env, url) {
+  const userId = (url.searchParams.get('user_id') || '').trim();
+
+  const users = await adminListUsers(env);
+  const picked = userId ? users.filter((u) => u.user_id === userId) : users;
+
+  const sql = userId
+    ? `SELECT ${ENVELOPE_COLS} FROM sync_envelopes WHERE owner_id = ? ` +
+      'ORDER BY owner_id, server_time LIMIT ' + (ADMIN_EXPORT_MAX + 1)
+    : `SELECT ${ENVELOPE_COLS} FROM sync_envelopes ` +
+      'ORDER BY owner_id, server_time LIMIT ' + (ADMIN_EXPORT_MAX + 1);
+  const stmt = userId
+    ? env.DB.prepare(sql).bind(userId)
+    : env.DB.prepare(sql);
+  const rows = await stmt.all();
+  const all = (rows.results || []).map(rowToEnvelope);
+
+  return jsonResponse({
+    user_id: userId || null,
+    exported_at: nowIso(),
+    truncated: all.length > ADMIN_EXPORT_MAX,
+    envelopes: all.slice(0, ADMIN_EXPORT_MAX),
+    users: picked,
+  });
+}
+
+/**
+ * /admin/* 分发：返回 Response；未知子路径返回 null（由调用方回落 404）。
+ * 鉴权已由 [guardAdmin] 前置完成。
+ */
+async function routeAdmin(request, env, sub) {
+  const method = request.method;
+
+  if (method === 'GET' && sub === '/ping') return handleAdminPing();
+  if (method === 'GET' && sub === '/stats') return await handleAdminStats(env);
+  if (method === 'GET' && sub === '/users') return await handleAdminUsers(env);
+  if (method === 'POST' && sub === '/reset') return await handleAdminReset(request, env);
+  if (method === 'GET' && sub === '/export') {
+    return await handleAdminExport(env, new URL(request.url));
+  }
+  if (method === 'DELETE' && sub.startsWith('/user/')) {
+    const raw = sub.slice('/user/'.length);
+    if (!raw) return null;
+    let userId;
+    try {
+      userId = decodeURIComponent(raw);
+    } catch {
+      userId = raw;
+    }
+    return await handleAdminDeleteUser(env, userId);
+  }
+  return null;
+}
+
 // ---------------- 路由 ----------------
 
 export default {
@@ -306,6 +650,15 @@ export default {
     }
 
     try {
+      // 管理接口排在用户路由之前：/admin/* 只认 ADMIN_TOKEN，不碰用户鉴权块。
+      const adminSub = adminSubPath(path);
+      if (adminSub !== null) {
+        const denied = guardAdmin(request, env);
+        if (denied) return denied;
+        const resp = await routeAdmin(request, env, adminSub);
+        return resp || jsonResponse({ error: 'not_found' }, 404);
+      }
+
       if (method === 'POST' && path.endsWith('/auth/register')) {
         return await handleRegister(request, env);
       }

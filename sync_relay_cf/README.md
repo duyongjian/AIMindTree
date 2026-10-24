@@ -64,14 +64,40 @@ D1 表只存每个 `(owner_id, entity_table, entity_id)` 的**最新态**——L
 
 ## 本地自测（无需 wrangler / D1）
 
-用内存版 D1 模拟直接驱动 `worker.js` 的 `fetch`，验证 push→pull→manifest 链路：
+用内存版 D1 模拟直接驱动 `worker.js` 的 `fetch`，验证账号 / 同步 / 管理接口全链路：
 
 ```bash
-node test_worker.mjs
+node test_worker.mjs          # 期望：通过 74，失败 0
 ```
 
-覆盖：空 token 放行 / 设 token 后 401 / push 计数 / manifest 计数 / pull 全量 /
-INSERT OR REPLACE 覆盖同 key / since 增量过滤 / 404。
+覆盖：注册/登录/重名/弱密码、未授权 401、push→pull→manifest、INSERT OR REPLACE
+覆盖、since 增量、多租户隔离、404；以及 `/admin/*` 全组（未配 ADMIN_TOKEN → 404、
+错令牌 → 401、stats/users 形状与 100 条上限、reset 三种 scope 计数与幂等、
+DELETE 用户 404、export 形状 / user_id 过滤 / 10000 条截断）。
+
+## 管理接口（`/admin/*`，默认关闭）
+
+供本地管理后台巡检与清理，**与用户侧契约完全隔离**（`/auth/*`、`/sync/*` 语义零变化），
+HTTP 契约与 `sync_relay_netlify` **逐字一致**。
+
+开启方式：给 Worker 配 `ADMIN_TOKEN`（**不配置则所有 `/admin/*` 一律 404**，
+端点连存在性都不暴露）：
+
+```bash
+wrangler secret put ADMIN_TOKEN      # 输入你自己的强随机串
+```
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/admin/ping` | `{ok,storage:"d1",server_time}` |
+| GET | `/admin/stats` | 全局 `users/tokens/envelopes` + `per_user`（按 envelopes 降序，≤100） |
+| GET | `/admin/users` | 账号列表（含 tokens/envelopes 用量，≤100） |
+| POST | `/admin/reset` | `{scope:"all"\|"envelopes"\|"user", user_id?, confirm:"RESET"}`，幂等 |
+| DELETE | `/admin/user/{id}` | 删账号 + 其 envelopes/tokens；不存在 → 404 |
+| GET | `/admin/export?user_id=` | 导出 envelope 快照（单次 ≤10000 条，超出 `truncated:true`） |
+
+鉴权：`Authorization: Bearer <ADMIN_TOKEN>`，常量时间比较；令牌不符 → 401 +
+`WWW-Authenticate: Bearer`。
 
 ## 部署到 Cloudflare
 
@@ -94,6 +120,7 @@ INSERT OR REPLACE 覆盖同 key / since 增量过滤 / 404。
 
 > 本方案为「账号登录多租户」：**无需设置任何 secret / 共享 token**。
 > 普通用户用 App 端用户名+密码自助注册/登录，登录后拿到的每用户令牌即同步凭证。
+> 若要启用管理接口，再单独 `wrangler secret put ADMIN_TOKEN`（见上一节）。
 
 ## App 端配置
 

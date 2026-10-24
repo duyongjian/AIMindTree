@@ -65,6 +65,16 @@ class MockD1 {
   }
 
   _exec(sql, params) {
+    // DELETE：管理接口用到（DELETE FROM t [WHERE col = ?]）。
+    const del = sql.match(/^DELETE\s+FROM\s+(\w+)/i);
+    if (del) {
+      const table = del[1];
+      const filter = this._where(sql, params);
+      for (const [k, row] of [...this.tables[table].entries()]) {
+        if (filter(row)) this.tables[table].delete(k);
+      }
+      return;
+    }
     const m = sql.match(/INSERT(?: OR REPLACE)? INTO (\w+)\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)/);
     if (m) {
       const table = m[1];
@@ -81,8 +91,26 @@ class MockD1 {
     const list = [...this.tables[table].values()];
     const filter = this._where(sql, params);
     let out = list.filter(filter);
-    if (sql.includes('COUNT(*)')) return [{ count: out.length }];
-    if (sql.includes('ORDER BY server_time')) {
+    // GROUP BY：管理接口的聚合查询（COUNT(*) + MAX(server_time)）。
+    const gm = sql.match(/GROUP\s+BY\s+(\w+)/i);
+    if (gm) {
+      const gcol = gm[1];
+      const groups = new Map();
+      for (const row of out) {
+        const k = row[gcol];
+        const cur = groups.get(k) || { [gcol]: k, c: 0, latest: null };
+        cur.c += 1;
+        const ts = row.server_time;
+        if (ts && (cur.latest === null || ts > cur.latest)) cur.latest = ts;
+        groups.set(k, cur);
+      }
+      return [...groups.values()];
+    }
+    if (sql.includes('COUNT(*)')) {
+      const alias = (sql.match(/COUNT\(\*\)\s+(?:AS\s+)?(\w+)/i) || [])[1] || 'count';
+      return [{ [alias]: out.length }];
+    }
+    if (sql.includes('ORDER BY server_time') || sql.includes('ORDER BY owner_id, server_time')) {
       out.sort((a, b) =>
         a.server_time < b.server_time ? -1 : a.server_time > b.server_time ? 1 : 0
       );
@@ -159,6 +187,15 @@ async function get(path, env, token) {
   if (token) headers['Authorization'] = `Bearer ${token}`;
   return worker.fetch(
     new Request(`https://relay.test${path}`, { method: 'GET', headers }),
+    env
+  );
+}
+
+async function del(path, env, token) {
+  const headers = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return worker.fetch(
+    new Request(`https://relay.test${path}`, { method: 'DELETE', headers }),
     env
   );
 }
@@ -304,6 +341,248 @@ async function run() {
   {
     const r = await json(await get('/sync/nope', env, aliceToken));
     assert(r.status === 404, '未知路径 → 404');
+  }
+
+  // ---------------- 管理接口 /admin/* ----------------
+  // 与 Netlify 版契约逐字一致（同一组断言在 test_protocol.mjs 里也有一份）。
+  const ADMIN = 'adm_secret_123';
+  const adminEnv = { ...env, ADMIN_TOKEN: ADMIN };
+
+  // 16) 未配置 ADMIN_TOKEN → 全部 404（端点不可见）
+  {
+    const r = await json(await get('/admin/ping', env, 'whatever'));
+    assert(
+      r.status === 404 && r.body.error === 'not_found',
+      '未配 ADMIN_TOKEN → /admin/ping 404 not_found'
+    );
+    const r2 = await json(
+      await post('/admin/reset', { scope: 'all', confirm: 'RESET' }, env, 'whatever')
+    );
+    assert(r2.status === 404, '未配 ADMIN_TOKEN → /admin/reset 404');
+    const r3 = await json(await get('/admin/ping', { ...env, ADMIN_TOKEN: '   ' }, ''));
+    assert(r3.status === 404, 'ADMIN_TOKEN 为空白串 → 404');
+  }
+
+  // 17) 令牌不符 → 401 + WWW-Authenticate
+  {
+    const raw = await get('/admin/ping', adminEnv, 'wrong-token');
+    assert(raw.status === 401, '错管理令牌 → 401');
+    assert(raw.headers.get('www-authenticate') === 'Bearer', '401 带 WWW-Authenticate: Bearer');
+    const body = await raw.json();
+    assert(body.error === 'unauthorized', '401 body error=unauthorized');
+    const noAuth = await json(await get('/admin/ping', adminEnv, ''));
+    assert(noAuth.status === 401, '缺管理令牌 → 401');
+  }
+
+  // 18) ping
+  {
+    const r = await json(await get('/admin/ping', adminEnv, ADMIN));
+    assert(
+      r.status === 200 && r.body.ok === true && r.body.storage === 'd1',
+      'ping → 200 {ok:true, storage:"d1"}'
+    );
+    assert(
+      typeof r.body.server_time === 'string' && r.body.server_time.endsWith('Z'),
+      'ping 带 ISO server_time'
+    );
+  }
+
+  // 19) stats：2 用户 / 3 令牌 / 5 envelopes（alice 4 + bob 1）
+  let aliceId = null;
+  let bobId = null;
+  {
+    const r = await json(await get('/admin/stats', adminEnv, ADMIN));
+    assert(r.status === 200 && r.body.storage === 'd1', 'stats 200 storage=d1');
+    assert(r.body.users === 2, 'stats users=2');
+    assert(r.body.tokens === 3, 'stats tokens=3（alice 2 + bob 1）');
+    assert(r.body.envelopes === 5, 'stats envelopes=5');
+    assert(Array.isArray(r.body.per_user) && r.body.per_user.length === 2, 'per_user 2 条');
+    const top = r.body.per_user[0];
+    assert(top.username === 'alice' && top.envelopes === 4, 'per_user 按 envelopes 降序（alice 4 首条）');
+    assert(top.tokens === 2, 'per_user alice tokens=2');
+    assert(
+      typeof top.last_server_time === 'string' && top.last_server_time.endsWith('Z'),
+      'per_user last_server_time 为 ISO 串'
+    );
+    assert(r.body.per_user[1].username === 'bob' && r.body.per_user[1].envelopes === 1, 'per_user 次条 bob 1 条');
+    aliceId = top.user_id;
+    bobId = r.body.per_user[1].user_id;
+  }
+
+  // 20) users 列表形状
+  {
+    const r = await json(await get('/admin/users', adminEnv, ADMIN));
+    assert(r.status === 200 && Array.isArray(r.body.users) && r.body.users.length === 2, 'users 2 条');
+    const a = r.body.users[0];
+    assert(a.user_id === aliceId && a.username === 'alice', 'users 首条为 alice');
+    assert(typeof a.created_at === 'string' && a.created_at.length > 0, 'users 带 created_at');
+    assert(a.tokens === 2 && a.envelopes === 4, 'users alice tokens=2 / envelopes=4');
+  }
+
+  // 21) export 全量
+  {
+    const r = await json(await get('/admin/export', adminEnv, ADMIN));
+    assert(r.status === 200 && r.body.user_id === null, 'export 全量 user_id=null');
+    assert(typeof r.body.exported_at === 'string' && r.body.truncated === false, 'export 带 exported_at / truncated=false');
+    assert(r.body.envelopes.length === 5, 'export 全量 5 条 envelope');
+    assert(r.body.users.length === 2, 'export 全量 2 个 user');
+    const e = r.body.envelopes[0];
+    const keys = Object.keys(e).sort().join(',');
+    assert(
+      keys === 'base_version,deleted_at,device_id,entity_id,entity_table,op,payload,updated_at',
+      'export envelope 形状与 pull 一致（payload 已反序列化）'
+    );
+    assert(e.payload && typeof e.payload === 'object', 'export payload 是对象而非字符串');
+  }
+
+  // 22) export?user_id= 过滤
+  {
+    const r = await json(await get(`/admin/export?user_id=${bobId}`, adminEnv, ADMIN));
+    assert(r.status === 200 && r.body.user_id === bobId, 'export 回显 user_id');
+    assert(r.body.envelopes.length === 1 && r.body.envelopes[0].payload.title === 'Bobs-N1', 'export 仅返回该用户的 envelope');
+    assert(r.body.users.length === 1 && r.body.users[0].user_id === bobId, 'export users 也按 user_id 过滤');
+  }
+
+  // 23) reset 参数校验（三种 400；且不得误删数据）
+  {
+    const r1 = await json(await post('/admin/reset', { scope: 'all' }, adminEnv, ADMIN));
+    assert(r1.status === 400 && r1.body.error === 'confirm_required', 'reset 缺 confirm → 400 confirm_required');
+    const r2 = await json(await post('/admin/reset', { scope: 'all', confirm: 'reset' }, adminEnv, ADMIN));
+    assert(r2.status === 400 && r2.body.error === 'confirm_required', 'confirm 非大写 RESET → 400');
+    const r3 = await json(await post('/admin/reset', { scope: 'user', confirm: 'RESET' }, adminEnv, ADMIN));
+    assert(r3.status === 400 && r3.body.error === 'user_id_required', 'scope=user 缺 user_id → 400 user_id_required');
+    const r4 = await json(await post('/admin/reset', { scope: 'bogus', confirm: 'RESET' }, adminEnv, ADMIN));
+    assert(r4.status === 400 && r4.body.error === 'invalid_scope', '未知 scope → 400 invalid_scope');
+    const s = await json(await get('/admin/stats', adminEnv, ADMIN));
+    assert(s.body.envelopes === 5 && s.body.users === 2, '校验失败不删数据');
+  }
+
+  // 24) reset scope=user（bob）→ 计数正确 + 幂等
+  {
+    const r = await json(
+      await post('/admin/reset', { scope: 'user', user_id: bobId, confirm: 'RESET' }, adminEnv, ADMIN)
+    );
+    assert(
+      r.status === 200 &&
+        r.body.scope === 'user' &&
+        r.body.deleted.envelopes === 1 &&
+        r.body.deleted.tokens === 1 &&
+        r.body.deleted.users === 1,
+      'reset user 删除 bob：1 envelope / 1 token / 1 user'
+    );
+    const again = await json(
+      await post('/admin/reset', { scope: 'user', user_id: bobId, confirm: 'RESET' }, adminEnv, ADMIN)
+    );
+    assert(
+      again.body.deleted.envelopes === 0 &&
+        again.body.deleted.tokens === 0 &&
+        again.body.deleted.users === 0,
+      'reset user 重复调用 → 全 0（幂等）'
+    );
+    const s = await json(await get('/admin/stats', adminEnv, ADMIN));
+    assert(s.body.users === 1 && s.body.tokens === 2 && s.body.envelopes === 4, 'reset user 后 stats 1/2/4');
+  }
+
+  // 25) DELETE /admin/user/{id}：已删除的 bob → 404
+  {
+    const r = await json(await del(`/admin/user/${bobId}`, adminEnv, ADMIN));
+    assert(r.status === 404 && r.body.error === 'user_not_found', 'DELETE 不存在的用户 → 404 user_not_found');
+  }
+
+  // 26) reset scope=envelopes：只删 envelope，令牌/用户不动 + 幂等
+  {
+    const r = await json(await post('/admin/reset', { scope: 'envelopes', confirm: 'RESET' }, adminEnv, ADMIN));
+    assert(
+      r.status === 200 &&
+        r.body.deleted.envelopes === 4 &&
+        r.body.deleted.tokens === 0 &&
+        r.body.deleted.users === 0,
+      'reset envelopes 删 4 条，token/users 记 0'
+    );
+    const again = await json(await post('/admin/reset', { scope: 'envelopes', confirm: 'RESET' }, adminEnv, ADMIN));
+    assert(again.body.deleted.envelopes === 0, 'reset envelopes 重复调用 → 0（幂等）');
+    const s = await json(await get('/admin/stats', adminEnv, ADMIN));
+    assert(s.body.envelopes === 0 && s.body.users === 1 && s.body.tokens === 2, 'reset envelopes 后仅 envelope 归零');
+    assert(
+      s.body.per_user[0].envelopes === 0 && s.body.per_user[0].last_server_time === null,
+      '无数据时 per_user envelopes=0 / last_server_time=null'
+    );
+  }
+
+  // 27) reset scope=all：全清 + 幂等 + 令牌失效
+  {
+    const r = await json(await post('/admin/reset', { scope: 'all', confirm: 'RESET' }, adminEnv, ADMIN));
+    assert(
+      r.status === 200 &&
+        r.body.scope === 'all' &&
+        r.body.deleted.envelopes === 0 &&
+        r.body.deleted.tokens === 2 &&
+        r.body.deleted.users === 1,
+      'reset all 删 2 token / 1 user（envelope 已空）'
+    );
+    const again = await json(await post('/admin/reset', { scope: 'all', confirm: 'RESET' }, adminEnv, ADMIN));
+    assert(
+      again.body.deleted.envelopes === 0 &&
+        again.body.deleted.tokens === 0 &&
+        again.body.deleted.users === 0,
+      'reset all 重复调用 → 全 0（幂等）'
+    );
+    const s = await json(await get('/admin/stats', adminEnv, ADMIN));
+    assert(s.body.users === 0 && s.body.tokens === 0 && s.body.envelopes === 0, 'reset all 后全 0');
+    const sync = await json(await get('/sync/manifest', env, aliceToken));
+    assert(sync.status === 401, 'reset all 后旧用户令牌失效（401）');
+  }
+
+  // 28) export 截断：>10000 条时 truncated=true 且只回 10000 条
+  {
+    const reg = await json(await post('/auth/register', { username: 'carl', password: 'password789' }, env, ''));
+    const carlToken = reg.body.token;
+    const bulk = [];
+    for (let i = 0; i < 10001; i++) {
+      bulk.push(mkEnv('notes', 'bulk' + i, 'd9', { i }));
+    }
+    await post('/sync/push', { device_id: 'd9', envelopes: bulk }, env, carlToken);
+    const r = await json(await get(`/admin/export?user_id=${reg.body.user_id}`, adminEnv, ADMIN));
+    assert(
+      r.status === 200 && r.body.truncated === true && r.body.envelopes.length === 10000,
+      'export 超 10000 条 → truncated=true 且截到 10000'
+    );
+  }
+
+  // 29) per_user / users 上限 100（另起干净环境直接造 150 个账号）
+  {
+    const env2 = makeEnv();
+    for (let i = 0; i < 150; i++) {
+      env2.DB.tables.sync_users.set(`u_x${i}`, {
+        id: `u_x${i}`,
+        username: `user${i}`,
+        pw_hash: 'salt:hash',
+        created_at: '2026-01-01T00:00:00.000Z',
+      });
+    }
+    const mkRow = (owner, id) => ({
+      owner_id: owner,
+      entity_table: 'notes',
+      entity_id: id,
+      device_id: 'd',
+      op: 'upsert',
+      payload_json: '{}',
+      base_version: 1,
+      updated_at: '2026-01-01T00:00:00.000Z',
+      deleted_at: null,
+      server_time: '2026-01-01T00:00:00.000Z',
+    });
+    env2.DB.tables.sync_envelopes.set('u_x0|notes|a', mkRow('u_x0', 'a'));
+    env2.DB.tables.sync_envelopes.set('u_x0|notes|b', mkRow('u_x0', 'b'));
+    env2.DB.tables.sync_envelopes.set('u_x1|notes|c', mkRow('u_x1', 'c'));
+
+    const adminEnv2 = { ...env2, ADMIN_TOKEN: ADMIN };
+    const s = await json(await get('/admin/stats', adminEnv2, ADMIN));
+    assert(s.body.users === 150, '150 账号时 stats.users 仍统计全量');
+    assert(s.body.per_user.length === 100, 'per_user 最多 100 条');
+    assert(s.body.per_user[0].user_id === 'u_x0' && s.body.per_user[0].envelopes === 2, 'per_user 首条为 envelope 最多的 u_x0');
+    const u = await json(await get('/admin/users', adminEnv2, ADMIN));
+    assert(u.body.users.length === 100, 'users 列表最多 100 条');
   }
 
   console.log(`\n结果：通过 ${passed}，失败 ${failed}`);

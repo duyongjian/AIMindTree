@@ -4,7 +4,7 @@
  * Netlify Functions（v2，默认导出签名）约定：``(request, context) => Response``。
  * 本文件只做三件事：
  *   1. 用 ``@netlify/blobs`` 的 ``getStore`` 拿到站点级 KV 存储；
- *   2. 把 Blobs 适配成 relay.js 需要的 ``{get, set, listKeys}`` 接口；
+ *   2. 把 Blobs 适配成 relay.js 需要的 ``{get, set, listKeys, delete}`` 接口；
  *   3. 把 Netlify 的「函数挂载前缀」还原成逻辑路径，再调 ``handleFetch``。
  *
  * 路由由仓库根 ``netlify.toml`` 的 rewrite（200）把 ``/``、``/auth/*``、``/sync/*``
@@ -64,6 +64,10 @@ function makeStore(siteId) {
       return resolveStore(siteId)
         .list({ prefix })
         .then(({ blobs }) => (blobs || []).map((b) => b.key));
+    },
+    delete(key) {
+      // 管理接口（/admin/reset、/admin/user/{id}）按前缀逐键清理需要它。
+      return resolveStore(siteId).delete(key);
     },
   };
 }

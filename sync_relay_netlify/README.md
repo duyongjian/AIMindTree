@@ -43,7 +43,7 @@ Netlify **Functions（Node.js）+ Blobs** 实现。HTTP 契约与
    从 `node:crypto` 取 `webcrypto` 兜底，PBKDF2 哈希参数与另四版**完全一致、
    哈希值可互相移植**（多后端用户迁移无障碍）。本地 Node 22 与测试走全局分支。
 2. **存储用 `@netlify/blobs`，走「API 访问」模式**（`relay.js` 把存储抽象成
-   `{get, set, listKeys}` 接口，生产 `netlify/functions/sync.mjs` 适配，测试用
+   `{get, set, listKeys, delete}` 接口，生产 `netlify/functions/sync.mjs` 适配，测试用
    内存实现零依赖跑通）。**不依赖平台自动注入 Blobs 上下文**——实测 v2 默认导出 +
    惰性建 store + `.mjs` 扩展名均无法让平台注入 `netlifyBlobsContext` /
    `NETLIFY_BLOBS_CONTEXT`（每请求 `MissingBlobsEnvironmentError`；Netlify 支持
@@ -87,7 +87,7 @@ sync_relay_netlify/
 
 ```bash
 cd sync_relay_netlify
-node test_protocol.mjs        # 期望：通过 39，失败 0
+node test_protocol.mjs        # 期望：通过 97，失败 0
 ```
 
 > 注意：本地 `node` 测试用的是内存 store，**不验证 @netlify/blobs 本身**。本地
@@ -135,6 +135,29 @@ Personal Access Token，User settings → Applications → Personal access token
 5. 域名回填 `kSyncNetlifyDefaultBaseUrl`（本项目已填
    `https://aimindtree-sync-relay.netlify.app`）。
 
+## 管理接口（`/admin/*`，默认关闭）
+
+供本地管理后台巡检与清理，与 CF 版**逐字一致**；用户侧 `/auth/*`、`/sync/*` 语义零变化。
+开启方式：配站点环境变量 `ADMIN_TOKEN`（**不配置则所有 `/admin/*` 一律 404**）：
+
+```bash
+NETLIFY_AUTH_TOKEN=<token> ./node_modules/.bin/netlify env:set \
+  ADMIN_TOKEN <强随机串> --context production
+```
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/admin/ping` | `{ok,storage:"netlify-blobs",server_time}` |
+| GET | `/admin/stats` | 全局 `users/tokens/envelopes` + `per_user`（按 envelopes 降序，≤100） |
+| GET | `/admin/users` | 账号列表（含 tokens/envelopes 用量，≤100） |
+| POST | `/admin/reset` | `{scope:"all"\|"envelopes"\|"user", user_id?, confirm:"RESET"}`，幂等 |
+| DELETE | `/admin/user/{id}` | 删账号 + 其 envelopes/tokens；不存在 → 404 |
+| GET | `/admin/export?user_id=` | 导出 envelope 快照（单次 ≤10000 条，超出 `truncated:true`） |
+
+路由：`netlify.toml` 已加 `/admin/*` → 同一函数的 rewrite（与 `/auth/*`、`/sync/*` 同构）。
+实现要点：Blobs 无 SQL，管理接口按前缀 `listKeys` + 逐键 `get`/`delete` 扫描
+（适配层已补 `store.delete(key)`）；低频 operator 操作，不影响用户侧 hot path。
+
 ## 安全 / 隐私
 
 - 密码 `PBKDF2` 10 万次迭代 + 随机盐，明文不落库；令牌 64 位 hex，按用户隔离。
@@ -161,3 +184,7 @@ Personal Access Token，User settings → Applications → Personal access token
 - `GET  /sync/manifest` → `{count}`
 
 所有 `/sync/*` 需 `Authorization: Bearer <token>`。
+
+管理接口（需 `Authorization: Bearer <ADMIN_TOKEN>`，未配置 ADMIN_TOKEN 时全部 404）：
+`GET /admin/ping`、`GET /admin/stats`、`GET /admin/users`、`GET /admin/export`、
+`POST /admin/reset`、`DELETE /admin/user/{id}`。

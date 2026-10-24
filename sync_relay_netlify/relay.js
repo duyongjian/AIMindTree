@@ -14,6 +14,12 @@
  * - ``POST /sync/pull``   ``{device_id, since|null}``      → ``{envelopes:[...], server_time}``
  * - ``GET  /sync/manifest``                             → ``{count}``
  *
+ * 管理接口（与 CF 版逐字一致；``Authorization: Bearer <ADMIN_TOKEN>``，
+ * 未配置 ADMIN_TOKEN 时全部 404，令牌不符 401）：
+ * - ``GET  /admin/ping`` / ``/admin/stats`` / ``/admin/users`` / ``/admin/export``
+ * - ``POST /admin/reset`` ``{scope, user_id?, confirm:"RESET"}``
+ * - ``DELETE /admin/user/{id}``
+ *
  * 平台适配要点（2026-10-24 依 Netlify 官方文档落实）：
  *
  * 1. **运行时是 Node.js（AWS Lambda），不是 Edge isolate**：完整 Node 运行时，
@@ -415,14 +421,427 @@ async function handleManifest(store, ownerId) {
   return jsonResponse({ count: keys.length });
 }
 
+// ---------------- 管理接口（/admin/*） ----------------
+//
+// 与 CF 版**逐字一致**的运维契约（本地管理后台同时对接两套中继）：
+// ``GET /admin/ping``、``GET /admin/stats``、``GET /admin/users``、
+// ``POST /admin/reset``、``DELETE /admin/user/{id}``、``GET /admin/export``。
+//
+// 默认关闭：只有环境变量 ``ADMIN_TOKEN`` 非空才启用；未配置时一律 404（不暴露
+// 端点存在性），配了但令牌不符 → 401 + ``WWW-Authenticate: Bearer``。
+//
+// Blobs 没有 SQL，全部靠 ``listKeys(前缀)`` + 逐键 ``get``/``delete``。
+// 管理接口是 operator 低频操作，允许 O(记录数) 的扫描；用户侧 hot path 不受影响。
+
+/** per_user / users 列表上限（按 envelopes 降序取前 N）。 */
+const ADMIN_LIST_MAX = 100;
+
+/** export 单次返回的 envelope 上限。 */
+const ADMIN_EXPORT_MAX = 10000;
+
+/** 读取配置的 ADMIN_TOKEN；未配置或全空白视作「端点关闭」。 */
+function adminTokenOf(env) {
+  const t = env && env.ADMIN_TOKEN;
+  return typeof t === 'string' ? t.trim() : '';
+}
+
+/** 401 响应：带 WWW-Authenticate，便于管理端区分「令牌不对」与「端点未开启」。 */
+function adminUnauthorizedResponse() {
+  return new Response(JSON.stringify({ error: 'unauthorized' }), {
+    status: 401,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'WWW-Authenticate': 'Bearer',
+      ...CORS_HEADERS,
+    },
+  });
+}
+
+/**
+ * 管理鉴权：通过返回 null，否则返回应直接下发的 Response。
+ *
+ * 先判「是否配置」（未配置 → 404 隐藏端点），再判令牌（不符 → 401）。
+ */
+function guardAdmin(request, env) {
+  const expected = adminTokenOf(env);
+  if (!expected) return jsonResponse({ error: 'not_found' }, 404);
+  const auth = request.headers.get('Authorization') || '';
+  const token = auth.toLowerCase().startsWith('bearer ')
+    ? auth.slice('bearer '.length).trim()
+    : '';
+  if (!token || !safeEqual(token, expected)) return adminUnauthorizedResponse();
+  return null;
+}
+
+/** 从可能带部署前缀的路径里切出 ``/admin`` 之后的子路径；不含则 null。 */
+function adminSubPath(path) {
+  const idx = path.indexOf('/admin/');
+  if (idx >= 0) return path.slice(idx + '/admin'.length);
+  if (path === '/admin' || path.endsWith('/admin')) return '/';
+  return null;
+}
+
+// --- 扫描工具（Blobs 无查询语言，只能按前缀列举 + 逐键读） ---
+
+/** 扫描 ``u_``：全部账号记录（坏记录跳过）。 */
+async function adminScanUsers(store) {
+  const keys = await store.listKeys('u_');
+  const out = [];
+  for (const key of keys) {
+    const raw = await store.get(key);
+    if (!raw) continue;
+    let rec;
+    try {
+      rec = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (!rec || !rec.id) continue;
+    out.push({
+      key,
+      user_id: rec.id,
+      username: rec.username == null ? null : rec.username,
+      created_at: rec.created_at == null ? null : rec.created_at,
+    });
+  }
+  return out;
+}
+
+/** 扫描 ``t_``：全部令牌记录（userId 用于归属统计与按用户删除）。 */
+async function adminScanTokens(store) {
+  const keys = await store.listKeys('t_');
+  const out = [];
+  for (const key of keys) {
+    const raw = await store.get(key);
+    if (!raw) continue;
+    let rec;
+    try {
+      rec = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (!rec || !rec.userId) continue;
+    out.push({ key, userId: rec.userId });
+  }
+  return out;
+}
+
+/** 从 envelope 键反解 owner_id（键格式见 [envelopeKey]）；不合规返回 null。 */
+function ownerFromEnvelopeKey(key) {
+  const m = /^e_([0-9a-f]+)_([0-9a-f]+)_([0-9a-f]+)$/.exec(key);
+  return m ? hexDecode(m[1]) : null;
+}
+
+/**
+ * 扫描全部 envelope，聚合成 ``Map<owner_id, {count, last}>``。
+ *
+ * last_server_time 只能读值才知道（Blobs list 不回传内容），故这里是「每键一读」；
+ * 仅管理接口走这条路径。
+ */
+async function adminScanEnvelopes(store) {
+  const keys = await store.listKeys('e_');
+  const agg = new Map();
+  for (const key of keys) {
+    const ownerId = ownerFromEnvelopeKey(key);
+    if (!ownerId) continue;
+    let cur = agg.get(ownerId);
+    if (!cur) {
+      cur = { count: 0, last: null };
+      agg.set(ownerId, cur);
+    }
+    cur.count += 1;
+    const raw = await store.get(key);
+    if (!raw) continue;
+    let rec;
+    try {
+      rec = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    const ts = rec && rec.server_time ? String(rec.server_time) : null;
+    if (ts && (cur.last === null || ts > cur.last)) cur.last = ts;
+  }
+  return agg;
+}
+
+/** 按前缀批量删除，返回删掉的键数（Blobs 无批量删，逐键删）。 */
+async function adminDeletePrefix(store, prefix) {
+  const keys = await store.listKeys(prefix);
+  for (const key of keys) await store.delete(key);
+  return keys.length;
+}
+
+/**
+ * per_user 聚合：以账号表为主，再补上「有 envelope 但账号已不存在」的孤儿
+ * owner（username 为 null），按 envelopes 降序、user_id 升序，最多 100 条。
+ */
+function adminBuildPerUser(users, tokenCounts, envAgg) {
+  const rows = [];
+  const seen = new Set();
+  for (const u of users) {
+    seen.add(u.user_id);
+    const agg = envAgg.get(u.user_id) || { count: 0, last: null };
+    rows.push({
+      user_id: u.user_id,
+      username: u.username,
+      tokens: tokenCounts.get(u.user_id) || 0,
+      envelopes: agg.count,
+      last_server_time: agg.last,
+    });
+  }
+  for (const [ownerId, agg] of envAgg) {
+    if (seen.has(ownerId)) continue;
+    rows.push({
+      user_id: ownerId,
+      username: null,
+      tokens: tokenCounts.get(ownerId) || 0,
+      envelopes: agg.count,
+      last_server_time: agg.last,
+    });
+  }
+  rows.sort((a, b) =>
+    b.envelopes !== a.envelopes
+      ? b.envelopes - a.envelopes
+      : a.user_id < b.user_id
+        ? -1
+        : a.user_id > b.user_id
+          ? 1
+          : 0,
+  );
+  return rows.slice(0, ADMIN_LIST_MAX);
+}
+
+/** 令牌计数：``Map<user_id, count>``。 */
+function adminTokenCounts(tokens) {
+  const out = new Map();
+  for (const t of tokens) out.set(t.userId, (out.get(t.userId) || 0) + 1);
+  return out;
+}
+
+/** GET /admin/ping —— 存活 + 存储后端标识。 */
+function handleAdminPing() {
+  return jsonResponse({
+    ok: true,
+    storage: 'netlify-blobs',
+    server_time: nowIso(),
+  });
+}
+
+/** GET /admin/stats —— 全局计数 + 按用户的用量（最多 100 条）。 */
+async function handleAdminStats(store) {
+  const users = await adminScanUsers(store);
+  const tokens = await adminScanTokens(store);
+  const envAgg = await adminScanEnvelopes(store);
+
+  let envelopes = 0;
+  for (const a of envAgg.values()) envelopes += a.count;
+
+  return jsonResponse({
+    storage: 'netlify-blobs',
+    users: users.length,
+    tokens: tokens.length,
+    envelopes,
+    server_time: nowIso(),
+    per_user: adminBuildPerUser(users, adminTokenCounts(tokens), envAgg),
+  });
+}
+
+/** GET /admin/users —— 账号列表（含用量），按 envelopes 降序，最多 100 条。 */
+async function handleAdminUsers(store) {
+  const users = await adminScanUsers(store);
+  const tokenCounts = adminTokenCounts(await adminScanTokens(store));
+  const envAgg = await adminScanEnvelopes(store);
+
+  const list = users.map((u) => {
+    const agg = envAgg.get(u.user_id) || { count: 0, last: null };
+    return {
+      user_id: u.user_id,
+      username: u.username,
+      created_at: u.created_at,
+      tokens: tokenCounts.get(u.user_id) || 0,
+      envelopes: agg.count,
+    };
+  });
+  list.sort((a, b) =>
+    b.envelopes !== a.envelopes
+      ? b.envelopes - a.envelopes
+      : a.user_id < b.user_id
+        ? -1
+        : a.user_id > b.user_id
+          ? 1
+          : 0,
+  );
+  return jsonResponse({ users: list.slice(0, ADMIN_LIST_MAX) });
+}
+
+/**
+ * POST /admin/reset —— 清库（all / envelopes / user）。
+ *
+ * 先列举计数再逐键删除，重复调用第二次计数自然为 0，天然幂等。
+ */
+async function handleAdminReset(request, store) {
+  const { body, error } = await readJsonBody(request);
+  if (error) return error;
+  const confirm = body && body.confirm != null ? String(body.confirm) : '';
+  const scope = body && body.scope != null ? String(body.scope) : '';
+  const userId = body && body.user_id != null ? String(body.user_id) : '';
+
+  // 校验顺序与契约一致：先确认口令，再看 scope 合法性，最后看 user_id 是否缺失。
+  if (confirm !== 'RESET') return jsonResponse({ error: 'confirm_required' }, 400);
+  if (scope === 'user') {
+    if (!userId) return jsonResponse({ error: 'user_id_required' }, 400);
+  } else if (scope !== 'all' && scope !== 'envelopes') {
+    return jsonResponse({ error: 'invalid_scope' }, 400);
+  }
+
+  const deleted = { envelopes: 0, tokens: 0, users: 0 };
+
+  if (scope === 'all') {
+    deleted.envelopes = await adminDeletePrefix(store, 'e_');
+    for (const t of await adminScanTokens(store)) {
+      await store.delete(t.key);
+      deleted.tokens += 1;
+    }
+    // 用户按记录逐个确认后再删，只统计真实删掉的账号数。
+    for (const u of await adminScanUsers(store)) {
+      await store.delete(u.key);
+      deleted.users += 1;
+    }
+  } else if (scope === 'envelopes') {
+    deleted.envelopes = await adminDeletePrefix(store, 'e_');
+  } else {
+    deleted.envelopes = await adminDeletePrefix(store, envelopePrefix(userId));
+    for (const t of await adminScanTokens(store)) {
+      if (t.userId !== userId) continue;
+      await store.delete(t.key);
+      deleted.tokens += 1;
+    }
+    for (const u of await adminScanUsers(store)) {
+      if (u.user_id !== userId) continue;
+      await store.delete(u.key);
+      deleted.users += 1;
+    }
+  }
+
+  return jsonResponse({ scope, deleted });
+}
+
+/** DELETE /admin/user/{id} —— 删单个账号及其数据；账号不存在 → 404。 */
+async function handleAdminDeleteUser(store, userId) {
+  let userKeyToDelete = null;
+  for (const u of await adminScanUsers(store)) {
+    if (u.user_id === userId) {
+      userKeyToDelete = u.key;
+      break;
+    }
+  }
+  if (!userKeyToDelete) return jsonResponse({ error: 'user_not_found' }, 404);
+
+  const envelopes = await adminDeletePrefix(store, envelopePrefix(userId));
+  let tokens = 0;
+  for (const t of await adminScanTokens(store)) {
+    if (t.userId !== userId) continue;
+    await store.delete(t.key);
+    tokens += 1;
+  }
+  await store.delete(userKeyToDelete);
+  return jsonResponse({ deleted: { envelopes, tokens, users: 1 } });
+}
+
+/**
+ * GET /admin/export?user_id= —— 导出 envelope 快照（信封形状与 pull 一致）。
+ *
+ * 单次最多 10000 条；超出置 truncated=true。
+ */
+async function handleAdminExport(store, url) {
+  const userId = (url.searchParams.get('user_id') || '').trim();
+
+  const users = await adminScanUsers(store);
+  const picked = (userId ? users.filter((u) => u.user_id === userId) : users).map(
+    (u) => ({
+      user_id: u.user_id,
+      username: u.username,
+      created_at: u.created_at,
+    }),
+  );
+
+  const keys = await store.listKeys(userId ? envelopePrefix(userId) : 'e_');
+  const recs = [];
+  for (const key of keys) {
+    const raw = await store.get(key);
+    if (!raw) continue;
+    try {
+      recs.push(JSON.parse(raw));
+    } catch {
+      continue;
+    }
+  }
+  recs.sort((a, b) => {
+    const ta = a.server_time || '';
+    const tb = b.server_time || '';
+    if (ta !== tb) return ta < tb ? -1 : 1;
+    const ka = String(a.entity_table) + '\u0000' + String(a.entity_id);
+    const kb = String(b.entity_table) + '\u0000' + String(b.entity_id);
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+  });
+
+  const truncated = recs.length > ADMIN_EXPORT_MAX;
+  const envelopes = recs.slice(0, ADMIN_EXPORT_MAX).map((rec) => ({
+    device_id: rec.device_id,
+    entity_table: rec.entity_table,
+    entity_id: rec.entity_id,
+    op: rec.op,
+    payload: rec.payload ? JSON.parse(rec.payload) : null,
+    base_version: rec.base_version,
+    updated_at: rec.updated_at,
+    deleted_at: rec.deleted_at,
+  }));
+
+  return jsonResponse({
+    user_id: userId || null,
+    exported_at: nowIso(),
+    truncated,
+    envelopes,
+    users: picked,
+  });
+}
+
+/**
+ * /admin/* 分发：返回 Response；未知子路径返回 null（由调用方回落 404）。
+ * 鉴权已由 [guardAdmin] 前置完成。
+ */
+async function routeAdmin(request, store, sub) {
+  const method = (request.method || 'GET').toUpperCase();
+
+  if (method === 'GET' && sub === '/ping') return handleAdminPing();
+  if (method === 'GET' && sub === '/stats') return await handleAdminStats(store);
+  if (method === 'GET' && sub === '/users') return await handleAdminUsers(store);
+  if (method === 'POST' && sub === '/reset') return await handleAdminReset(request, store);
+  if (method === 'GET' && sub === '/export') {
+    return await handleAdminExport(store, new URL(request.url));
+  }
+  if (method === 'DELETE' && sub.startsWith('/user/')) {
+    const raw = sub.slice('/user/'.length);
+    if (!raw) return null;
+    let userId;
+    try {
+      userId = decodeURIComponent(raw);
+    } catch {
+      userId = raw;
+    }
+    return await handleAdminDeleteUser(store, userId);
+  }
+  return null;
+}
+
 // ---------------- 路由 ----------------
 
 /**
  * 核心分发（测试与生产共用）。
  *
  * 路径判定不依赖文件路由参数：本版由 netlify.toml 的 rewrite 把 ``/``、
- * ``/auth/*``、``/sync/*`` 全部转发到同一个函数，内部按 ``endsWith`` 后缀分发
- * （与另四版同构，App 地址不带路径前缀也能用）。
+ * ``/auth/*``、``/sync/*``、``/admin/*`` 全部转发到同一个函数，内部按
+ * ``endsWith`` / 子路径分发（与另四版同构，App 地址不带路径前缀也能用）。
  */
 export async function handleFetch(request, store, env = {}) {
   const method = (request.method || 'GET').toUpperCase();
@@ -456,6 +875,15 @@ export async function handleFetch(request, store, env = {}) {
   if (!store) return storeErrorResponse();
 
   try {
+    // 管理接口排在用户路由之前：/admin/* 只认 ADMIN_TOKEN，不碰用户鉴权块。
+    const adminSub = adminSubPath(path);
+    if (adminSub !== null) {
+      const denied = guardAdmin(request, env);
+      if (denied) return denied;
+      const resp = await routeAdmin(request, store, adminSub);
+      return resp || jsonResponse({ error: 'not_found' }, 404);
+    }
+
     if (method === 'POST' && path.endsWith('/auth/register')) {
       return await handleRegister(request, store);
     }
@@ -489,8 +917,9 @@ export async function handleFetch(request, store, env = {}) {
 
 /**
  * 进程内内存实现，暴露与生产 Blobs 适配层一致的接口：
- * ``get(key) -> string|null``、``set(key, string)``、``listKeys(prefix) -> string[]``。
- * 测试据此零依赖跑通协议（见 test_protocol.mjs），无需安装 @netlify/blobs。
+ * ``get(key) -> string|null``、``set(key, string)``、``listKeys(prefix) -> string[]``、
+ * ``delete(key)``。测试据此零依赖跑通协议（见 test_protocol.mjs），无需安装
+ * @netlify/blobs。
  */
 export function makeMemoryStore() {
   const map = new Map();
@@ -508,6 +937,9 @@ export function makeMemoryStore() {
         if (k.startsWith(prefix)) out.push(k);
       }
       return out;
+    },
+    async delete(key) {
+      map.delete(key);
     },
     // 仅供测试断言用，生产接口不含。
     _dump: () => new Map(map),

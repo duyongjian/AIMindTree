@@ -216,6 +216,200 @@ async function main() {
     check('OPTIONS 204', r.status === 204);
   }
 
+  // ---------------- 管理接口 /admin/* ----------------
+  // 与 CF 版契约逐字一致（同一组断言在 sync_relay_cf/test_worker.mjs 里也有一份）。
+  const ADMIN = 'adm_secret_123';
+  const envAdmin = { ADMIN_TOKEN: ADMIN };
+  const ha = (r) => handleFetch(r, store, envAdmin);
+
+  // 18) 未配置 ADMIN_TOKEN → 全部 404（端点不可见）
+  {
+    const { status, data } = await json(h(req('GET', '/admin/ping', undefined, { Authorization: 'Bearer whatever' })));
+    check('no ADMIN_TOKEN: ping 404', status === 404 && data && data.error === 'not_found');
+    const { status: s2 } = await json(h(req('POST', '/admin/reset', { scope: 'all', confirm: 'RESET' }, { Authorization: 'Bearer whatever' })));
+    check('no ADMIN_TOKEN: reset 404', s2 === 404);
+    const { status: s3 } = await json(handleFetch(req('GET', '/admin/ping'), store, { ADMIN_TOKEN: '   ' }));
+    check('blank ADMIN_TOKEN: 404', s3 === 404);
+  }
+
+  // 19) 令牌不符 → 401 + WWW-Authenticate
+  {
+    const raw = await ha(req('GET', '/admin/ping', undefined, { Authorization: 'Bearer wrong' }));
+    check('bad admin token 401', raw.status === 401);
+    check('401 has WWW-Authenticate', raw.headers.get('www-authenticate') === 'Bearer');
+    const body = await raw.clone().json();
+    check('401 body unauthorized', body && body.error === 'unauthorized');
+    const { status } = await json(await ha(req('GET', '/admin/ping')));
+    check('missing admin token 401', status === 401);
+  }
+
+  // 20) ping
+  {
+    const { status, data } = await json(await ha(req('GET', '/admin/ping', undefined, { Authorization: 'Bearer ' + ADMIN })));
+    check('admin ping 200', status === 200 && data.ok === true);
+    check('admin ping storage', data && data.storage === 'netlify-blobs');
+    check('admin ping server_time ISO', typeof data.server_time === 'string' && data.server_time.endsWith('Z'));
+  }
+
+  // 21) stats：2 用户 / 4 令牌 / 4 envelopes（alice 3 + bob 1）
+  const adminAuth = { Authorization: 'Bearer ' + ADMIN };
+  let aliceId = null;
+  let bobId = null;
+  {
+    const { status, data } = await json(await ha(req('GET', '/admin/stats', undefined, adminAuth)));
+    check('stats 200', status === 200);
+    check('stats users=2', data && data.users === 2);
+    check('stats tokens=4', data && data.tokens === 4);
+    check('stats envelopes=4', data && data.envelopes === 4);
+    check('stats per_user 2 条', data && data.per_user.length === 2);
+    const top = data.per_user[0];
+    check('per_user 降序 alice 3 条', top && top.username === 'alice' && top.envelopes === 3);
+    check('per_user alice tokens=2', top && top.tokens === 2);
+    check('per_user last_server_time ISO', typeof top.last_server_time === 'string' && top.last_server_time.endsWith('Z'));
+    check('per_user bob 1 条', data.per_user[1].username === 'bob' && data.per_user[1].envelopes === 1);
+    aliceId = top.user_id;
+    bobId = data.per_user[1].user_id;
+  }
+
+  // 22) users 列表
+  {
+    const { status, data } = await json(await ha(req('GET', '/admin/users', undefined, adminAuth)));
+    check('users 200 / 2 条', status === 200 && data.users.length === 2);
+    const a = data.users[0];
+    check('users 首条 alice', a.user_id === aliceId && a.username === 'alice');
+    check('users 带 created_at', typeof a.created_at === 'string' && a.created_at.length > 0);
+    check('users alice 用量', a.tokens === 2 && a.envelopes === 3);
+  }
+
+  // 23) export 全量
+  {
+    const { status, data } = await json(await ha(req('GET', '/admin/export', undefined, adminAuth)));
+    check('export 200 user_id=null', status === 200 && data.user_id === null);
+    check('export truncated=false', data && data.truncated === false && typeof data.exported_at === 'string');
+    check('export 4 envelopes', data && data.envelopes.length === 4);
+    check('export 2 users', data && data.users.length === 2);
+    const keys = Object.keys(data.envelopes[0]).sort().join(',');
+    check(
+      'export envelope 形状',
+      keys === 'base_version,deleted_at,device_id,entity_id,entity_table,op,payload,updated_at',
+    );
+    check('export payload 反序列化', data.envelopes[0].payload && typeof data.envelopes[0].payload === 'object');
+  }
+
+  // 24) export?user_id= 过滤
+  {
+    const { status, data } = await json(await ha(req('GET', `/admin/export?user_id=${bobId}`, undefined, adminAuth)));
+    check('export 回显 user_id', status === 200 && data.user_id === bobId);
+    check('export 仅该用户 envelope', data.envelopes.length === 1 && data.envelopes[0].entity_id === 'b1');
+    check('export users 按 user_id 过滤', data.users.length === 1 && data.users[0].user_id === bobId);
+  }
+
+  // 25) reset 参数校验（三种 400，且不误删数据）
+  {
+    const { status: s1, data: d1 } = await json(await ha(req('POST', '/admin/reset', { scope: 'all' }, adminAuth)));
+    check('reset 缺 confirm → confirm_required', s1 === 400 && d1.error === 'confirm_required');
+    const { status: s2 } = await json(await ha(req('POST', '/admin/reset', { scope: 'all', confirm: 'reset' }, adminAuth)));
+    check('confirm 非大写 → 400', s2 === 400);
+    const { status: s3, data: d3 } = await json(await ha(req('POST', '/admin/reset', { scope: 'user', confirm: 'RESET' }, adminAuth)));
+    check('scope=user 缺 user_id → user_id_required', s3 === 400 && d3.error === 'user_id_required');
+    const { status: s4, data: d4 } = await json(await ha(req('POST', '/admin/reset', { scope: 'bogus', confirm: 'RESET' }, adminAuth)));
+    check('未知 scope → invalid_scope', s4 === 400 && d4.error === 'invalid_scope');
+    const { data: s } = await json(await ha(req('GET', '/admin/stats', undefined, adminAuth)));
+    check('校验失败不删数据', s.envelopes === 4 && s.users === 2);
+  }
+
+  // 26) reset scope=user（bob）→ 计数 + 幂等
+  {
+    const { status, data } = await json(
+      await ha(req('POST', '/admin/reset', { scope: 'user', user_id: bobId, confirm: 'RESET' }, adminAuth)),
+    );
+    check(
+      'reset user：1 envelope / 2 token / 1 user',
+      status === 200 && data.scope === 'user' && data.deleted.envelopes === 1 && data.deleted.tokens === 2 && data.deleted.users === 1,
+    );
+    const { data: again } = await json(
+      await ha(req('POST', '/admin/reset', { scope: 'user', user_id: bobId, confirm: 'RESET' }, adminAuth)),
+    );
+    check('reset user 幂等 → 全 0', again.deleted.envelopes === 0 && again.deleted.tokens === 0 && again.deleted.users === 0);
+    const { data: s } = await json(await ha(req('GET', '/admin/stats', undefined, adminAuth)));
+    check('reset user 后 stats 1/2/3', s.users === 1 && s.tokens === 2 && s.envelopes === 3);
+  }
+
+  // 27) DELETE /admin/user/{id}：已删除的 bob → 404
+  {
+    const { status, data } = await json(await ha(req('DELETE', `/admin/user/${bobId}`, undefined, adminAuth)));
+    check('DELETE 不存在用户 → 404', status === 404 && data.error === 'user_not_found');
+  }
+
+  // 28) reset scope=envelopes
+  {
+    const { data } = await json(await ha(req('POST', '/admin/reset', { scope: 'envelopes', confirm: 'RESET' }, adminAuth)));
+    check('reset envelopes 删 3 条，token/users 记 0', data.deleted.envelopes === 3 && data.deleted.tokens === 0 && data.deleted.users === 0);
+    const { data: again } = await json(await ha(req('POST', '/admin/reset', { scope: 'envelopes', confirm: 'RESET' }, adminAuth)));
+    check('reset envelopes 幂等 → 0', again.deleted.envelopes === 0);
+    const { data: s } = await json(await ha(req('GET', '/admin/stats', undefined, adminAuth)));
+    check('reset envelopes 后仅 envelope 归零', s.envelopes === 0 && s.users === 1 && s.tokens === 2);
+    check('无数据时 per_user 0 / null', s.per_user[0].envelopes === 0 && s.per_user[0].last_server_time === null);
+  }
+
+  // 29) reset scope=all
+  {
+    const { data } = await json(await ha(req('POST', '/admin/reset', { scope: 'all', confirm: 'RESET' }, adminAuth)));
+    check('reset all：2 token / 1 user', data.scope === 'all' && data.deleted.envelopes === 0 && data.deleted.tokens === 2 && data.deleted.users === 1);
+    const { data: again } = await json(await ha(req('POST', '/admin/reset', { scope: 'all', confirm: 'RESET' }, adminAuth)));
+    check('reset all 幂等 → 全 0', again.deleted.envelopes === 0 && again.deleted.tokens === 0 && again.deleted.users === 0);
+    const { data: s } = await json(await ha(req('GET', '/admin/stats', undefined, adminAuth)));
+    check('reset all 后全 0', s.users === 0 && s.tokens === 0 && s.envelopes === 0);
+    const { status } = await json(h(req('GET', '/sync/manifest', undefined, envA)));
+    check('reset all 后旧令牌失效 401', status === 401);
+  }
+
+  // 30) export 截断：>10000 条 → truncated=true 且只回 10000
+  {
+    const { data: reg } = await json(h(req('POST', '/auth/register', { username: 'carl', password: 'password789' })));
+    const envC = { Authorization: 'Bearer ' + reg.token };
+    const bulk = [];
+    for (let i = 0; i < 10001; i++) {
+      bulk.push({ device_id: 'd9', entity_table: 'notes', entity_id: 'bulk' + i, op: 'upsert', payload: { i }, base_version: 1, updated_at: '2026-01-01T00:00:00Z', deleted_at: null });
+    }
+    const { status: ps } = await json(h(req('POST', '/sync/push', { device_id: 'd9', envelopes: bulk }, envC)));
+    check('bulk push 10001 条成功', ps === 200);
+    const { data } = await json(await ha(req('GET', `/admin/export?user_id=${reg.user_id}`, undefined, adminAuth)));
+    check('export 截断 truncated=true / 10000 条', data.truncated === true && data.envelopes.length === 10000);
+  }
+
+  // 31) per_user / users 上限 100（另起干净 store 直接造 150 个账号）
+  {
+    const store2 = makeMemoryStore();
+    // 键编码与 relay.js 的 [hexEncode] 一致：每 UTF-16 码元 → 4 位 hex。
+    const hexOf = (s) => {
+      let out = '';
+      for (let i = 0; i < s.length; i++) out += s.charCodeAt(i).toString(16).padStart(4, '0');
+      return out;
+    };
+    for (let i = 0; i < 150; i++) {
+      const id = 'u_x' + i;
+      await store2.set('u_' + hexOf('user' + i), JSON.stringify({ id, username: 'user' + i, pw_hash: 'salt:hash', created_at: '2026-01-01T00:00:00.000Z' }));
+    }
+    const putEnv = (owner, entity) =>
+      store2.set('e_' + hexOf(owner) + '_' + hexOf('notes') + '_' + hexOf(entity), JSON.stringify({
+        device_id: 'd', entity_table: 'notes', entity_id: entity, op: 'upsert',
+        payload: '{}', base_version: 1, updated_at: '2026-01-01T00:00:00.000Z',
+        deleted_at: null, server_time: '2026-01-01T00:00:00.000Z',
+      }));
+    await putEnv('u_x0', 'a');
+    await putEnv('u_x0', 'b');
+    await putEnv('u_x1', 'c');
+
+    const h2 = (r) => handleFetch(r, store2, envAdmin);
+    const { data: s } = await json(await h2(req('GET', '/admin/stats', undefined, adminAuth)));
+    check('150 账号 stats.users 全量', s.users === 150);
+    check('per_user 最多 100 条', s.per_user.length === 100);
+    check('per_user 首条 envelope 最多', s.per_user[0].user_id === 'u_x0' && s.per_user[0].envelopes === 2);
+    const { data: u } = await json(await h2(req('GET', '/admin/users', undefined, adminAuth)));
+    check('users 列表最多 100 条', u.users.length === 100);
+  }
+
   console.log(`\nNetlify 中继协议测试：通过 ${pass}，失败 ${fail}`);
   if (fail > 0) process.exit(1);
 }
