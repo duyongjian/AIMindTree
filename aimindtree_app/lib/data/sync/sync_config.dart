@@ -7,7 +7,11 @@
 /// EdgeOne Pages 是国内永久免费（官方 FAQ 明示）的边缘托管，1GB KV + 不限流量，
 /// 作国内主力的第四链路；其请求体硬限 1MB，故本机 push 对 edgeone 后端
 /// 把单批字节预算与单条 envelope 硬上限都收紧到 850KB（见 [SyncBackend] 的
-/// 预算 getter），避免大图片附件把整批打 413。Netlify 为海外/备份第五链路
+/// 预算 getter），避免大图片附件把整批打 413。腾讯云 CloudBase 的 HTTP 访问
+/// 服务网关**同样受 ~1MB 请求体硬限约束**（2026-10-24 实测 1MB 测试包即返
+/// 413 `EXCEED_MAX_PAYLOAD_SIZE`，网关层拒绝、云函数不执行），故 cloudbase
+/// 后端也按同策收紧到 850KB（见 [SyncConfig.kSyncCbPushBudgetBytes]）。
+/// Netlify 为海外/备份第五链路
 /// （函数跑美/欧单区，国内直连可达性差，非国内首选），预算沿用默认 4MB / 6MB。
 ///
 /// 存储口径：
@@ -63,10 +67,13 @@ enum SyncBackend {
 
   /// 单批 push 字节预算（按后端）。
   ///
-  /// 默认 4MB 与 CF / CloudBase / Vercel / Netlify 的放宽上限一致；edgeone 受平台
-  /// 请求体 1MB 硬限约束，收紧到 850KB（留 ~50KB 给 HTTP 头部与 JSON
-  /// 结构开销，远小于中继侧 900KB 的 413 守卫）。[SyncEngine] 据此贪心切批。
+  /// 默认 4MB 与 CF / Vercel / Netlify 的放宽上限一致；edgeone 受平台请求体
+  /// 1MB 硬限约束，收紧到 850KB（留 ~50KB 给 HTTP 头部与 JSON
+  /// 结构开销，远小于中继侧 900KB 的 413 守卫）；cloudbase 的 HTTP 访问服务
+  /// 网关同样实测 ~1MB 请求体硬限，同策收紧到 850KB。
+  /// [SyncEngine] 据此贪心切批。
   int get pushBatchBudgetBytes => switch (this) {
+        SyncBackend.cloudbase => SyncConfig.kSyncCbPushBudgetBytes,
         SyncBackend.edgeone => SyncConfig.kSyncEoPushBudgetBytes,
         _ => SyncConfig.kSyncPushBatchBudgetBytes,
       };
@@ -74,10 +81,11 @@ enum SyncBackend {
   /// 单条 envelope 硬上限（按后端）。
   ///
   /// 超过它的 envelope 不会被切批逻辑无限重试：直接 `markFailed` + warning，
-  /// 避免一条畸形巨包把整个 outbox 队列永久堵住。edgeone 同样取 850KB——
-  /// 大图片附件（data_base64）单条就超，标记失败后提示用户换 CF/CloudBase
-  /// 同步，而不是把整批发到中继侧吃 413。
+  /// 避免一条畸形巨包把整个 outbox 队列永久堵住。edgeone / cloudbase 同样取
+  /// 850KB——大图片附件（data_base64）单条就超，标记失败后提示用户换
+  /// CF / Netlify 同步，而不是把整批发到中继侧吃 413。
   int get maxEnvelopeBytes => switch (this) {
+        SyncBackend.cloudbase => SyncConfig.kSyncCbPushBudgetBytes,
         SyncBackend.edgeone => SyncConfig.kSyncEoPushBudgetBytes,
         _ => SyncConfig.kSyncMaxEnvelopeBytes,
       };
@@ -131,15 +139,16 @@ class SyncConfig {
 
   /// 单批 push 字节预算默认值（4MB）。
   ///
-  /// 与 CF / CloudBase / Vercel 的放宽上限一致；edgeone 另有收紧值
-  /// （见 [kSyncEoPushBudgetBytes]）。[SyncBackend.pushBatchBudgetBytes]
-  /// 据此按后端返回。
+  /// 与 CF / Vercel / Netlify 的放宽上限一致；edgeone / cloudbase 另有收紧值
+  /// （见 [kSyncEoPushBudgetBytes] / [kSyncCbPushBudgetBytes]）。
+  /// [SyncBackend.pushBatchBudgetBytes] 据此按后端返回。
   static const int kSyncPushBatchBudgetBytes = 4 * 1024 * 1024;
 
   /// 单条 envelope 硬上限默认值（6MB）。
   ///
-  /// 超过它的 envelope 直接 `markFailed` 跳过（不进切批）。edgeone 收紧到
-  /// [kSyncEoPushBudgetBytes]。见 [SyncBackend.maxEnvelopeBytes]。
+  /// 超过它的 envelope 直接 `markFailed` 跳过（不进切批）。edgeone / cloudbase
+  /// 收紧到 850KB（见 [kSyncEoPushBudgetBytes] / [kSyncCbPushBudgetBytes]）。
+  /// 见 [SyncBackend.maxEnvelopeBytes]。
   static const int kSyncMaxEnvelopeBytes = 6 * 1024 * 1024;
 
   /// edgeone 后端的单批预算 / 单条 envelope 硬上限（850KB）。
@@ -148,6 +157,15 @@ class SyncConfig {
   /// 850KB 给 HTTP 头部与 JSON 结构开销留出安全余量，确保整批 body 一定
   /// 落在 900KB 守卫以内。
   static const int kSyncEoPushBudgetBytes = 850 * 1024;
+
+  /// cloudbase 后端的单批预算 / 单条 envelope 硬上限（850KB）。
+  ///
+  /// 与 edgeone 同策：CloudBase HTTP 访问服务网关实测请求体 ~1MB 硬限
+  /// （2026-10-24 实测 1MB 测试包即 413 EXCEED_MAX_PAYLOAD_SIZE，网关层拒绝、
+  /// 云函数不执行，relay.js/index.js 无体积检查）。本机取 850KB 给
+  /// base64(+33%) / HTTP 头 / JSON 结构留余量。代价：≥640KB 的图片附件单条
+  /// envelope 会被 markFailed（该后端上大图附件不同步，提示换 CF / Netlify）。
+  static const int kSyncCbPushBudgetBytes = 850 * 1024;
 
   /// 当前选中后端（pref 存枚举 name；读不到 / 脏值 → cloudflare）。
   static const _kBackend = 'aimindtree.sync.backend';

@@ -375,6 +375,59 @@ curl -X POST https://<你的域名>/auth/register \
 
 > 常见坑：只填到域名（漏了 `/sync-relay`）会命中静态托管的 404，看起来像「服务没起」。
 
+## 网关请求体上限 ~1MB（2026-10-24 实测）与 App 侧对策
+
+### ① 网关上限：实测记载
+
+CloudBase HTTP 访问服务的网关对**请求体有约 1MB 的硬限**，超出即拒：
+
+- 2026-10-24 实测：上传一个 1MB 测试包，直接返回
+  **`413 EXCEED_MAX_PAYLOAD_SIZE`**；
+- 该拒绝发生在**网关层，云函数根本没有被执行**（函数日志无记录）；
+- 因此**中继代码里没有任何体积检查**——`index.js` 的 `parseJsonBody()`
+  只做 base64 解码 + `JSON.parse`，没有 content-length 读取、没有 maxBody
+  常量（对比 `sync_relay_netlify/relay.js` 的 `kMaxBodyBytes` 与
+  `sync_relay_eo/edge-functions/[[default]].js` 的 900KB 守卫，那两版有）。
+  改中继代码解决不了这个问题，只能让请求根本不要那么大；
+- `db.js` 的 `CB_PUSH_CHUNK=100`（默认）只切 **PostgREST upsert 的请求体**，
+  与入口 HTTP body 大小无关，别指望它能救 413。
+
+### ② App 侧对策：cloudbase 预算收紧 850KB（与 edgeone 同策）
+
+`aimindtree_app/lib/data/sync/sync_config.dart` 新增
+`kSyncCbPushBudgetBytes = 850 * 1024`，并在 `SyncBackend.pushBatchBudgetBytes` /
+`maxEnvelopeBytes` 两个 getter 里给 `SyncBackend.cloudbase` 单独分支，
+取值与 edgeone 完全一致。850KB 给 base64（+33%）、HTTP 头、JSON 结构留余量。
+
+**代价（已知取舍，与 edgeone 同款先例）**：单图原始上限
+`kMaxAssetBytes = 2MB`（`note_asset_repository.dart`），base64 后约 2.7MB，
+**单条 envelope 就超过 850KB 硬上限** → 被 `SyncEngine` 标记
+`markFailed` 跳过（不堵队列，但也不同步）。也就是说：
+
+> **cloudbase 链路上的大图附件（≥640KB 的图片）不会同步。**
+> 需要同步大图请改用 Cloudflare 或 Netlify 后端；纯文本 / 小图笔记不受影响。
+
+App 侧 `sync_api.dart` 的 `_postJson()` 还对 413 做了中文文案兜底：
+`请求体超过该后端网关上限，请压缩图片或更换同步后端`（`SyncApiException`
+的 `statusCode` 仍为 413，未变）。
+
+### ③ 已知限制：`handlePush` 未透传 `body.device_id` 作 upsert 兜底
+
+`index.js` 的 `handlePush()` 目前把 `body.envelopes` 原样交给
+`upsertEnvelopes()`，逐条读 `e.device_id` / `e.op`；表结构里这两列是
+**NOT NULL**（见 `cloudbase/migrations/*_init_sync_relay_pg.sql` 的
+`sync_envelopes`）。请求体顶层虽然有 `device_id`（App 的 `pushBatch` 会带，
+取本批第一条），但中继**没有**把它用作 per-envelope 缺失时的兜底。
+
+- 风险等级：**低**。App 端 `SyncEnvelope.toJson()` 每条都带 `device_id` /
+  `op`，实际不会漏；
+- 一旦真漏了，PG 回 23502，经 `db.js` 的 `raise()` 变成 500
+  `upsertEnvelopes 失败（第 N 块）: …`，**整块 100 条一起失败**；
+- 暂不修的原因：修完必须让用户去控制台手动重新上传 zip 才能生效，
+  收益低、操作风险高。若已在改部署流程，可顺手在 `handlePush` 里加一次
+  归一化（`device_id: e.device_id || body.device_id || ''`、
+  `op: e.op || 'upsert'`），只动内存副本，不动请求体。
+
 ## 费用与免责
 
 - CloudBase 按量计费有**免费额度**（云函数调用次数、资源使用量、数据库读写次数、存储容量

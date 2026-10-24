@@ -138,9 +138,15 @@ class HttpSyncApi implements SyncApi {
     final resp = await req.close().timeout(timeout);
     final payload = await resp.transform(utf8.decoder).join();
     if (resp.statusCode != 200) {
+      // CloudBase 网关的 413 payload 是英文 `EXCEED_MAX_PAYLOAD_SIZE`，用户看
+      // 不懂；附一句中文说明（压缩图片 / 换后端），statusCode 仍照原样带上。
+      final detail =
+          payload.length > 200 ? '${payload.substring(0, 200)}…' : payload;
       throw SyncApiException(
-        'sync/$path 返回 ${resp.statusCode}：'
-        '${payload.length > 200 ? '${payload.substring(0, 200)}…' : payload}',
+        resp.statusCode == 413
+            ? 'sync/$path 返回 413：请求体超过该后端网关上限，'
+                '请压缩图片或更换同步后端（$detail）'
+            : 'sync/$path 返回 ${resp.statusCode}：$detail',
         resp.statusCode,
       );
     }
@@ -200,8 +206,8 @@ class HttpSyncApi implements SyncApi {
 
 /// 测试用 Mock：可预设 push 接受策略 + pull 返回 envelope 序列。
 class MockSyncApi implements SyncApi {
-  /// Mock 不走真实后端，字节预算取默认（4MB / 6MB），与 CF / CloudBase /
-  /// Vercel 非 edgeone 路径一致。
+  /// Mock 不走真实后端，字节预算取默认（4MB / 6MB），与 CF / Vercel / Netlify
+  /// 非 edgeone / cloudbase 路径一致。
   @override
   int get pushBatchBudgetBytes => SyncConfig.kSyncPushBatchBudgetBytes;
 

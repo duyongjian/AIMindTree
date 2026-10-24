@@ -68,11 +68,10 @@ void main() {
       expect(config.urlOf(SyncBackend.edgeone), '');
     });
 
-    test('push 字节预算 / 单条硬上限按后端取值（edgeone 收紧 850KB）', () {
-      // 默认（CF / CloudBase / Vercel / Netlify）：4MB / 6MB。
+    test('push 字节预算 / 单条硬上限按后端取值（edgeone / cloudbase 收紧 850KB）', () {
+      // 默认（CF / Vercel / Netlify）：4MB / 6MB。
       for (final b in [
         SyncBackend.cloudflare,
-        SyncBackend.cloudbase,
         SyncBackend.vercel,
         SyncBackend.netlify,
       ]) {
@@ -85,6 +84,12 @@ void main() {
       expect(SyncBackend.edgeone.maxEnvelopeBytes,
           SyncConfig.kSyncEoPushBudgetBytes);
       expect(SyncConfig.kSyncEoPushBudgetBytes, 850 * 1024);
+      // cloudbase：网关实测请求体 ~1MB 硬限（413），同 edgeone 收紧 850KB。
+      expect(SyncBackend.cloudbase.pushBatchBudgetBytes,
+          SyncConfig.kSyncCbPushBudgetBytes);
+      expect(SyncBackend.cloudbase.maxEnvelopeBytes,
+          SyncConfig.kSyncCbPushBudgetBytes);
+      expect(SyncConfig.kSyncCbPushBudgetBytes, 850 * 1024);
     });
 
     test('每个后端可独立覆盖地址（trim；空串=清除覆盖回落默认）', () async {
