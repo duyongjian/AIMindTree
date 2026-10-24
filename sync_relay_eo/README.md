@@ -65,6 +65,30 @@ cd sync_relay_eo
 node test_protocol.mjs      # 期望：通过 69，失败 0
 ```
 
+## 部署现状（2026-10-24 实测）
+
+**已用 `edgeone` CLI 部署成功**（项目 ID `makers-dlikh9h2tmqm`，区域 global）：
+
+- 部署命令：`edgeone pages deploy -n aimindtree-sync-relay`（CLI 自动编译 Edge Function
+  并上传，无需 build 脚本；CLI 版本 1.6.46）。
+- 验证：访问令牌下根路径可达；`POST /auth/register` 返回 **503「KV 未绑定」**——正是中继
+  缺 KV 时的预期响应，证明 Edge Function 已上线执行、`[[default]].js` 逻辑正确。
+- 默认域名 `https://aimindtree-sync-relay-wsqwf08s.edgeone.cool` **访问受限（401）**：
+  EdgeOne Pages 对未绑定自定义域名的站点加访问令牌（`?eo_token=...&eo_time=...`），该令牌
+  **限时 + 基于 cookie**，App 无法直接用作同步地址。要让 App 真正可用，**必须绑定自定义域名**
+  （绑定后默认/自定义域名均公开可达），或在控制台关闭访问限制。
+
+**仍需在 EdgeOne Pages 控制台完成（CLI 不支持 KV / 自定义域名绑定）**：
+
+1. **绑 KV**：控制台 → KV Storage → 新建命名空间（如 `aimindtree-sync`）→ 绑定到本项目，
+   **Variable Name 填 `SYNC_KV`**（大小写敏感，填错即 503）→ 重新部署让绑定生效。
+2. **绑自定义域名（推荐，解决 401）**：控制台 → 自定义域名 → 添加你的域名（DNS / 文件 /
+   委派验证 + 免费证书）→ 绑定到本项目。绑定生效后把该域名（或公开后的默认域名）发我，
+   回填 `kSyncEoDefaultBaseUrl`。
+
+> 填好 `kSyncEoDefaultBaseUrl`（App 设置页才会出现 EdgeOne 选项并真正可用）。在此之前 UI
+> 显示「（待配置）」，不会静默失败。
+
 ## 部署（手把手）
 
 ### 方式 A：EdgeOne Pages 控制台（推荐，不用 CLI）

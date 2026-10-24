@@ -95,3 +95,10 @@ llm_server/sync_relay.db
 
 # CloudBase 云函数部署目录内的依赖（23MB，进目录 npm ci 可重建）
 cloudbase/functions/*/node_modules/
+
+# EdgeOne Pages 部署产物与本地 token（.token 含账号级权限，绝不入库）
+.edgeone/
+sync_relay_eo/edgeone.json
+sync_relay_eo/.env
+sync_relay_eo/package-lock.json
+
