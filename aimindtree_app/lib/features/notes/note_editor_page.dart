@@ -251,7 +251,12 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
       return;
     }
     setState(() => _status = '调用 Dify T1…');
-    final res = await widget.service.extract(_bodyCtrl.text);
+    // 传当前笔记（_save 成功后 _note 已是最新保存态）：知识点归属本笔记，
+    // 不再空降一篇新笔记（2026-10-24 用户实测 bug：旧笔记不显示提取结果）。
+    final res = await widget.service.extract(
+      _bodyCtrl.text,
+      existingNote: _note,
+    );
     if (!mounted) return;
     switch (res) {
       case Success(value: final v):

@@ -86,25 +86,38 @@ class ExtractionService {
 
   static final AppLog _log = AppLog('extraction');
 
-  /// 对一段笔记原文执行完整 T1 流程（**同步路径**：存笔记 → 调 T1 → 落库）。
+  /// 对一段笔记原文执行完整 T1 流程（**同步路径**：取笔记 → 调 T1 → 落库）。
   ///
   /// 队列路径（默认，方案 B1）请用三段式：
   /// [stageSaveNote] → 提交 T1 job → [stagePersist]，中间不干等。
+  ///
+  /// [existingNote]：调用方已持有「当前正在编辑/已保存」的笔记时传入
+  /// （编辑器路径）——直接复用它做知识点归属，**不再新建笔记**。否则
+  /// （粘贴提取等无主场景）才走 [stageSaveNote] 存一篇新笔记。
+  /// 2026-10-24 用户实测 bug：编辑器提取时没传当前笔记，知识点全挂到
+  /// 空降的新笔记上，原笔记「本笔记提取的知识点」区永远空白。
   Future<Result<ExtractionSaveResult>> extract(
     String noteContent, {
     String? notebookId,
+    Note? existingNote,
   }) async {
     final content = noteContent.trim();
     if (content.isEmpty) {
       return Failure(ArgumentError('笔记内容为空'));
     }
 
-    // 1) 存笔记
-    final saved = await stageSaveNote(content);
-    if (saved is Failure<Note>) {
-      return Failure(saved.error, saved.stackTrace);
+    // 1) 取笔记：有当前笔记就复用（知识点归它），无主场景才新建。
+    Note note;
+    final existing = existingNote;
+    if (existing != null) {
+      note = existing;
+    } else {
+      final saved = await stageSaveNote(content);
+      if (saved is Failure<Note>) {
+        return Failure(saved.error, saved.stackTrace);
+      }
+      note = (saved as Success<Note>).value;
     }
-    final note = (saved as Success<Note>).value;
 
     // 2) 调 T1（AiService → 路由 → LLM Server /v1/task/T1）
     final aiRes = await ai.run(AiTask.t1Extract, {'note_text': content});
