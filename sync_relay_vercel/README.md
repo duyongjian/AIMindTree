@@ -99,10 +99,11 @@ node test_protocol.mjs
 未鉴权 401、小写 bearer、旧令牌有效、push→manifest→pull 往返、upsert 覆盖、
 `since` 增量、多租户隔离、server_time 升序、**批量 push 1200 条 pull 取回全部 1200 条
 且无重复**（验证翻页）、`SYNC_PULL_PAGE_SIZE` / `SYNC_WRITE_CHUNK` 调参、
-`entity_id` 含 `. $ / _` 时覆盖与原值返回、KV 未绑定时入口返回可读 503。
+`entity_id` 含 `. $ / _` 时覆盖与原值返回、KV 未绑定时入口返回可读 503、
+**`/api` 挂载前缀与 rewrite 双链路兼容**（带 /api 与裸域名行为一致）。
 全绿退出码 0，失败退出码 1。
 
-**没有执行 `npm i` 也能跑**：核心用例（66 条）不依赖 `@vercel/kv` 真实包，
+**没有执行 `npm i` 也能跑**：核心用例（74 条）不依赖任何 Redis 客户端真实包，
 入口级用例会自动跳过并提示。
 
 ## 部署步骤（手把手）
@@ -155,7 +156,8 @@ node test_protocol.mjs
 
 ### 5. 先验证，再填进 App
 
-**在浏览器或命令行里先打开根路径**：
+**在浏览器或命令行里先打开根路径**（`vercel.json` 已配 rewrite，根路径会转到
+函数并返回健康检查 JSON）：
 
 ```bash
 curl https://<你的域名>.vercel.app/
@@ -171,7 +173,7 @@ curl https://<你的域名>.vercel.app/
 说明数据库没配好：回第 3 步绑好，然后在项目页 **Deployments → 最新部署 → Redeploy**
 （环境变量变更需要重新部署才生效）。看到 `{"ok":true,...}` 再往下走。
 
-顺手验一下注册（把地址换成你自己的）：
+顺手验一下注册（把地址换成你自己的；**带不带 `/api` 都可以**，原因见下一节）：
 
 ```bash
 curl -X POST https://<你的域名>.vercel.app/auth/register \
@@ -180,11 +182,35 @@ curl -X POST https://<你的域名>.vercel.app/auth/register \
 ```
 
 应返回 `{"user_id":"u_...","token":"<64位十六进制>"}`。
+**如果这里返回 404**，先确认浏览器地址栏的域名没敲错；仍 404 则是部署侧问题
+（Root Directory 没指到 `sync_relay_vercel`，或部署不是最新代码），见第 4 步重 Deployment。
 
 ### 6. 填进 App
 
-设置页 → 同步 → 「同步服务器地址」，填上面拿到的域名（**不带结尾斜杠**），
+设置页 → 同步 → 后端选「Vercel」→「同步服务器地址」**留空即可**（内置默认就是
+`https://aimindtree-syncrelayvercel.vercel.app/api`，已带 `/api` 前缀）。
 然后用 App 里的账号密码注册/登录，正常上传下载即可。
+
+> 只有想自建域名/换部署时才需要手填：**必须带 `/api` 前缀、不带结尾斜杠**。
+> 填错成裸域名虽然靠 rewrite 也能跑（见下节），但别依赖——清空用默认最稳。
+
+### 6b. URL 前缀：`/api` 与 rewrite（为什么两种地址都能用）
+
+Vercel 的文件系统路由把 `api/` 目录下的函数挂在 **`/api/*`** 之下，所以 App 的
+`<base>/auth/register` 要命中函数，base 必须含 `/api`（内置默认值就是因此带
+`/api` 的）。但用户从控制台复制到的域名是裸的，直接填进去就会 404——这正是
+线上事故的根因。两道防线已就位：
+
+1. **`vercel.json` 的 rewrite**：`{"source": "/(.*)", "destination": "/api/$1"}`
+   ——裸域名的 `/auth/register` 被改写到 `/api/auth/register`，命中同一个函数
+   （对 `/api/*` 自身是自映射，无副作用）。
+2. **`core.js` 剥 `/api` 前缀**：路由匹配用 `endsWith` 后缀匹配（带不带前缀都能
+   命中）；健康检查是精确匹配 `/`，所以 core 会先把 `/api`、`/api/...` 剥成逻辑
+   路径再匹配。无论平台把原始 URL 还是改写后的路径传给函数（两种语义都可能，
+   参照 `sync_relay_netlify/netlify.toml` 的实测结论），结果都正确。
+
+结论：`https://<域名>` 与 `https://<域名>/api` 两种填法行为完全一致。
+App 内置默认用带 `/api` 的形态（不依赖 rewrite，语义最直白）。
 
 ### 7. 命令行部署（可选）
 
@@ -232,6 +258,7 @@ vercel deploy --prod --yes        # 生产部署
 | 项 | CF 版（worker.js） | 本版 |
 |----|-------------------|------|
 | `GET /` | 404 | **200 + 服务标识**（App「测试连接」需要） |
+| URL 前缀 | 无前缀， Worker 直接挂在 `/` | 函数在 `/api/*` 下；靠 rewrite + core 剥 `/api` 前缀，**裸域名与 `/api` 双链路等价** |
 | 存储 | D1（SQLite） | Upstash Redis（原 Vercel KV，产品已下线）：HASH 存文档 + ZSET 存时间游标 |
 | 增量游标 | SQL `server_time > since`（字符串比较） | ZSET score 开区间 `(sinceMs +inf`（毫秒数比较）。语义等价：`server_time` 恒为 ISO 8601 UTC，字符串比较与毫秒比较同序 |
 | 批量 push 原子性 | D1 `batch()` 单事务 | 按块 `multi()` 事务（默认 100 条/块）。块间非原子，中途失败前几块已生效——App 侧 push 是幂等 upsert，重推同一批即收敛 |
@@ -251,4 +278,4 @@ vercel deploy --prod --yes        # 生产部署
 | `db.js` | 数据访问薄适配层（所有 Redis 调用都收敛在这里；不 import 任何 Redis 客户端，客户端由调用方注入） |
 | `test_protocol.mjs` | 本地冒烟测试（内存 Redis mock，不联网） |
 | `package.json` | 依赖：仅 `@upstash/redis` |
-| `vercel.json` | 函数 `maxDuration: 30` |
+| `vercel.json` | 函数 `maxDuration: 30`；`rewrites` 把 `/(.*)` 转到 `/api/$1`（裸域名兼容，见 6b 节） |

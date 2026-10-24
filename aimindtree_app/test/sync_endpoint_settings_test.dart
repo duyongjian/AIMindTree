@@ -315,5 +315,17 @@ void main() {
       expect(source, contains('setUrl('));
       expect(source, contains('createDirectHttpClient'));
     });
+
+    test('测试连接用无令牌 /sync/manifest 401 探针（防退回「任意状态码判通」）', () {
+      final source =
+          File('lib/features/settings/sync_settings_section.dart').readAsStringSync();
+      // 探针路径：不带令牌 GET <base>/sync/manifest，401 + JSON error=unauthorized
+      // 才判连通。若退回 GET <base>/ 的「任意状态码即通」，平台 404（地址填错/
+      // 少前缀）会被误报成「已连通」——Vercel 裸域名事故即此。
+      expect(source, contains('/sync/manifest'));
+      expect(source, contains("'unauthorized'"));
+      // 旧的宽判定痕迹不应复活：不再把 404 当连通证据。
+      expect(source, isNot(contains('404 即链路通')));
+    });
   });
 }

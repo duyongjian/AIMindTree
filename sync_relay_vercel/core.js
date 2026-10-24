@@ -134,6 +134,28 @@ function normalizePath(path) {
   return p;
 }
 
+/**
+ * 剥掉 Vercel 文件系统路由 / rewrite 的 ``/api`` 挂载前缀（仅剥一次）。
+ *
+ * 背景：Vercel 把 ``api/`` 目录下的函数挂在 ``/api/*`` 下；另外 ``vercel.json``
+ * 的 rewrite（``/(.*) → /api/$1``）命中时，平台很可能把请求**转换成目标路径**
+ * 再进函数（同款 rewrite 在 Netlify 的实测结论见 ``sync_relay_netlify/netlify.toml``
+ * 注释：「无论平台是保留原始 URL 还是改写为挂载路径」）。两种来源下函数收到的
+ * pathname 都可能带 ``/api``。
+ *
+ * 路由匹配本身用 ``endsWith`` 后缀匹配，带不带前缀都能命中（这正是当初选
+ * endsWith 的原因）；但**健康检查是精确匹配 ``/``**，不剥前缀的话
+ * ``GET /api/``（带 /api 的地址）会落 404。剥一次前缀后：
+ * - ``/api/auth/register`` → ``/auth/register``（现网 /api 链路，行为不变）
+ * - ``/auth/register``     → 不变（rewrite 保留原始 URL 时）
+ * - ``/api`` / ``/api/``   → ``/``（健康检查在两种地址下都返回 200）
+ */
+function stripApiPrefix(p) {
+  if (p === '/api') return '/';
+  if (p.startsWith('/api/')) return p.slice(4) || '/';
+  return p;
+}
+
 /** 请求头键统一转小写（各平台大小写习惯不确定）。 */
 function normalizeHeaders(headers) {
   const out = {};
@@ -174,7 +196,7 @@ export function createHandler(store) {
   return async function handle({ method = 'GET', path = '/', headers = {}, body = '' }) {
     const m = String(method || 'GET').toUpperCase();
     const h = normalizeHeaders(headers);
-    const p = normalizePath(path);
+    const p = stripApiPrefix(normalizePath(path));
 
     try {
       if (m === 'OPTIONS') {

@@ -662,6 +662,50 @@ async function run() {
     assert(pull.body.envelopes[0].payload.v === 'last', '同一批内后到的覆盖先到的');
   }
 
+  // --- 23c) /api 挂载前缀兼容（Vercel 文件系统路由 + vercel.json rewrite）---
+  // 带 /api 的地址（App 内置默认）与裸域名（rewrite 后）必须行为一致：
+  // endsWith 后缀匹配两种都命中；健康检查靠剥前缀在两种地址下都 200。
+  {
+    const fresh = makeEnv();
+    // 健康检查：/api/ 与 /api 剥前缀后都是 /，必须 200 + 服务标识。
+    for (const healthPath of ['/api/', '/api']) {
+      const r = await get(fresh, healthPath, '');
+      assert(
+        r.status === 200 && r.body.ok === true && r.body.version === '1.0.0',
+        `GET ${healthPath} 健康检查 200（/api 前缀剥离）`
+      );
+    }
+
+    // 注册 / push / manifest / pull 全链路走 /api 前缀。
+    const reg = await post(
+      fresh,
+      '/api/auth/register',
+      { username: 'apiprefix', password: 'mznxbcv1284' },
+      ''
+    );
+    assert(reg.status === 200 && reg.body.token && reg.body.token.length === 64, 'POST /api/auth/register 正常注册');
+    const token = reg.body.token;
+
+    const pushRes = await post(
+      fresh,
+      '/api/sync/push',
+      { device_id: 'd1', envelopes: [mkEnvId('notes', 'api-1', 'd1', { via: 'api-prefix' })] },
+      token
+    );
+    assert(pushRes.status === 200 && pushRes.body.received === 1, 'POST /api/sync/push received=1');
+
+    const manifest = await get(fresh, '/api/sync/manifest', token);
+    assert(manifest.body.count === 1, 'GET /api/sync/manifest count=1');
+
+    const pull = await post(fresh, '/api/sync/pull', { device_id: 'd1', since: null }, token);
+    assert(pull.body.envelopes.length === 1, 'POST /api/sync/pull 全量 1 条');
+    assert(pull.body.envelopes[0].payload.via === 'api-prefix', '/api 前缀链路 payload 还原正确');
+
+    // 剥前缀后未知子路径仍然是 404（不会把 404 误放成健康检查）。
+    const nf = await get(fresh, '/api/sync/nope', token);
+    assert(nf.status === 404 && nf.body.error === 'not found', 'GET /api/sync/nope → 404 not found');
+  }
+
   // --- 24) isConfigured() 环境变量判断 ---
   {
     await withEnv(
@@ -772,6 +816,26 @@ async function runEntryTests() {
         assert(
           healthRes.status === 200 && health.ok === true && health.version === '1.0.0',
           '入口 GET / 健康检查 200 + 服务标识'
+        );
+
+        // /api 前缀链路：入口把 pathname=/api/... 原样传给 core，剥前缀后命中
+        // （对应 App 内置默认地址 https://<域名>/api 与裸域名两种形态）。
+        const apiRegRes = await entry.default(
+          new Request('https://relay.local/api/auth/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: 'entryapi', password: 'qpoeiwnz1284' }),
+          })
+        );
+        assert(apiRegRes.status === 200, '入口 POST /api/auth/register → 200（前缀剥离）');
+        const apiReg = await apiRegRes.json();
+        assert(apiReg.token && apiReg.token.length === 64, '入口 /api 前缀注册返回 64 位令牌');
+
+        const apiHealthRes = await entry.default(new Request('https://relay.local/api/'));
+        const apiHealth = await apiHealthRes.json();
+        assert(
+          apiHealthRes.status === 200 && apiHealth.ok === true,
+          '入口 GET /api/ 健康检查 200（前缀剥离）'
         );
       }
     );

@@ -11,13 +11,16 @@
 ///   按后端隔离存储（见 [SyncConfig]）；
 /// - CF / CloudBase 地址已内置，用户无需填写即可开箱即用；Vercel（已填部署
 ///   域名）/ EdgeOne / Netlify 中选未回填的会明确提示「待配置」，不会静默失败；
-/// - EdgeOne Pages 是国内永久免费链路，但请求体 1MB 硬限，大图片附件（
-///   note_assets）会被本机切批逻辑标记失败，建议这类数据走 CF / CloudBase；
+/// - EdgeOne Pages 是国内永久免费链路，但请求体 1MB 硬限；CloudBase 的 HTTP
+///   访问服务网关同样实测 ~1MB 请求体硬限（413）。两者的推送预算都收紧到
+///   850KB，大图片附件（note_assets）会被本机切批逻辑标记失败，建议这类数据
+///   走 CF / Netlify；
 /// - Netlify 为海外/备份链路（函数跑美/欧单区，国内直连可达性差），非国内首选；
 /// - 换中继 / 走代理都在「服务器与网络」卡里配，不必重新编译 App。
 library;
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -183,7 +186,16 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     }
   }
 
-  /// 用当前输入框里的地址发一个 GET / 探测连通性（测当前选中后端）。
+  /// 用当前输入框里的地址探测连通性（测当前选中后端）。
+  ///
+  /// 探针是**无令牌** `GET <base>/sync/manifest`：五个中继的契约逐字一致，
+  /// `/sync/*` 缺少/无效令牌一律返回 `401 {"error":"unauthorized"}`。因此
+  /// 「401 + 这个 JSON 形状」是强连通证据——它同时证明了 DNS/TLS/代理链路、
+  /// 平台路由（没有把请求落到静态 404 上）和业务函数的鉴权层都在工作。
+  ///
+  /// 之所以不探测根路径 `/`：CF Worker 对 `/` 固定 404，而平台级 404（地址填错、
+  /// 少前缀）与业务 404 无法从状态码区分——旧实现「任意状态码判通」就把填错
+  /// 地址显示的 404 报成了「已连通」（Vercel 裸域名事故即此）。
   ///
   /// 客户端走 [createDirectHttpClient]（DoH / 代理 / 探测逻辑与真实同步链路
   /// 完全一致），测出来的结论才有意义；换一个普通 HttpClient 会得到不一样
@@ -220,18 +232,36 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     final sw = Stopwatch()..start();
     try {
       client = await createDirectHttpClient(url);
-      final root = Uri.parse(url.endsWith('/') ? url : '$url/');
-      final req = await client.getUrl(root).timeout(_kTestTimeout);
+      // 无令牌探针：去结尾斜杠后拼 /sync/manifest（App 侧同款拼接规则）。
+      final base = url.endsWith('/') ? url.substring(0, url.length - 1) : url;
+      final probe = Uri.parse('$base/sync/manifest');
+      final req = await client.getUrl(probe).timeout(_kTestTimeout);
       final resp = await req.close().timeout(_kTestTimeout);
       final status = resp.statusCode;
-      // 拿到**任意** HTTP 状态码就说明链路已通（DNS/TLS/代理全部正常）——
-      // 三个中继都不保证根路径 200：CF Worker 对 `/` 固定返 404，CN/Vercel 返 200。
-      // 只有超时 / 连接错误才算不可达，别把 404 误报成失败。
-      final verdict = switch (status) {
-        200 => '已连通',
-        404 => '已连通（CF Worker 无根路径健康检查，404 即链路通）',
-        _ => '服务器有响应',
-      };
+      final payload = await resp.transform(utf8.decoder).join();
+
+      // 判定表：只有 200、或「401 + JSON + error==unauthorized」判连通；
+      // 其余（平台 404 HTML / 503 / 其他）只报状态码，不判连通。
+      var connected = false;
+      String? note;
+      if (status == 200) {
+        connected = true;
+      } else if (status == 401) {
+        String? relayError;
+        try {
+          final decoded = jsonDecode(payload);
+          if (decoded is Map && decoded['error'] is String) {
+            relayError = decoded['error'] as String;
+          }
+        } on Object {
+          // 非 JSON 响应体（平台错误页 / 网关拦截页）：不作为连通证据。
+        }
+        if (relayError == 'unauthorized') {
+          connected = true;
+          note = '（中继在线，鉴权正常）';
+        }
+      }
+      final verdict = connected ? '已连通$note' : '';
       if (!mounted) return;
       setState(
         () => _testResult =
