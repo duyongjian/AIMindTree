@@ -3,7 +3,7 @@
 ///
 /// 覆盖：五后端默认/覆盖地址、cloudflare 沿用旧 key（老用户数据零迁移）、
 /// selectedBackend 持久化、每后端账号独立隔离、clear() 清所有后端、
-/// Vercel 已回填部署域名 / EdgeOne / Netlify 内置默认未填时 urlOf 返回空、
+/// Vercel / Netlify 已回填部署域名（EdgeOne 未填时 urlOf 返回空）、
 /// 各后端 push 字节预算取值。
 library;
 
@@ -46,7 +46,8 @@ void main() {
         config.urlOf(SyncBackend.cloudbase),
         SyncConfig.kSyncCbDefaultBaseUrl,
       );
-      // Vercel 已部署，内置默认非空（带 /api 前缀）；EdgeOne / Netlify 待回填，空串。
+      // Vercel / Netlify 均已部署，内置默认非空（Vercel 带 /api 前缀，
+      // Netlify 只需根域名）；EdgeOne 待回填，空串。
       expect(
         config.urlOf(SyncBackend.vercel),
         SyncConfig.kSyncVercelDefaultBaseUrl,
@@ -55,10 +56,16 @@ void main() {
         SyncConfig.kSyncVercelDefaultBaseUrl,
         'https://aimindtree-syncrelayvercel.vercel.app/api',
       );
+      expect(
+        config.urlOf(SyncBackend.netlify),
+        SyncConfig.kSyncNetlifyDefaultBaseUrl,
+      );
+      expect(
+        SyncConfig.kSyncNetlifyDefaultBaseUrl,
+        'https://aimindtree-sync-relay.netlify.app',
+      );
       expect(SyncConfig.kSyncEoDefaultBaseUrl, '');
-      expect(SyncConfig.kSyncNetlifyDefaultBaseUrl, '');
       expect(config.urlOf(SyncBackend.edgeone), '');
-      expect(config.urlOf(SyncBackend.netlify), '');
     });
 
     test('push 字节预算 / 单条硬上限按后端取值（edgeone 收紧 850KB）', () {

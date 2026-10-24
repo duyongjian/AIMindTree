@@ -18,6 +18,13 @@
   publish = "public"
   functions = "netlify/functions"
 
+# Functions 2.0 开关（官方口径）：esbuild 打包 + 原生 ESM export default 签名。
+# v2 才会按请求注入 Netlify Blobs 上下文（globalThis.netlifyBlobsContext /
+# NETLIFY_BLOBS_CONTEXT）——v1（lambda 式）不注入，getStore 直接抛
+# MissingBlobsEnvironmentError（2026-10-24 实测踩坑）。
+[functions]
+  node_bundler = "esbuild"
+
 # 把同步中继的所有路径收口到同一个 Netlify Function（rewrite，非 301）。带 :splat 保留子路径。
 [[redirects]]
   from = "/"

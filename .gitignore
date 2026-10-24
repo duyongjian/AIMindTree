@@ -105,3 +105,6 @@ sync_relay_eo/package-lock.json
 # Netlify 中继本地依赖（netlify-cli 体积大，npm install 可重建）
 sync_relay_netlify/node_modules/
 
+
+# Local Netlify folder
+.netlify

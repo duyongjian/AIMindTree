@@ -120,12 +120,14 @@ class SyncConfig {
 
   /// 内置默认地址：Netlify 同步中继（sync_relay_netlify）。
   ///
-  /// ⚠️ 域名待 Netlify 部署完成后回填；空串表示「尚未配置」——与另两版同口径：
-  /// UI 据此显示「（待配置）」并禁用上传/拉取，不会静默失败。Netlify Functions
-  /// 经 `netlify.toml` rewrite 把 `/`、`/auth/*`、`/sync/*` 收口到同一函数，
-  /// 故内置默认只需根域名（不含 `/api` 之类前缀）；用户手填覆盖值优先。
-  /// 注：Netlify 函数跑在美/欧单区，国内直连可达性差，定位海外/备份后端。
-  static const String kSyncNetlifyDefaultBaseUrl = '';
+  /// 已部署（2026-10-24，站点 aimindtree-sync-relay，生产全链路实测通过）：
+  /// 注册/登录/推送/manifest/拉取 + 401/409 错误路径均验证 OK。
+  /// Netlify Functions 经 `netlify.toml` rewrite 把 `/`、`/auth/*`、`/sync/*`
+  /// 收口到同一函数，故内置默认只需根域名（不含 `/api` 之类前缀）。
+  /// 注：Netlify 函数跑在美/欧单区，国内直连可达性差，定位海外/备份后端；
+  /// 用户手填覆盖值优先。
+  static const String kSyncNetlifyDefaultBaseUrl =
+      'https://aimindtree-sync-relay.netlify.app';
 
   /// 单批 push 字节预算默认值（4MB）。
   ///

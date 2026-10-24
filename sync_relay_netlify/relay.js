@@ -17,12 +17,13 @@
  * 平台适配要点（2026-10-24 依 Netlify 官方文档落实）：
  *
  * 1. **运行时是 Node.js（AWS Lambda），不是 Edge isolate**：完整 Node 运行时，
- *    Web Crypto 在 Node 18+ 已是全局 ``crypto``，PBKDF2 / getRandomValues 直接可用，
- *    与 CF / EdgeOne 版**同一套哈希参数、哈希值可互相移植**（多后端用户迁移无障碍）。
- * 2. **存储用 Netlify Blobs（``@netlify/blobs``）**：KV 风格键值。本版默认
- *    ``consistency: 'strong'``（Blobs 支持强一致，比 EdgeOne KV 的最终一致更稳），
- *    因此 pull 不再依赖 60s 回退窗口——但为跨区复制留 5s 余量更稳妥，见
- *    [kPullLookbackMs]。
+ *    PBKDF2 / getRandomValues 走 Web Crypto，与 CF / EdgeOne 版**同一套哈希参数、
+ *    哈希值可互相移植**（多后端用户迁移无障碍）。注意 Netlify 函数运行时的
+ *    Node 18.20.8 **没有全局 ``crypto``**（全局 Web Crypto 是 Node 19+ 才默认开放），
+ *    故下面从 ``node:crypto`` 取 ``webcrypto`` 兜底（2026-10-24 实测踩坑）。
+ * 2. **存储用 Netlify Blobs（``@netlify/blobs``）**：KV 风格键值。本版走官方
+ *    「API 访问」模式（显式 siteID + token，见 sync.mjs），读写直达 API 源站，
+ *    即强一致；``kPullLookbackMs`` 的 30s 回退窗口仅作跨区/传播的冗余保险。
  * 3. **Blobs 键名允许 Unicode（≤600B、不能以 / 开头）**：本版仍沿用另四版的
  *    UTF-16 hex 编码键名，保证键格式在五个后端间一致、可迁移。
  * 4. **请求体上限**：Netlify Functions 没有 EdgeOne 那种 1MB 硬限（平台更宽松），
@@ -31,6 +32,18 @@
  * 5. **Blobs 没有内置访问控制**：中继函数本身就是网关——所有读写都先过
  *    Bearer 鉴权，未授权一律 401，与另四版一致。
  */
+
+import { webcrypto as nodeWebcrypto } from 'node:crypto';
+
+/**
+ * Web Crypto 实例：优先全局（Node≥19 / Deno / 边缘运行时），回退
+ * ``node:crypto.webcrypto``（Netlify 函数运行时 Node 18.20.8 实测无全局 crypto）。
+ * 本文件的两个消费方（Netlify 函数、test_protocol.mjs）都是 Node，静态引入无负担。
+ */
+const crypto =
+  typeof globalThis.crypto !== 'undefined' && globalThis.crypto.subtle
+    ? globalThis.crypto
+    : nodeWebcrypto;
 
 /** 服务标识（健康检查与错误响应用）。 */
 const SERVICE_NAME = 'aimindtree-sync-relay';
@@ -54,11 +67,11 @@ const kMaxBodyBytes = 4 * 1024 * 1024;
 /**
  * pull 增量起点回退量（5s）。
  *
- * Blobs 默认强一致（本版已开启 ``consistency:'strong'``），写入立即可读；仍留
- * 5s 余量以覆盖跨区域复制的极端边界。测试里可经 store/env 把 lookback 置 0
+ * Blobs 默认强一致（本版已开启 ``consistency:'strong'``），写入立即可读；降级
+ * 最终一致时留 30s 余量以覆盖边缘缓存传播。测试里可经 store/env 把 lookback 置 0
  * 拿到严格增量语义。
  */
-const kPullLookbackMs = 5 * 1000;
+const kPullLookbackMs = 30 * 1000;
 
 /** PBKDF2 迭代次数（与另四版一致，哈希值可互相移植）。 */
 const PBKDF2_ITER = 100000;
