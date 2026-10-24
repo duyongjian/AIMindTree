@@ -19,9 +19,7 @@
 var RELAY_BACKEND_LABEL = {
   cloudflare: 'Cloudflare Workers + D1',
   netlify: 'Netlify Functions + Blobs',
-  vercel: 'Vercel + KV',
   edgeone: '腾讯 EdgeOne + KV',
-  cloudbase: '腾讯 CloudBase + 文档数据库',
 };
 
 var RELAY_HEAD_CFG = '<h2>中继连接</h2><p class="hint">GET/PUT /v1/admin/relay/config'

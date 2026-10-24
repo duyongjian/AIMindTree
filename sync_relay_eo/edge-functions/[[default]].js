@@ -1,7 +1,7 @@
 /**
  * AIMindTree 同步中继 · EdgeOne Pages 版（Edge Functions + KV）。
  *
- * 与 Cloudflare / CloudBase / Vercel 三版**契约逐字一致**（同样的 5 端点、
+ * 与 Cloudflare / Netlify 两版**契约逐字一致**（同样的 5 端点、
  * 同样字段、同样 Bearer 鉴权），App 侧换后端只换地址：
  *
  * 账号（多租户隔离，普通用户自助注册/登录，无需共享 token）：
@@ -71,7 +71,7 @@ const kMaxBodyBytes = 900 * 1024;
  */
 const kPullLookbackMs = 65 * 1000;
 
-/** PBKDF2 迭代次数（与 CF / Vercel 版一致，哈希值可互相移植）。 */
+/** PBKDF2 迭代次数（与 CF / Netlify 版一致，哈希值可互相移植）。 */
 const PBKDF2_ITER = 100000;
 
 const MIN_USERNAME = 3;
@@ -358,7 +358,7 @@ async function handlePush(request, kv, ownerId) {
 
   for (const e of envelopes) {
     // 与 App SyncEnvelope 对齐的完整字段落库（payload 以 JSON 字符串存，
-    // 与 CF / Vercel 版一致）；server_time 服务端统一签发。
+    // 与 CF / Netlify 版一致）；server_time 服务端统一签发。
     await kv.put(
       envelopeKey(ownerId, String(e.entity_table), String(e.entity_id)),
       JSON.stringify({
@@ -511,7 +511,7 @@ export async function handleFetch(request, env) {
   }
 
   // 根路径健康检查：先判，KV 未绑定时也返 200（服务探活 ≠ KV 状态；
-  // 与 Vercel / CN 版一致，App 设置页「测试连接」靠它一眼判断是否连上）。
+  // 与 CF / Netlify 版一致，App 设置页「测试连接」靠它一眼判断是否连上）。
   if (method === 'GET' && path === '/') {
     return jsonResponse({
       ok: true,

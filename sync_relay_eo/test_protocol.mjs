@@ -2,9 +2,9 @@
  * sync_relay_eo 协议冒烟测试（不联网、不需要 EdgeOne 账号）。
  *
  * 用一个内存版 KV 替换 EdgeOne 的 KV 命名空间绑定，直接驱动
- * ``edge-functions/[[default]].js`` 的 ``handleFetch``（与 Vercel 版
+ * ``edge-functions/[[default]].js`` 的 ``handleFetch``（与另两版
  * test_protocol.mjs 同口径），验证 HTTP 契约与 ``sync_relay_cf/worker.js`` /
- * ``sync_relay_cn`` / ``sync_relay_vercel`` 完全一致（App 端零改动）。
+ * ``sync_relay_netlify/relay.js`` 完全一致（App 端零改动）。
  *
  * 运行：node test_protocol.mjs     全绿退出码 0，有失败退出码 1。
  *

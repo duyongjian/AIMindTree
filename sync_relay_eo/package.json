@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "AIMindTree 同步中继 · EdgeOne Pages 版（Edge Functions + KV，国内永久免费，HTTP 契约兼容 CF / CloudBase / Vercel）",
+  "description": "AIMindTree 同步中继 · EdgeOne Pages 版（Edge Functions + KV，国内永久免费，HTTP 契约兼容 Cloudflare / Netlify）",
   "scripts": {
     "test": "node test_protocol.mjs"
   },

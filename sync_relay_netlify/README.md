@@ -1,7 +1,7 @@
 # sync_relay_netlify · AIMindTree 同步中继（Netlify 版）
 
 Netlify **Functions（Node.js）+ Blobs** 实现。HTTP 契约与
-`sync_relay_cf` / `sync_relay_cn` / `sync_relay_vercel` / `sync_relay_eo`
+`sync_relay_cf` / `sync_relay_eo`
 **逐字一致**，App 端换后端只换地址。
 
 > 状态（2026-10-24）：**已部署到生产并全链路实测通过**。
@@ -12,18 +12,18 @@ Netlify **Functions（Node.js）+ Blobs** 实现。HTTP 契约与
 
 ## 调研结论（可行性）
 
-**结论：可行，且是五后端里存储最稳的一个。** 但有一个硬约束：**国内直连可达性差**
-（与 Vercel 同病，函数跑在美/欧单区域），所以它定位为**海外/备份后端**，不是
+**结论：可行，且是三后端里存储最稳的一个。** 但有一个硬约束：**国内直连可达性差**
+（函数跑在美/欧单区域），所以它定位为**海外/备份后端**，不是
 国内首选（国内首选仍是 EdgeOne）。
 
-| 维度 | Cloudflare | CloudBase | Vercel | EdgeOne | **Netlify（本版）** |
-|---|---|---|---|---|---|
-| 运行时 | Worker (V8) | 云函数 | Serverless | Edge Function | **Functions（Node.js / AWS Lambda）** |
-| 数据 | D1 (SQLite) | PostgreSQL | Upstash Redis | KV | **Blobs（键值）** |
-| 一致性 | 强 | 强 | 强 | 最终(~60s) | **强（API 模式直达源站）** |
-| 请求体上限 | 大 | 大 | 大 | 1MB | **宽松（本版守 4MB）** |
-| 国内可达 | 经代理 | 满分 | 不稳 | 满分 | **差（海外单区）** |
-| 免费额度 | 有 | 有 | 有 | 永久免费 | **有（125K 函数/月 + ~10GB Blobs）** |
+| 维度 | Cloudflare | EdgeOne | **Netlify（本版）** |
+|---|---|---|---|
+| 运行时 | Worker (V8) | Edge Function | **Functions（Node.js / AWS Lambda）** |
+| 数据 | D1 (SQLite) | KV | **Blobs（键值）** |
+| 一致性 | 强 | 最终(~60s) | **强（API 模式直达源站）** |
+| 请求体上限 | 大 | 1MB | **宽松（本版守 4MB）** |
+| 国内可达 | 经代理 | 满分 | **差（海外单区）** |
+| 免费额度 | 有 | 永久免费 | **有（125K 函数/月 + ~10GB Blobs）** |
 
 ### 为什么是它 / 为什么不是首选
 
@@ -33,15 +33,13 @@ Netlify **Functions（Node.js）+ Blobs** 实现。HTTP 契约与
 - **免费且无需绑卡**：Starter 计划含 100GB 带宽、300 构建积分、125K 函数请求/月、
   ~10GB Blobs 存储（2025-09 起的积分模型，额度用完网站暂停而非扣费）。
 - **致命短板——国内可达性**：函数默认落在美/欧单区域，从中国直连延迟高、且可能
-  被墙/不稳。这与 Vercel 完全一致。**国内用户真正顺滑的后端只有 EdgeOne（满分）
-  与 CloudBase（满分）**。所以 Netlify 只建议作为：海外使用、或 Vercel 之外的
-  备选兜底。
+  被墙/不稳。所以 Netlify 只建议作为：海外使用、或 CF 之外的备选兜底。
 
 ### 平台适配要点（已落实，含 2026-10-24 实测踩坑）
 
 1. **运行时是完整 Node.js（v18.20.8）**，不是 Edge isolate。**但 Node 18 没有
    全局 `crypto`**（全局 Web Crypto 是 Node 19+ 才默认开放）——`relay.js` 顶部
-   从 `node:crypto` 取 `webcrypto` 兜底，PBKDF2 哈希参数与另四版**完全一致、
+   从 `node:crypto` 取 `webcrypto` 兜底，PBKDF2 哈希参数与另两版**完全一致、
    哈希值可互相移植**（多后端用户迁移无障碍）。本地 Node 22 与测试走全局分支。
 2. **存储用 `@netlify/blobs`，走「API 访问」模式**（`relay.js` 把存储抽象成
    `{get, set, listKeys, delete}` 接口，生产 `netlify/functions/sync.mjs` 适配，测试用
@@ -51,16 +49,16 @@ Netlify **Functions（Node.js）+ Blobs** 实现。HTTP 契约与
    论坛有同期活跃缺陷帖）。故显式传 siteID（运行时 `context.site.id`）+ token
    （站点环境变量 `NETLIFY_BLOBS_TOKEN`，**绝不入库存**）。API 模式不经
    edgeURL，无 `uncachedEdgeURL` 要求，读写直达源站 = 强一致。
-3. **路由用 `netlify.toml` rewrite（200）**：Netlify Functions 没有 Vercel 那种
-   文件级 catch-all，故把 `/`、`/auth/*`、`/sync/*` 全部 rewrite 到同一个函数
+3. **路由用 `netlify.toml` rewrite（200）**：Netlify Functions 没有文件级 catch-all，
+   故把 `/`、`/auth/*`、`/sync/*` 全部 rewrite 到同一个函数
    `.netlify/functions/sync`（带 `:splat` 保留子路径）；函数内
    `toLogicalRequest` 剥掉挂载前缀还原逻辑路径，契约逐字一致。
 4. **`.mjs` + `[functions] node_bundler = "esbuild"`**：`.mjs` 扩展名保证 ESM
    （v2 运行时的判定依据；`export default` 即 v2，`export const handler` 是 v1
    不支持 Blobs）。esbuild 打包把 `relay.js` 与依赖收进单文件。
-5. **Blobs 键名允许 Unicode**，本版仍用 UTF-16 hex 编码键名，保证五后端键格式统一、
+5. **Blobs 键名允许 Unicode**，本版仍用 UTF-16 hex 编码键名，保证三后端键格式统一、
    可迁移。
-6. **Blobs 无内置访问控制**：中继函数本身是网关，所有读写先过 Bearer 鉴权，与另四版一致。
+6. **Blobs 无内置访问控制**：中继函数本身是网关，所有读写先过 Bearer 鉴权，与另两版一致。
 7. **本地 dev 的已知缺陷（非本项目问题）**：netlify-cli@17 内置的 blobs 版本用
    `rename` 落盘，临时目录（C:）与项目（D:）跨盘 → Windows EXDEV → 本地 dev 的
    写全部 500。**生产（Linux）无此问题**；本地只读验证可用，写验证以生产为准。
@@ -187,7 +185,7 @@ NETLIFY_AUTH_TOKEN=<token> ./node_modules/.bin/netlify env:set \
 - Blobs 走站点环境变量 `NETLIFY_BLOBS_TOKEN`（PAT，仅存 Netlify 环境配置，
   **不在仓库、不在 App、不下发**）。注意 PAT 是账号级凭证，泄露可轮换重置。
 
-## App 集成（已完成，第五后端）
+## App 集成（已完成，第三后端）
 
 - `SyncBackend.netlify`（UI 名 `Netlify`，keySuffix `nf`），设置页后端选择器
   **三选一**（Cloudflare / EdgeOne / Netlify），账号体系互相独立。
@@ -195,7 +193,7 @@ NETLIFY_AUTH_TOKEN=<token> ./node_modules/.bin/netlify env:set \
   （rewrite 收口全路径，**无需 `/api` 之类前缀**；用户手填覆盖优先）。
 - push 预算：Netlify 沿用 4MB / 6MB（平台无 1MB 硬限，不必收 850KB）。
 
-## 契约速查（与另四版一致）
+## 契约速查（与另两版一致）
 
 - `POST /auth/register` `{username,password}` → `{user_id,token}`
 - `POST /auth/login` `{username,password}` → `{user_id,token}`

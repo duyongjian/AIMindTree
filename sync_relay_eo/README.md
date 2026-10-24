@@ -1,29 +1,28 @@
 # sync_relay_eo · AIMindTree 同步中继（EdgeOne Pages 版）
 
 腾讯云 **EdgeOne Pages** 的 Edge Functions + KV 实现。HTTP 契约与
-`sync_relay_cf` / `sync_relay_cn` / `sync_relay_vercel` **逐字一致**，App 端
+`sync_relay_cf` / `sync_relay_netlify` **逐字一致**，App 端
 只换地址即可切换后端。
 
 ## 为什么是它（国内免费首选）
 
 - **官方 FAQ 明示“永久免费”**：不限安全加速流量 / 请求 + 每月 3M Edge Functions
   请求与 CPU 时间 + **1GB KV 存储** + 500 次构建 / 月；2025-12 正式版 GA，无需绑卡。
-- **腾讯边缘节点**：国内直连可达性满分，不依赖被污染的 `*.workers.dev` /
-  `*.vercel.app` 线路。
+- **腾讯边缘节点**：国内直连可达性满分，不依赖被污染的 `*.workers.dev` 线路。
 - 工作量小：本目录就是把 Cloudflare 版（`sync_relay_cf/worker.js`）改造为
   EdgeOne Edge Function + KV 适配层。
 
-## 与另三版的差异（务必先读）
+## 与另两版的差异（务必先读）
 
-| 维度 | Cloudflare | CloudBase | Vercel | **EdgeOne（本版）** |
-|---|---|---|---|---|
-| 运行时 | Worker (V8 isolate) | 云函数 | Serverless | **Edge Function** |
-| 数据 | D1 (SQLite) | PostgreSQL | Upstash Redis | **KV（键值）** |
-| 路由 | 单文件 worker | 网关路径 `/sync-relay` | `api/[[...path]]` | **`edge-functions/[[default]].js`（可选 catch-all，含根 `/`）** |
-| 契约 | 5 端点 + Bearer | 同 | 同 | **同** |
-| 请求体上限 | 大 | 大 | 大 | **1MB（本版 900KB 即 413 守卫）** |
-| 一致性 | 强 | 强 | 强 | **最终一致 ~60s（pull 自带 65s 回退窗口）** |
-| 国内可达 | 经代理才通 | 满分 | 不稳 | **满分** |
+| 维度 | Cloudflare | **EdgeOne（本版）** |
+|---|---|---|
+| 运行时 | Worker (V8 isolate) | **Edge Function** |
+| 数据 | D1 (SQLite) | **KV（键值）** |
+| 路由 | 单文件 worker | **`edge-functions/[[default]].js`（可选 catch-all，含根 `/`）** |
+| 契约 | 5 端点 + Bearer | **同** |
+| 请求体上限 | 大 | **1MB（本版 900KB 即 413 守卫）** |
+| 一致性 | 强 | **最终一致 ~60s（pull 自带 65s 回退窗口）** |
+| 国内可达 | 经代理才通 | **满分** |
 
 ### EdgeOne 专属约束（实现已处理，仅作记录）
 
@@ -41,7 +40,7 @@
    本机 `kSyncEoPushBudgetBytes` 比 900KB 守卫再留 ~50KB 余量，确保整批
    body 一定落在守卫以内）。
 5. 运行时仅 JavaScript（ES module）、CPU 200ms/次：密码哈希走 Web Crypto
-   原生 `PBKDF2`（10 万次迭代），不占 JS CPU 预算，与另三版哈希互通。
+   原生 `PBKDF2`（10 万次迭代），不占 JS CPU 预算，与另两版哈希互通。
 
 ## 目录结构
 
@@ -115,7 +114,7 @@ node test_protocol.mjs      # 期望：通过 69，失败 0
 
 ### 方式 B：CLI（eo 未开源，控制台最稳）
 
-EdgeOne Pages 的 CLI 不如 Vercel 成熟，建议直接走控制台。若要用 CLI，思路是
+EdgeOne Pages 的 CLI 仍较新，建议直接走控制台。若要用 CLI，思路是
 `eo pages deploy sync_relay_eo --...`，具体以官方文档为准。
 
 ### 自定义域名（可选，需备案）
@@ -134,7 +133,7 @@ EdgeOne 支持绑定自有域名（DNS / 文件 / 委派验证 + 免费证书）
 App 侧已把 EdgeOne 作为**同步后端之一**接好（与 Cloudflare / Netlify 平行）：
 
 - `SyncBackend.edgeone`（UI 名 `EdgeOne Pages`，pref/SecretStore key 后缀 `eo`），
-  设置页后端选择器**四选一**，账号体系与其他后端互相独立（各自注册/登录）。
+  设置页后端选择器**三选一**，账号体系与其他后端互相独立（各自注册/登录）。
 - 内置默认地址 `SyncConfig.kSyncEoDefaultBaseUrl` 当前为空串（待部署回填）；回填前
   UI 对该后端显示「（待配置）」并禁用上传/拉取，不会静默失败。
 - `HttpSyncApi` 构造时携带 `backend`，`SyncEngine` 在 push / pushAll 时按
@@ -147,7 +146,7 @@ App 侧已把 EdgeOne 作为**同步后端之一**接好（与 Cloudflare / Netl
 > 发给主理人，填入 `aimindtree_app/lib/data/sync/sync_config.dart` 的
 > `kSyncEoDefaultBaseUrl` 后重新编译即可；用户也可在设置页「服务器与网络」卡里手填。
 
-## 契约速查（与另三版一致）
+## 契约速查（与另两版一致）
 
 - `POST /auth/register` `{username,password}` → `{user_id,token}`
 - `POST /auth/login` `{username,password}` → `{user_id,token}`

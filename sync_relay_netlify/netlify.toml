@@ -6,7 +6,7 @@
 #   2. 本文件已声明 functions 目录与 rewrite 路由，无需额外配置即可部署。
 #   3. 默认是 preview 部署；确认无误后 `npx netlify deploy --prod` 推生产。
 #
-# 路由说明：Netlify Functions 没有 Vercel 那种文件级 catch-all，故用 rewrite（200）
+# 路由说明：Netlify Functions 没有文件级 catch-all，故用 rewrite（200）
 # 把 `/`、`/auth/*`、`/sync/*` 全部转发到同一个函数 `.netlify/functions/sync`，并带
 # `:splat` 保留原始子路径（否则 rewrite 会丢掉 /auth、/sync 前缀）。函数内
 # `sync.js` 再剥掉 `/.netlify/functions/sync` 挂载前缀，还原出逻辑路径，使

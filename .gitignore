@@ -90,7 +90,6 @@ llm_server/.m10_fixture.json
 # 方案 A 本地同步中继的运行时 SQLite（可随时重建）
 llm_server/sync_relay.db
 
-# Vercel CLI 本地安装（327MB，可用 npm i --prefix .vcli vercel 重建）
 # EdgeOne Pages 部署产物与本地 token（.token 含账号级权限，绝不入库）
 .edgeone/
 sync_relay_eo/edgeone.json

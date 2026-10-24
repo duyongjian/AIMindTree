@@ -1,6 +1,6 @@
 /**
- * AIMindTree 同步中继 · Netlify 版核心逻辑（与 CF / CloudBase / Vercel /
- * EdgeOne 四版**契约逐字一致**，App 端换后端只换地址）。
+ * AIMindTree 同步中继 · Netlify 版核心逻辑（与 Cloudflare / EdgeOne 两版
+ * **契约逐字一致**，App 端换后端只换地址）。
  *
  * 本文件是「存储无关」的纯逻辑：所有读写都走传入的 `store` 对象
  * （接口见 [makeMemoryStore] / sync.js 里的 Blobs 适配层），因此可以不装
@@ -30,13 +30,13 @@
  * 2. **存储用 Netlify Blobs（``@netlify/blobs``）**：KV 风格键值。本版走官方
  *    「API 访问」模式（显式 siteID + token，见 sync.mjs），读写直达 API 源站，
  *    即强一致；``kPullLookbackMs`` 仅留 1s 覆盖同毫秒边界（详见其注释）。
- * 3. **Blobs 键名允许 Unicode（≤600B、不能以 / 开头）**：本版仍沿用另四版的
+ * 3. **Blobs 键名允许 Unicode（≤600B、不能以 / 开头）**：本版仍沿用另两版的
  *    UTF-16 hex 编码键名，保证键格式在各后端间一致、可迁移。
  * 4. **请求体上限**：Netlify Functions 没有 EdgeOne 那种 1MB 硬限（平台更宽松），
- *    本版把守卫放宽到 4MB（与 CF / CloudBase 版一致），App 端若接入 netlify
+ *    本版把守卫放宽到 4MB（与 Cloudflare 版一致），App 端若接入 netlify
  *    后端可沿用 4MB / 6MB 预算，不必收 850KB。
  * 5. **Blobs 没有内置访问控制**：中继函数本身就是网关——所有读写都先过
- *    Bearer 鉴权，未授权一律 401，与另四版一致。
+ *    Bearer 鉴权，未授权一律 401，与另两版一致。
  */
 
 import { webcrypto as nodeWebcrypto } from 'node:crypto';
@@ -66,7 +66,7 @@ const CORS_HEADERS = {
 /**
  * 请求体字节上限（4MB）。
  *
- * Netlify Functions 平台对此比 EdgeOne（1MB）宽松；留 4MB 与 CF / CloudBase 版
+ * Netlify Functions 平台对此比 EdgeOne（1MB）宽松；留 4MB 与 Cloudflare 版
  * 对齐。content-length 超过它就直接 413，不读 body——巨包连函数都不进。
  */
 const kMaxBodyBytes = 4 * 1024 * 1024;
@@ -83,7 +83,7 @@ const kMaxBodyBytes = 4 * 1024 * 1024;
  */
 const kPullLookbackMs = 1 * 1000;
 
-/** PBKDF2 迭代次数（与另四版一致，哈希值可互相移植）。 */
+/** PBKDF2 迭代次数（与另两版一致，哈希值可互相移植）。 */
 const PBKDF2_ITER = 100000;
 
 const MIN_USERNAME = 3;
@@ -91,7 +91,7 @@ const MIN_PASSWORD = 8;
 
 // ---------------- 键名编码 ----------------
 
-/** UTF-16 码元 → 四位 hex（与另四版一致，保证键格式可迁移）。 */
+/** UTF-16 码元 → 四位 hex（与另两版一致，保证键格式可迁移）。 */
 function hexEncode(s) {
   let out = '';
   for (let i = 0; i < s.length; i++) {
@@ -842,7 +842,7 @@ async function routeAdmin(request, store, sub) {
  *
  * 路径判定不依赖文件路由参数：本版由 netlify.toml 的 rewrite 把 ``/``、
  * ``/auth/*``、``/sync/*``、``/admin/*`` 全部转发到同一个函数，内部按
- * ``endsWith`` / 子路径分发（与另四版同构，App 地址不带路径前缀也能用）。
+ * ``endsWith`` / 子路径分发（与另两版同构，App 地址不带路径前缀也能用）。
  */
 export async function handleFetch(request, store, env = {}) {
   const method = (request.method || 'GET').toUpperCase();
