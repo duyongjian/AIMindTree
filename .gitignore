@@ -108,3 +108,4 @@ sync_relay_netlify/node_modules/
 
 # Local Netlify folder
 .netlify
+dist/
