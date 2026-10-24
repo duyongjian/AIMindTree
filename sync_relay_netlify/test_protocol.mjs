@@ -216,6 +216,20 @@ async function main() {
     check('OPTIONS 204', r.status === 204);
   }
 
+  // 17a) CORS 预检：Allow-Methods 含 DELETE，且 admin 与用户侧共用同一个头
+  {
+    const r1 = await h(req('OPTIONS', '/admin/user/u_abc'));
+    const m1 = r1.headers.get('access-control-allow-methods') || '';
+    check('OPTIONS /admin/user/{id} 204', r1.status === 204);
+    check('admin 预检 Allow-Methods 含 DELETE', m1.includes('DELETE'));
+    // 浏览器预检不带 Authorization，且此时 env 无 ADMIN_TOKEN：必须仍放行、不能 404
+    check('未配 ADMIN_TOKEN 时 admin 预检仍放行', r1.headers.get('access-control-allow-origin') === '*');
+
+    const r2 = await h(req('OPTIONS', '/sync/push'));
+    const m2 = r2.headers.get('access-control-allow-methods') || '';
+    check('用户侧与 admin 侧 Allow-Methods 完全一致', m2 === m1 && m2.includes('DELETE'));
+  }
+
   // ---------------- 管理接口 /admin/* ----------------
   // 与 CF 版契约逐字一致（同一组断言在 sync_relay_cf/test_worker.mjs 里也有一份）。
   const ADMIN = 'adm_secret_123';

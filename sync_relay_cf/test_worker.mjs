@@ -348,6 +348,36 @@ async function run() {
   const ADMIN = 'adm_secret_123';
   const adminEnv = { ...env, ADMIN_TOKEN: ADMIN };
 
+  // 16a) CORS 预检：OPTIONS 早退分支下发的必须是同一套 Allow-Methods（含 DELETE）
+  {
+    // 带部署前缀也不影响：OPTIONS 在路由判定之前就返回。
+    const r1 = await worker.fetch(
+      new Request('https://relay.test/admin/user/u_abc', { method: 'OPTIONS' }),
+      env
+    );
+    const m1 = r1.headers.get('access-control-allow-methods') || '';
+    assert(r1.status === 204, 'OPTIONS /admin/user/{id} → 204');
+    assert(m1.includes('DELETE'), 'admin 预检 Allow-Methods 含 DELETE');
+
+    const r2 = await worker.fetch(
+      new Request('https://relay.test/sync/push', { method: 'OPTIONS' }),
+      env
+    );
+    const m2 = r2.headers.get('access-control-allow-methods') || '';
+    assert(r2.status === 204, 'OPTIONS /sync/push → 204');
+    assert(
+      m2 === m1 && m2.includes('DELETE'),
+      '用户侧与 admin 侧共用同一套 Allow-Methods（未为 admin 单开分支）'
+    );
+
+    // 浏览器预检不带 Authorization：未配 ADMIN_TOKEN 时也必须放行（不能 404）
+    const r3 = await worker.fetch(
+      new Request('https://relay.test/admin/stats', { method: 'OPTIONS' }),
+      { DB: env.DB }
+    );
+    assert(r3.status === 204 && r3.headers.get('access-control-allow-origin') === '*', '未配 ADMIN_TOKEN 时 admin 预检仍 204');
+  }
+
   // 16) 未配置 ADMIN_TOKEN → 全部 404（端点不可见）
   {
     const r = await json(await get('/admin/ping', env, 'whatever'));

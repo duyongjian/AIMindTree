@@ -56,9 +56,10 @@ const SERVICE_NAME = 'aimindtree-sync-relay';
 const SERVICE_VERSION = '1.0.0';
 
 /** CORS：方便 curl / 浏览器手动测试；App 走 dart:io，不需要。 */
+// 含 DELETE：浏览器端管理面板直发 ``DELETE /admin/user/{id}`` 时预检必须放行。
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
 
