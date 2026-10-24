@@ -69,6 +69,12 @@ class MarkdownToolbar extends StatelessWidget {
               apply: () =>
                   wrapInline(controller.text, controller.selection, '`'),
             ),
+            _toolButton(
+              icon: Icons.strikethrough_s,
+              tooltip: '删除线（~~文字~~）',
+              apply: () =>
+                  wrapInline(controller.text, controller.selection, '~~'),
+            ),
             const _ToolDivider(),
             _toolButton(
               icon: Icons.looks_one,
@@ -88,6 +94,24 @@ class MarkdownToolbar extends StatelessWidget {
               apply: () => toggleLinePrefix(
                   controller.text, controller.selection, '### '),
             ),
+            _toolButton(
+              icon: Icons.looks_4,
+              tooltip: '四级标题（#### 标题）',
+              apply: () => toggleLinePrefix(
+                  controller.text, controller.selection, '#### '),
+            ),
+            _toolButton(
+              icon: Icons.looks_5,
+              tooltip: '五级标题（##### 标题）',
+              apply: () => toggleLinePrefix(
+                  controller.text, controller.selection, '##### '),
+            ),
+            _toolButton(
+              icon: Icons.looks_6,
+              tooltip: '六级标题（###### 标题）',
+              apply: () => toggleLinePrefix(
+                  controller.text, controller.selection, '###### '),
+            ),
             const _ToolDivider(),
             _toolButton(
               icon: Icons.format_list_bulleted,
@@ -106,6 +130,12 @@ class MarkdownToolbar extends StatelessWidget {
               tooltip: '引用（> 引文）',
               apply: () =>
                   toggleLinePrefix(controller.text, controller.selection, '> '),
+            ),
+            _toolButton(
+              icon: Icons.check_box,
+              tooltip: '任务列表（- [ ] 待办）',
+              apply: () => toggleLinePrefix(
+                  controller.text, controller.selection, '- [ ] '),
             ),
             const _ToolDivider(),
             _toolButton(

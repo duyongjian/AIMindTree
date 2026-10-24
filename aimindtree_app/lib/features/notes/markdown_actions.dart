@@ -23,6 +23,7 @@ const Map<String, String> kInlinePlaceholders = <String, String>{
   '**': '粗体文字',
   '*': '斜体文字',
   '`': '代码',
+  '~~': '删除线',
 };
 
 /// `insertFence` 无选区时代码块里的占位代码。
@@ -317,10 +318,15 @@ _StrippedLine _stripPrefixFamily(String line, String prefix) {
   // 「家族」= 加新前缀前要先剥掉的旧前缀（避免叠加成 `1. - 项`）。
   // 列表标记后面**必须有空白**，否则会把 `**粗体**` 误判成列表项。
   final strip = switch (prefix) {
-    '1. ' => RegExp(r'^(?:\d+\.\s+|[-*+]\s+)'),
-    '- ' => RegExp(r'^(?:[-*+]\s+|\d+\.\s+)'),
+    // 列表家族（有序 / 无序 / 任务列表）共用同一套「先剥旧前缀」正则。
+    // **任务列表 `- [ ] ` 必须排在 `[-*+]\s+` 之前**：否则 `[-*+]\s+`
+    // 会先匹配 `- `，把 `- [ ] 项` 剥成 `[ ] 项`（半残），任务列表永远剥不干净。
+    '1. ' => RegExp(r'^(?:[-*+]\s+\[\s?\]\s+|\d+\.\s+|[-*+]\s+)'),
+    '- ' => RegExp(r'^(?:[-*+]\s+\[\s?\]\s+|\d+\.\s+|[-*+]\s+)'),
+    '- [ ] ' => RegExp(r'^(?:[-*+]\s+\[\s?\]\s+|\d+\.\s+|[-*+]\s+)'),
     '> ' => RegExp(r'^(?:>\s?)+'),
-    '# ' || '## ' || '### ' => RegExp(r'^#{1,6}\s?'),
+    '# ' || '## ' || '### ' || '#### ' || '##### ' || '###### ' =>
+      RegExp(r'^#{1,6}\s?'),
     _ => RegExp('^${RegExp.escape(prefix)}\\s?'),
   };
 
@@ -341,4 +347,56 @@ _StrippedLine _stripPrefixFamily(String line, String prefix) {
     body: rest.substring(m.end),
     hadExactPrefix: hadExactPrefix,
   );
+}
+
+/// 一个 Markdown 标题（由 [extractHeadings] 抽取，供「目录 / 大纲」使用）。
+class MarkdownHeading {
+  const MarkdownHeading({
+    required this.level,
+    required this.title,
+    required this.offset,
+  });
+
+  /// 标题级别：1 = `#`，6 = `######`。
+  final int level;
+
+  /// 去掉前导 `#` 后的纯文本。
+  final String title;
+
+  /// 该标题行在原文中的字符起始偏移（指向行首的 `#`），
+  /// 点击目录项可直接把光标跳到源码对应位置。
+  final int offset;
+}
+
+/// 从 Markdown 正文中抽取标题，供「目录 / 大纲」功能使用。
+///
+/// 规则：
+/// - 仅匹配**行首**的 `#`~`######`，且 `#` 后必须跟空白（避免误伤行内的 `#`）；
+/// - 处于围栏代码块（``` 或 ~~~ 包围）内的行忽略；
+/// - 返回的 [MarkdownHeading.offset] 指向该行行首，便于点击跳转。
+List<MarkdownHeading> extractHeadings(String text) {
+  final headings = <MarkdownHeading>[];
+  final lines = text.split('\n');
+  var inFence = false;
+  var offset = 0;
+  for (final line in lines) {
+    final trimmed = line.trim();
+    if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
+      inFence = !inFence;
+      offset += line.length + 1; // +1 为被 split 掉的 '\n'
+      continue;
+    }
+    if (!inFence) {
+      final m = RegExp(r'^(#{1,6})\s+(.*\S)\s*$').firstMatch(trimmed);
+      if (m != null) {
+        headings.add(MarkdownHeading(
+          level: m.group(1)!.length,
+          title: m.group(2)!,
+          offset: offset,
+        ));
+      }
+    }
+    offset += line.length + 1;
+  }
+  return headings;
 }

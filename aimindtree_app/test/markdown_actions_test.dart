@@ -386,4 +386,111 @@ void main() {
       expect(r.selection.baseOffset, r.text.length);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // wrapInline —— 删除线（~~）
+  // -------------------------------------------------------------------------
+  group('wrapInline（删除线 ~~）', () {
+    test('无选区：插入占位并选中占位文案「删除线」', () {
+      final r = wrapInline('', const TextSelection.collapsed(offset: 0), '~~');
+      expect(r.text, '~~删除线~~');
+      expect(r.selection.start, 2);
+      expect(r.selection.end, 5); // 「删除线」3 字
+    });
+
+    test('再点一次：选中带 marker 的文本 → 取消标记', () {
+      const text = '~~删除线~~';
+      final r = wrapInline(text, const TextSelection(baseOffset: 0, extentOffset: 7), '~~');
+      expect(r.text, '删除线');
+      expect(r.selection.start, 0);
+      expect(r.selection.end, 3);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // toggleLinePrefix —— 任务列表（- [ ] 待办）
+  // -------------------------------------------------------------------------
+  group('toggleLinePrefix（任务列表 - [ ] ）', () {
+    test('单行无前缀：加上任务列表', () {
+      const text = '待办';
+      final r = toggleLinePrefix(
+          text, const TextSelection.collapsed(offset: 2), '- [ ] ');
+      expect(r.text, '- [ ] 待办');
+    });
+
+    test('已是普通无序列表：点任务列表升级为 `- [ ]`', () {
+      const text = '- 项';
+      final r = toggleLinePrefix(
+          text, const TextSelection.collapsed(offset: 3), '- [ ] ');
+      expect(r.text, '- [ ] 项');
+    });
+
+    test('已是任务列表：再点一次取消', () {
+      const text = '- [ ] 项';
+      final r = toggleLinePrefix(
+          text, const TextSelection.collapsed(offset: 7), '- [ ] ');
+      expect(r.text, '项');
+    });
+
+    test('多行选区：逐行加任务列表', () {
+      const text = '甲\n乙';
+      final r = toggleLinePrefix(
+        text,
+        const TextSelection(baseOffset: 0, extentOffset: 3),
+        '- [ ] ',
+      );
+      expect(r.text, '- [ ] 甲\n- [ ] 乙');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // extractHeadings（目录 / 大纲抽取）
+  // -------------------------------------------------------------------------
+  group('extractHeadings', () {
+    test('各级标题都识别，offset 指向行首', () {
+      const text = '# 标题\n## 副标题';
+      final hs = extractHeadings(text);
+      expect(hs, hasLength(2));
+      expect(hs[0].level, 1);
+      expect(hs[0].title, '标题');
+      expect(hs[0].offset, 0);
+      expect(hs[1].level, 2);
+      expect(hs[1].title, '副标题');
+      expect(hs[1].offset, '# 标题'.length + 1); // 第一行长度 + 换行
+    });
+
+    test('H1~H6 级别正确', () {
+      const text = '# a\n## b\n### c\n#### d\n##### e\n###### f';
+      final hs = extractHeadings(text);
+      expect(hs.map((h) => h.level).toList(), <int>[1, 2, 3, 4, 5, 6]);
+      expect(hs.map((h) => h.title).toList(),
+          <String>['a', 'b', 'c', 'd', 'e', 'f']);
+    });
+
+    test('围栏代码块（```）内的井号不算标题', () {
+      const text = '# 真标题\n```\n# 假标题\n```\n# 又真';
+      final hs = extractHeadings(text);
+      expect(hs, hasLength(2));
+      expect(hs[0].title, '真标题');
+      expect(hs[1].title, '又真');
+      // 第二个真标题在第二段 ``` 之后，offset 应跳过整段代码块。
+      expect(hs[1].offset,
+          '# 真标题\n'.length + '```\n# 假标题\n```\n'.length);
+    });
+
+    test('行内的井号（非行首）不识别', () {
+      const text = '正文里有 # 不是标题';
+      expect(extractHeadings(text), isEmpty);
+    });
+
+    test('井号后无空白（#no）不识别', () {
+      const text = '#no space';
+      expect(extractHeadings(text), isEmpty);
+    });
+
+    test('空正文返回空列表', () {
+      expect(extractHeadings(''), isEmpty);
+      expect(extractHeadings('   只有空白   '), isEmpty);
+    });
+  });
 }

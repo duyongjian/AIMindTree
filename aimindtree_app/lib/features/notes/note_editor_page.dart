@@ -66,11 +66,32 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   /// 本笔记提取出的知识点（P1-5：笔记详情展示并可跳转）。
   List<KnowledgePoint> _kps = <KnowledgePoint>[];
 
+  /// 目录 / 大纲：点击「目录」时即时从正文抽取，供右侧抽屉展示。
+  List<MarkdownHeading> _tocHeadings = const <MarkdownHeading>[];
+
+  /// Scaffold 句柄：用于打开右侧「目录」抽屉（endDrawer）。
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
+
+  /// 上一次正文 / 标题内容：用于区分「改了文字」与「仅移动光标」，
+  /// 避免纯选区变化（点击目录跳转、点进输入框）误标「●未保存」。
+  String _lastTitle = '';
+  String _lastBody = '';
+
   @override
   void initState() {
     super.initState();
-    _titleCtrl.addListener(() => setState(() => _dirty = true));
-    _bodyCtrl.addListener(() => setState(() => _dirty = true));
+    _titleCtrl.addListener(() {
+      if (_titleCtrl.text != _lastTitle) {
+        _lastTitle = _titleCtrl.text;
+        setState(() => _dirty = true);
+      }
+    });
+    _bodyCtrl.addListener(() {
+      if (_bodyCtrl.text != _lastBody) {
+        _lastBody = _bodyCtrl.text;
+        setState(() => _dirty = true);
+      }
+    });
     if (widget.noteId != null) _load();
   }
 
@@ -89,6 +110,9 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         .getSingleOrNull();
     if (row == null) return;
     setState(() {
+      // 先把「上次内容」同步成将要赋的值，避免下面赋值触发监听器误标未保存。
+      _lastTitle = row.title;
+      _lastBody = row.contentMd;
       _titleCtrl.text = row.title;
       _bodyCtrl.text = row.contentMd;
       _note = Note(
@@ -434,41 +458,115 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   }
 
   /// P1-5：本笔记提取的知识点区（正文下方），逐条可点进详情 / 老师模式。
+  ///
+  /// 用 [ExpansionTile] 包成**可折叠**区域（用户要求「下面提取知识点的展示
+  /// 应该是可供隐藏的」）：默认展开，点标题栏的箭头即可收起 / 再展开。
+  /// 折叠态下只保留标题行（含数量），不占用正文下方的纵向空间。
   Widget _buildKpSection() {
     if (_note == null) return const SizedBox.shrink();
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(color: Colors.grey.shade50),
+    return ExpansionTile(
+      initiallyExpanded: true,
+      tilePadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+      backgroundColor: Colors.grey.shade50,
+      collapsedBackgroundColor: Colors.grey.shade50,
+      title: Text(
+        '本笔记提取的知识点（${_kps.length}）',
+        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+      ),
+      childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      children: [
+        if (_kps.isEmpty)
+          const Text(
+            '还没有知识点，点右上角「提取知识点」试试。',
+            style: TextStyle(fontSize: 12, color: Colors.grey),
+          )
+        else
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final kp in _kps)
+                ActionChip(
+                  label: Text(
+                    kp.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  avatar: const Icon(Icons.lightbulb_outline, size: 16),
+                  onPressed: () => _openKp(kp),
+                ),
+            ],
+          ),
+      ],
+    );
+  }
+
+  /// 打开「目录 / 大纲」抽屉：先按当前正文即时抽取标题，再拉开右侧抽屉。
+  void _openToc() {
+    setState(() => _tocHeadings = extractHeadings(_bodyCtrl.text));
+    _scaffoldKey.currentState?.openEndDrawer();
+  }
+
+  /// 目录项点击：把正文光标跳到对应标题行行首（[MarkdownHeading.offset]
+  /// 已指向行首），并把焦点还给编辑框，便于就地编辑。
+  void _jumpToHeading(MarkdownHeading h) {
+    final offset = h.offset.clamp(0, _bodyCtrl.text.length);
+    _bodyCtrl.selection = TextSelection.collapsed(offset: offset);
+    // 纯选区跳转不算改动：纠正可能因 selection 变化被监听误标的「未保存」。
+    if (mounted) setState(() => _dirty = false);
+    _bodyFocus.requestFocus();
+  }
+
+  /// 目录 / 大纲抽屉：按标题级别缩进展示，点击跳转。
+  Widget _buildTocDrawer() {
+    final headings = _tocHeadings;
+    return Drawer(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            '本笔记提取的知识点（${_kps.length}）',
-            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-          ),
-          const SizedBox(height: 6),
-          if (_kps.isEmpty)
-            const Text(
-              '还没有知识点，点右上角「提取知识点」试试。',
-              style: TextStyle(fontSize: 12, color: Colors.grey),
-            )
-          else
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: [
-                for (final kp in _kps)
-                  ActionChip(
-                    label: Text(
-                      kp.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    avatar: const Icon(Icons.lightbulb_outline, size: 16),
-                    onPressed: () => _openKp(kp),
-                  ),
-              ],
+          const DrawerHeader(
+            margin: EdgeInsets.zero,
+            child: Align(
+              alignment: Alignment.bottomLeft,
+              child: Text('目录 / 大纲',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             ),
+          ),
+          Expanded(
+            child: headings.isEmpty
+                ? const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Text(
+                        '正文暂无标题。\n用「# 一级 / ## 二级 / ### 三级 …」标记即可生成目录。',
+                        style: TextStyle(color: Colors.grey),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  )
+                : ListView.separated(
+                    itemCount: headings.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (ctx, i) {
+                      final h = headings[i];
+                      return ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.only(
+                          left: 16.0 * (h.level - 1) + 16,
+                          right: 16,
+                        ),
+                        leading: Text('H${h.level}',
+                            style: const TextStyle(
+                                color: Colors.grey, fontSize: 12)),
+                        title: Text(h.title),
+                        onTap: () {
+                          Navigator.of(ctx).pop(); // 先关抽屉再跳，避免遮挡
+                          _jumpToHeading(h);
+                        },
+                      );
+                    },
+                  ),
+          ),
         ],
       ),
     );
@@ -477,9 +575,16 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      key: _scaffoldKey,
+      endDrawer: _buildTocDrawer(),
       appBar: AppBar(
         title: Text(_note == null ? '新笔记' : (_note!.title.isEmpty ? '无标题' : _note!.title)),
         actions: [
+          IconButton(
+            onPressed: _openToc,
+            icon: const Icon(Icons.list_alt),
+            tooltip: '目录 / 大纲',
+          ),
           IconButton(
             onPressed: _busy ? null : _onSave,
             icon: const Icon(Icons.save),
