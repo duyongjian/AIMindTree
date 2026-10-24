@@ -5,14 +5,21 @@
 /// 读错一个键名），对端 pull 时读不到 → **静默回落默认值 → 数据在其他设备
 /// 上无声丢失，且不报错**。这是最难发现的一类 bug，只能靠断言挡住。
 ///
-/// 本文件两道防线：
+/// 本文件四道防线：
 /// 1. **契约层**：[kSyncTableKeys] 是 13 张表 payload 键集的唯一真相源，
 ///    任何一处增删键都必须同步改这里（否则测试红）。
-/// 2. **源码扫描**：直接从 `sync_row_map.dart`（写侧）与
+/// 2. **drift 真值层**（第四腿）：用 `PRAGMA table_info` 从**真实数据库**读出
+///    每张表的列集，断言「真实列集 − 显式排除集 == 契约键集」。
+///    前三条腿（契约 / 源码扫描 / 闭环落库）互相印证，却**都没连到 drift 的
+///    真实元数据**——若 drift 加了新列而写侧不写、读侧不读、契约里也没写，
+///    三方依然相等 → 测试全绿 → **该列照样静默丢失**。
+///    `canvas_nodes.pinned` 正是这样溜过去的（v4 就存在，直到人工复核才发现）。
+///    本腿把「新增列」逼成二选一：**进 payload，或显式声明排除**。
+/// 3. **源码扫描**：直接从 `sync_row_map.dart`（写侧）与
 ///    `sync_engine.dart`（读侧）抽取每个 `*RowToMap` / `*FromMap` 用到的键，
 ///    断言二者**严格相等**——写侧多写了键（读侧没读）或读侧读了写侧没有的
 ///    键（永远读到 null）都会红。
-/// 3. **闭环落库**：给每张表灌一份「每个键都是非默认值」的 payload，
+/// 4. **闭环落库**：给每张表灌一份「每个键都是非默认值」的 payload，
 ///    走 JSON 往返 → pull → 落库 → 逐键比对。键名错一个，落库值就会
 ///    悄悄变成默认值 → 断言红。这一道能挡住扫描层看不出的语义错位。
 library;
@@ -225,6 +232,61 @@ const Map<String, (String, String)> kSyncTableAdapters =
   'kp_groups': ('kpGroupRowToMap', '_kpGroupFromMap'),
   'note_assets': ('noteAssetRowToMap', '_noteAssetFromMap'),
 };
+
+/// **显式排除**的列：存在于 drift，但**有意不上行**（不写进 payload）。
+///
+/// 第四腿的规则是：drift 里的每一列都必须**二选一**——进 payload，或写进
+/// 这张表。否则新增列会静默丢失（`canvas_nodes.pinned` 就是前车之鉴）。
+/// 所以这个常量不是「可选的白名单」，而是**必须逐项说明理由**的账本。
+///
+/// 现有排除项（全部集中在 2 张表）：
+/// - `notes.content_hash` —— 正文内容哈希，属**本地派生的冗余列**：
+///   对端按 `content_md` 同步后自行重算即可，上行没有意义。
+/// - `ai_sessions.model_id` / `tutor_state` / `difficulty` —— 老师模式
+///   设计 §5.1 明确记录「有意不上行」：pull 时被重置为默认。本项目当前
+///   不用这三列，无害。
+const Map<String, Set<String>> kSyncExcludedColumns = <String, Set<String>>{
+  'notes': <String>{'content_hash'},
+  'ai_sessions': <String>{'difficulty', 'model_id', 'tutor_state'},
+};
+
+// ============ 第四腿工具：drift 真实列集 ============
+
+/// 读一张表在**真实数据库**里的列集（SQL 名，snake_case）。
+///
+/// 用 `PRAGMA table_info` 而不是源码扫描：源码扫描只是把 drift 的 Dart
+/// 声明再抄一遍，仍属于「自证」；PRAGMA 连的是**运行时真实元数据**，
+/// 是唯一能发现「drift 加了列但没人同步」的查法。
+///
+/// ⚠️ PRAGMA 返回的是 **SQL 列名**（`canvas_id` / `data_base64`），
+/// 不是 drift 的 Dart 属性名（`canvasId` / `dataBase64`）——契约
+/// [kSyncTableKeys] 用的就是 SQL 名，两边直接可比，不要做名字转换。
+Future<Set<String>> _realColumns(AppDatabase db, String table) async {
+  final rows = await db.customSelect('PRAGMA table_info($table)').get();
+  return <String>{
+    for (final r in rows) r.data['name'] as String,
+  };
+}
+
+/// 第四腿的核心比较：把 drift 真实列集与 payload 契约对齐。
+///
+/// 返回两个差集：
+/// - [missing]：drift 有、但**没进 payload** 的列 → **新列漏上行**（危险）；
+/// - [extra]：payload 里有、但 drift **没有**的列 → 契约写错/列被删（拼写错）。
+///
+/// 做成纯函数是为了能对它本身写单测——护栏必须能「红」，否则等于没加
+/// （见「第四腿自检」那一组）。
+({Set<String> missing, Set<String> extra}) _compareColumns({
+  required Set<String> realColumns,
+  required Set<String> excluded,
+  required Set<String> contract,
+}) {
+  final expected = realColumns.difference(excluded);
+  return (
+    missing: expected.difference(contract),
+    extra: contract.difference(expected),
+  );
+}
 
 // ============ 源码扫描工具 ============
 
@@ -757,6 +819,130 @@ void main() {
         expect(kSyncTableAdapters.containsKey(table), isTrue,
             reason: '$table 缺少 adapter 映射');
       }
+    });
+  });
+
+  group('第四腿：drift 真实列集 ↔ payload 键集（PRAGMA 真查库）', () {
+    late AppDatabase db;
+
+    setUp(() {
+      db = AppDatabase(NativeDatabase.memory());
+    });
+
+    tearDown(() async {
+      await db.close();
+    });
+
+    for (final table in kSyncTableKeys.keys) {
+      test('$table: 真实列集 − 排除集 == 契约键集', () async {
+        final real = await _realColumns(db, table);
+        final excluded = kSyncExcludedColumns[table] ?? const <String>{};
+        final contract = kSyncTableKeys[table]!;
+
+        final diff = _compareColumns(
+          realColumns: real,
+          excluded: excluded,
+          contract: contract,
+        );
+
+        expect(
+          diff.missing,
+          isEmpty,
+          reason: '$table：drift 新增了列但没进 payload → 该列会静默丢失。\n'
+              '  漏上行的列: ${diff.missing}\n'
+              '  处理方式二选一：① 在 sync_row_map.dart 写它 + 在 '
+              'sync_engine.dart 读它 + 在 kSyncTableKeys 里加它；'
+              '② 若有意不上行，把它写进 kSyncExcludedColumns 并说明理由。',
+        );
+        expect(
+          diff.extra,
+          isEmpty,
+          reason: '$table：契约里写了 drift 不存在的列 → 列名拼错或列已被删。\n'
+              '  多余的列: ${diff.extra}',
+        );
+      });
+    }
+
+    test('排除集本身合法：每一项都真实存在于 drift 列集', () async {
+      // 否则「排除集里写错一个列名」会让它**静默失效**（排除了一个不存在的
+      // 列，真正的列反而没人管）——这正是本护栏要防的那类洞。
+      for (final entry in kSyncExcludedColumns.entries) {
+        final table = entry.key;
+        expect(
+          kSyncTableKeys.containsKey(table),
+          isTrue,
+          reason: '排除集里的 $table 不在同步表清单里',
+        );
+        final real = await _realColumns(db, table);
+        for (final col in entry.value) {
+          expect(
+            real.contains(col),
+            isTrue,
+            reason: '$table.$col 在排除集里，但 drift 里没有这一列'
+                '（列名写错 → 排除失效，真正的新列没人管）',
+          );
+        }
+      }
+    });
+
+    test('排除集只影响该表自己的列（不会波及其它表）', () async {
+      // 「排除」是**按表**的：ai_sessions 排除了 model_id，不代表
+      // ai_messages / cards 的 model_id 可以跟着不上行。
+      for (final table in kSyncTableKeys.keys) {
+        if (kSyncExcludedColumns.containsKey(table)) continue;
+        for (final col in kSyncExcludedColumns.values.expand((s) => s)) {
+          final real = await _realColumns(db, table);
+          if (!real.contains(col)) continue;
+          expect(
+            kSyncTableKeys[table]!.contains(col),
+            isTrue,
+            reason: '$table 有列 $col，但该表没有把它写进排除集，'
+                '却也没进 payload → 漏上行',
+          );
+        }
+      }
+    });
+  });
+
+  group('第四腿自检：护栏本身必须能红（不能是恒真断言）', () {
+    test('drift 多出一列（模拟新增列）→ 必须报出 missing', () {
+      final diff = _compareColumns(
+        realColumns: <String>{'id', 'name', 'brand_new_column'},
+        excluded: const <String>{},
+        contract: <String>{'id', 'name'},
+      );
+      expect(diff.missing, <String>{'brand_new_column'});
+      expect(diff.extra, isEmpty);
+    });
+
+    test('契约多写一列（模拟列名拼错）→ 必须报出 extra', () {
+      final diff = _compareColumns(
+        realColumns: <String>{'id', 'name'},
+        excluded: const <String>{},
+        contract: <String>{'id', 'name', 'nam'},
+      );
+      expect(diff.extra, <String>{'nam'});
+      expect(diff.missing, isEmpty);
+    });
+
+    test('显式排除的列不算 missing（排除机制本身有效）', () {
+      final diff = _compareColumns(
+        realColumns: <String>{'id', 'content_hash'},
+        excluded: const <String>{'content_hash'},
+        contract: <String>{'id'},
+      );
+      expect(diff.missing, isEmpty);
+      expect(diff.extra, isEmpty);
+    });
+
+    test('排除集写错列名 → 真正的列会变成 missing（不能静默放过）', () {
+      // 排除集写成 'content_hahs'（拼错）→ 真正的 content_hash 没人管 → 红。
+      final diff = _compareColumns(
+        realColumns: <String>{'id', 'content_hash'},
+        excluded: const <String>{'content_hahs'},
+        contract: <String>{'id'},
+      );
+      expect(diff.missing, <String>{'content_hash'});
     });
   });
 
