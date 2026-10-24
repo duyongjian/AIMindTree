@@ -274,6 +274,14 @@ const Map<String, Set<String>> kSyncExcludedColumns = <String, Set<String>>{
 /// [kSyncTableKeys] 用的就是 SQL 名，两边直接可比，不要做名字转换。
 Future<Set<String>> _realColumns(AppDatabase db, String table) async {
   final rows = await db.customSelect('PRAGMA table_info($table)').get();
+  // 空集说明「这张表根本没查到」（表名写错 / DB 未建表 / PRAGMA 在某种方言下
+  // 不返回行）。不拦这一下的话，下面会走成 extra = 全部契约键，报错显示成
+  // 「多余的列：{…}」——真实原因被埋掉，排查要多绕一步。
+  expect(
+    rows,
+    isNotEmpty,
+    reason: 'PRAGMA table_info($table) 返回空 —— 这张表不存在？',
+  );
   return <String>{
     for (final r in rows) r.data['name'] as String,
   };
@@ -954,6 +962,21 @@ void main() {
         contract: <String>{'id'},
       );
       expect(diff.missing, <String>{'content_hash'});
+    });
+
+    test('表查不到时直接报「表不存在」，而不是「多余的列：全部契约键」', () async {
+      // 否则真实原因（表没查到）被埋进 extra 里，排查要多绕一步。
+      final db = AppDatabase(NativeDatabase.memory());
+      addTearDown(db.close);
+      await expectLater(
+        _realColumns(db, 'no_such_table_xyz'),
+        throwsA(
+          predicate<TestFailure>(
+            (e) => e.message?.contains('表不存在') ?? false,
+            '失败信息应直接指向「表不存在」这个根因',
+          ),
+        ),
+      );
     });
   });
 
