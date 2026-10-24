@@ -158,7 +158,8 @@ buildSessionContext(turns, maxMessages: 10, maxChars: 4000, header: <默认>)
 | `buildSessionContext` 纯函数 | `features/shared/session_context.dart`（2 字段记录、绝不重排） | ✅ **已落地**（T02；E1–E19 / A1–A9 已覆盖） |
 
 > **给实现方的两条提醒**：
-> ① **`isExplainMessage` 必须落在共享层**（如 `lib/features/shared/` 或 `lib/core/`），**不要内联在 `teacher_page.dart` 里** —— 否则 Agent 侧与老师模式会出现两份判别逻辑，日后必然分叉（T11 的断言前提就是「唯一判别点」）。
+> ① **`isExplainMessage` 必须全仓只有一处判别逻辑**，**不要内联在 `teacher_page.dart` 里** —— 否则 Agent 侧与老师模式会出现两份判别逻辑，日后必然分叉（T11 的断言前提就是「唯一判别点」）。
+> **落点由内聚性决定，不强制共享层**：实际已落在 `features/teacher/teacher_session_controller.dart`（`dify-t6` 是老师模式专属任务码，Agent 侧不消费这个判别 → 放老师模式自己的 controller 里是内聚的，比硬塞共享层更合理）。验收标准是「**唯一判别点**」，**不是**「必须在 `lib/features/shared/`」—— 后者会把后来人引去搬一个本不需要搬的函数。
 > ② **不要引入 `package:meta`** —— `pubspec.yaml` 未声明 `meta:`，`import 'package:meta/meta.dart'` 会触发 `depend_on_referenced_packages` lint → **门禁失败**。测试接缝一律用**纯文档注释**（当前实现已正确做到）。
 
 ---
