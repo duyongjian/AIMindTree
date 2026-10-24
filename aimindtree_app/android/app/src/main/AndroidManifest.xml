@@ -1,4 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 联网权限：release 包**必须**在这里声明。
+         Flutter 模板只往 debug/ 与 profile/ 的 manifest 里加 INTERNET（那是给
+         hot reload 用的），release 构建不合并那两个文件。缺了它整机无法建立
+         socket，Dart 侧表现为 SocketException「No address associated with
+         hostname」——看起来像 DNS 被污染，实际是应用层被系统拒绝：
+         2026-10-24 实测 dist 里的 release APK 无此权限，手机端所有网络请求
+         （同步 / AI）全部失败，桌面端不受影响。 -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="aimindtree_app"
         android:name="${applicationName}"
