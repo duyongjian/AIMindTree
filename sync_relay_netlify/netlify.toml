@@ -6,17 +6,19 @@
 #   2. 本文件已声明 functions 目录与 rewrite 路由，无需额外配置即可部署。
 #   3. 默认是 preview 部署；确认无误后 `npx netlify deploy --prod` 推生产。
 #
-# 路由说明：Netlify Functions 不像 Vercel 有 `api/[[...path]]` 文件级 catch-all，
-# 因此用 rewrite（200）把 `/`、`/auth/*`、`/sync/*` 全部转发到同一个函数
-# `.netlify/functions/sync`。rewrite 是内部代理，函数内 `request.url` 仍保留原始
-# 路径（如 `/auth/register`），relay.js 据此分发，契约与另四版逐字一致。
+# 路由说明：Netlify Functions 没有 Vercel 那种文件级 catch-all，故用 rewrite（200）
+# 把 `/`、`/auth/*`、`/sync/*` 全部转发到同一个函数 `.netlify/functions/sync`，并带
+# `:splat` 保留原始子路径（否则 rewrite 会丢掉 /auth、/sync 前缀）。函数内
+# `sync.js` 再剥掉 `/.netlify/functions/sync` 挂载前缀，还原出逻辑路径，使
+# relay.js 的契约匹配（`endsWith('/auth/register')` 等）稳定生效。无论 Netlify
+# 是保留原始 URL 还是改写为挂载路径，路由都正确。
 
 [build]
   # 纯 Functions 项目，无需构建命令；publish 指向一个占位目录（Netlify 要求 publish 存在）。
   publish = "public"
   functions = "netlify/functions"
 
-# 把同步中继的所有路径收口到同一个 Netlify Function（rewrite，非 301）。
+# 把同步中继的所有路径收口到同一个 Netlify Function（rewrite，非 301）。带 :splat 保留子路径。
 [[redirects]]
   from = "/"
   to = "/.netlify/functions/sync"
@@ -24,10 +26,10 @@
 
 [[redirects]]
   from = "/auth/*"
-  to = "/.netlify/functions/sync"
+  to = "/.netlify/functions/sync/auth/:splat"
   status = 200
 
 [[redirects]]
   from = "/sync/*"
-  to = "/.netlify/functions/sync"
+  to = "/.netlify/functions/sync/sync/:splat"
   status = 200

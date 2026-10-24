@@ -6,10 +6,13 @@
  *   1. 用 ``@netlify/blobs`` 的 ``getStore`` 拿到站点级 KV 存储（凭证在 Functions
  *      内自动注入，无需手动配置 token）；
  *   2. 把 Blobs 适配成 relay.js 需要的 ``{get, set, listKeys}`` 接口；
- *   3. 调 ``handleFetch(request, store)`` 跑核心逻辑。
+ *   3. 把 Netlify 的「函数挂载前缀」还原成逻辑路径，再调 ``handleFetch``。
  *
- * 路由由仓库根 ``netlify.toml`` 的 rewrite 把 ``/``、``/auth/*``、``/sync/*``
- * 全部转发到本函数（见 netlify.toml 注释）。
+ * 路由由仓库根 ``netlify.toml`` 的 rewrite（200）把 ``/``、``/auth/*``、``/sync/*``
+ * 全部转发到本函数；转发时带 ``:splat`` 保留原始子路径，故本函数收到的 URL 可能是
+ * ``/.netlify/functions/sync/auth/register``（rewrite 改写后）或 ``/auth/register``
+ * （Netlify 保留原始 URL 时）。无论哪种，[toLogicalRequest] 都按 ``FN_PREFIX``
+ * 还原出逻辑路径，保证 relay.js 的契约匹配（endsWith('/auth/register') 等）稳定生效。
  */
 
 import { getStore } from '@netlify/blobs';
@@ -35,6 +38,27 @@ const store = {
   },
 };
 
+// Netlify Functions 的挂载前缀（见 netlify.toml 的 rewrite）。
+const FN_PREFIX = '/.netlify/functions/sync';
+
+/**
+ * 把请求还原成「逻辑 URL」：剥掉函数挂载前缀，保留原始子路径
+ * （``/auth/register``、``/sync/push`` …）。
+ */
+function toLogicalRequest(request) {
+  const url = new URL(request.url);
+  let pathname = url.pathname;
+  if (pathname.startsWith(FN_PREFIX)) {
+    pathname = pathname.slice(FN_PREFIX.length) || '/';
+  }
+  const logicalUrl = `${url.origin}${pathname}${url.search}`;
+  return new Request(logicalUrl, request);
+}
+
 export default async (request, context) => {
-  return handleFetch(request, store, context && context.env ? context.env : {});
+  return handleFetch(
+    toLogicalRequest(request),
+    store,
+    context && context.env ? context.env : {},
+  );
 };

@@ -1,18 +1,19 @@
 /// SettingsPage 中的「同步」分区。
 ///
-/// 多后端 UI（Cloudflare / 腾讯云 CloudBase / Vercel / EdgeOne Pages 四选一；
-/// 原 llm_server 目标已移除）：顶部后端选择器 → 当前后端的账号卡片
+/// 多后端 UI（Cloudflare / 腾讯云 CloudBase / Vercel / EdgeOne Pages / Netlify
+/// 五选一；原 llm_server 目标已移除）：顶部后端选择器 → 当前后端的账号卡片
 /// （自助注册/登录）→ 上传/拉取按钮 → 「服务器与网络」卡片（自定义地址 +
 /// HTTP 代理 + 测试连接）。
 ///
 /// 要点：
-/// - 四个中继的 HTTP 契约逐字一致，App 侧只换地址；四个后端的账号体系
+/// - 五个中继的 HTTP 契约逐字一致，App 侧只换地址；五个后端的账号体系
 ///   **互相独立**（同一用户在 CF 与 CloudBase 上是不同账号），用户名/令牌
 ///   按后端隔离存储（见 [SyncConfig]）；
-/// - CF / CloudBase 地址已内置，用户无需填写即可开箱即用；Vercel / EdgeOne
-///   域名待部署回填，选中/使用时会明确提示「待配置」，不会静默失败；
+/// - CF / CloudBase 地址已内置，用户无需填写即可开箱即用；Vercel（已填部署
+///   域名）/ EdgeOne / Netlify 中选未回填的会明确提示「待配置」，不会静默失败；
 /// - EdgeOne Pages 是国内永久免费链路，但请求体 1MB 硬限，大图片附件（
 ///   note_assets）会被本机切批逻辑标记失败，建议这类数据走 CF / CloudBase；
+/// - Netlify 为海外/备份链路（函数跑美/欧单区，国内直连可达性差），非国内首选；
 /// - 换中继 / 走代理都在「服务器与网络」卡里配，不必重新编译 App。
 library;
 
@@ -409,6 +410,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     final builtInEmpty = switch (b) {
       SyncBackend.vercel => SyncConfig.kSyncVercelDefaultBaseUrl.isEmpty,
       SyncBackend.edgeone => SyncConfig.kSyncEoDefaultBaseUrl.isEmpty,
+      SyncBackend.netlify => SyncConfig.kSyncNetlifyDefaultBaseUrl.isEmpty,
       _ => false,
     };
     if (builtInEmpty) return '${b.label}（待配置）';

@@ -1,13 +1,14 @@
 /// SyncConfig：多后端同步配置（T03 演进：Cloudflare / CloudBase / Vercel /
-/// EdgeOne Pages 四套链路，一人一条）。
+/// EdgeOne Pages / Netlify 五套链路，一人一条）。
 ///
-/// 四个同步中继的 HTTP 契约逐字一致（同样的 5 端点、同样字段、同样 Bearer
+/// 五个同步中继的 HTTP 契约逐字一致（同样的 5 端点、同样字段、同样 Bearer
 /// 鉴权），App 侧换后端只换地址；原 llm_server 同步目标已随「中继化」移除。
 ///
 /// EdgeOne Pages 是国内永久免费（官方 FAQ 明示）的边缘托管，1GB KV + 不限流量，
-/// 作国内主力的第三/第四链路；其请求体硬限 1MB，故本机 push 对 edgeone 后端
+/// 作国内主力的第四链路；其请求体硬限 1MB，故本机 push 对 edgeone 后端
 /// 把单批字节预算与单条 envelope 硬上限都收紧到 850KB（见 [SyncBackend] 的
-/// 预算 getter），避免大图片附件把整批打 413。
+/// 预算 getter），避免大图片附件把整批打 413。Netlify 为海外/备份第五链路
+/// （函数跑美/欧单区，国内直连可达性差，非国内首选），预算沿用默认 4MB / 6MB。
 ///
 /// 存储口径：
 /// - 每个后端三件套独立存放：地址 / 用户名（明文 prefs）+ 每用户令牌
@@ -28,7 +29,8 @@ enum SyncBackend {
   cloudflare,
   cloudbase,
   vercel,
-  edgeone;
+  edgeone,
+  netlify;
 
   /// UI 展示名（中文）。
   String get label => switch (this) {
@@ -36,6 +38,7 @@ enum SyncBackend {
         SyncBackend.cloudbase => '腾讯云 CloudBase',
         SyncBackend.vercel => 'Vercel',
         SyncBackend.edgeone => 'EdgeOne Pages',
+        SyncBackend.netlify => 'Netlify',
       };
 
   /// pref / SecretStore key 的稳定后缀（不随枚举顺序变化）。
@@ -46,6 +49,7 @@ enum SyncBackend {
         SyncBackend.cloudbase => 'cb',
         SyncBackend.vercel => 'vc',
         SyncBackend.edgeone => 'eo',
+        SyncBackend.netlify => 'nf',
       };
 
   /// 内置默认地址（用户未覆盖时回落）。
@@ -54,11 +58,12 @@ enum SyncBackend {
         SyncBackend.cloudbase => SyncConfig.kSyncCbDefaultBaseUrl,
         SyncBackend.vercel => SyncConfig.kSyncVercelDefaultBaseUrl,
         SyncBackend.edgeone => SyncConfig.kSyncEoDefaultBaseUrl,
+        SyncBackend.netlify => SyncConfig.kSyncNetlifyDefaultBaseUrl,
       };
 
   /// 单批 push 字节预算（按后端）。
   ///
-  /// 默认 4MB 与 CF / CloudBase / Vercel 的放宽上限一致；edgeone 受平台
+  /// 默认 4MB 与 CF / CloudBase / Vercel / Netlify 的放宽上限一致；edgeone 受平台
   /// 请求体 1MB 硬限约束，收紧到 850KB（留 ~50KB 给 HTTP 头部与 JSON
   /// 结构开销，远小于中继侧 900KB 的 413 守卫）。[SyncEngine] 据此贪心切批。
   int get pushBatchBudgetBytes => switch (this) {
@@ -96,12 +101,14 @@ class SyncConfig {
   static const String kSyncCbDefaultBaseUrl =
       'https://mindtree-d7glv6crkd8e9fba9-1409358097.ap-shanghai.app.tcloudbase.com/sync-relay';
 
-  /// 内置默认地址：Vercel 同步中继（sync_relay_vercel）。
+  /// 内置默认地址：Vercel 同步中继（sync_relay_vercel，已部署）。
   ///
-  /// ⚠️ 域名待 Vercel 部署完成后由主理人回填；空串表示「尚未配置」——
-  /// [urlOf] 对 vercel 返回空串，UI 据此禁用上传/拉取并提示，不会静默失败。
-  /// 用户手填的覆盖值不受影响（优先于内置默认）。
-  static const String kSyncVercelDefaultBaseUrl = '';
+  /// ⚠️ 必须带 `/api` 前缀：Vercel 把 `api/` 目录下的函数挂在 `/api/*` 下
+  /// （见 `vercel.json` 的 `api/**/*.js` 配置，无 rewrite），App 的
+  /// `<base>/auth/register`、`<base>/sync/push` 因此必须落在 `/api` 之下。
+  /// 若日后改为根路径挂载（加 rewrite），删掉 `/api` 即可。用户手填的覆盖值优先。
+  static const String kSyncVercelDefaultBaseUrl =
+      'https://aimindtree-syncrelayvercel.vercel.app/api';
 
   /// 内置默认地址：EdgeOne Pages 同步中继（sync_relay_eo）。
   ///
@@ -110,6 +117,15 @@ class SyncConfig {
   /// 不会静默失败。用户手填的覆盖值（EdgeOne Pages 控制台分配的
   /// `https://<project>.pages.dev`）不受影响，优先于内置默认。
   static const String kSyncEoDefaultBaseUrl = '';
+
+  /// 内置默认地址：Netlify 同步中继（sync_relay_netlify）。
+  ///
+  /// ⚠️ 域名待 Netlify 部署完成后回填；空串表示「尚未配置」——与另两版同口径：
+  /// UI 据此显示「（待配置）」并禁用上传/拉取，不会静默失败。Netlify Functions
+  /// 经 `netlify.toml` rewrite 把 `/`、`/auth/*`、`/sync/*` 收口到同一函数，
+  /// 故内置默认只需根域名（不含 `/api` 之类前缀）；用户手填覆盖值优先。
+  /// 注：Netlify 函数跑在美/欧单区，国内直连可达性差，定位海外/备份后端。
+  static const String kSyncNetlifyDefaultBaseUrl = '';
 
   /// 单批 push 字节预算默认值（4MB）。
   ///

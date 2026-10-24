@@ -1,9 +1,10 @@
-/// SyncConfig 多后端（Cloudflare / 腾讯云 CloudBase / Vercel / EdgeOne Pages）
-/// 单元测试。
+/// SyncConfig 多后端（Cloudflare / 腾讯云 CloudBase / Vercel / EdgeOne Pages /
+/// Netlify）单元测试。
 ///
-/// 覆盖：四后端默认/覆盖地址、cloudflare 沿用旧 key（老用户数据零迁移）、
+/// 覆盖：五后端默认/覆盖地址、cloudflare 沿用旧 key（老用户数据零迁移）、
 /// selectedBackend 持久化、每后端账号独立隔离、clear() 清所有后端、
-/// Vercel / EdgeOne 内置默认为空串时 urlOf 返回空、各后端 push 字节预算取值。
+/// Vercel 已回填部署域名 / EdgeOne / Netlify 内置默认未填时 urlOf 返回空、
+/// 各后端 push 字节预算取值。
 library;
 
 import 'package:aimindtree_app/core/secret_store.dart';
@@ -29,13 +30,14 @@ void main() {
       expect(SyncBackend.cloudbase.label, '腾讯云 CloudBase');
       expect(SyncBackend.vercel.label, 'Vercel');
       expect(SyncBackend.edgeone.label, 'EdgeOne Pages');
+      expect(SyncBackend.netlify.label, 'Netlify');
       expect(
         SyncBackend.values.map((b) => b.keySuffix).toList(),
-        <String>['cf', 'cb', 'vc', 'eo'],
+        <String>['cf', 'cb', 'vc', 'eo', 'nf'],
       );
     });
 
-    test('四个后端各自读内置默认地址', () {
+    test('五个后端各自读内置默认地址', () {
       expect(
         config.urlOf(SyncBackend.cloudflare),
         SyncConfig.kSyncCfDefaultBaseUrl,
@@ -44,19 +46,28 @@ void main() {
         config.urlOf(SyncBackend.cloudbase),
         SyncConfig.kSyncCbDefaultBaseUrl,
       );
-      // Vercel / EdgeOne 域名待部署回填：内置默认为空串。
-      expect(SyncConfig.kSyncVercelDefaultBaseUrl, '');
+      // Vercel 已部署，内置默认非空（带 /api 前缀）；EdgeOne / Netlify 待回填，空串。
+      expect(
+        config.urlOf(SyncBackend.vercel),
+        SyncConfig.kSyncVercelDefaultBaseUrl,
+      );
+      expect(
+        SyncConfig.kSyncVercelDefaultBaseUrl,
+        'https://aimindtree-syncrelayvercel.vercel.app/api',
+      );
       expect(SyncConfig.kSyncEoDefaultBaseUrl, '');
-      expect(config.urlOf(SyncBackend.vercel), '');
+      expect(SyncConfig.kSyncNetlifyDefaultBaseUrl, '');
       expect(config.urlOf(SyncBackend.edgeone), '');
+      expect(config.urlOf(SyncBackend.netlify), '');
     });
 
     test('push 字节预算 / 单条硬上限按后端取值（edgeone 收紧 850KB）', () {
-      // 默认（CF / CloudBase / Vercel）：4MB / 6MB。
+      // 默认（CF / CloudBase / Vercel / Netlify）：4MB / 6MB。
       for (final b in [
         SyncBackend.cloudflare,
         SyncBackend.cloudbase,
         SyncBackend.vercel,
+        SyncBackend.netlify,
       ]) {
         expect(b.pushBatchBudgetBytes, SyncConfig.kSyncPushBatchBudgetBytes);
         expect(b.maxEnvelopeBytes, SyncConfig.kSyncMaxEnvelopeBytes);
@@ -82,12 +93,15 @@ void main() {
         config.urlOverrideOf(SyncBackend.cloudbase),
         'https://cb.example.com/',
       );
-      // 互不影响：其他后端仍是各自默认。
+      // 互不影响：其他后端仍是各自默认（Vercel 已回填部署域名）。
       expect(
         config.urlOf(SyncBackend.cloudflare),
         SyncConfig.kSyncCfDefaultBaseUrl,
       );
-      expect(config.urlOf(SyncBackend.vercel), '');
+      expect(
+        config.urlOf(SyncBackend.vercel),
+        SyncConfig.kSyncVercelDefaultBaseUrl,
+      );
 
       // 空串 → 清除覆盖 → 回落内置默认。
       await config.setUrl(SyncBackend.cloudbase, '   ');
@@ -98,15 +112,24 @@ void main() {
       );
     });
 
-    test('Vercel 内置默认为空时 urlOf 返回空；用户手填后返回手填值', () async {
-      expect(config.urlOf(SyncBackend.vercel), '');
+    test('Vercel 内置默认已回填部署域名；用户手填覆盖优先', () async {
+      // Vercel 已部署，内置默认非空。
+      expect(
+        config.urlOf(SyncBackend.vercel),
+        SyncConfig.kSyncVercelDefaultBaseUrl,
+      );
+      expect(
+        SyncConfig.kSyncVercelDefaultBaseUrl,
+        startsWith('https://aimindtree-syncrelayvercel.vercel.app/api'),
+      );
+      // 用户手填仍优先于内置默认。
       await config.setUrl(
         SyncBackend.vercel,
-        'https://mindtree-sync.vercel.app',
+        'https://my-override.vercel.app/api',
       );
       expect(
         config.urlOf(SyncBackend.vercel),
-        'https://mindtree-sync.vercel.app',
+        'https://my-override.vercel.app/api',
       );
     });
 
@@ -152,7 +175,7 @@ void main() {
       expect(config.selectedBackend, SyncBackend.cloudflare);
     });
 
-    test('三个后端账号互相独立（A 登录不影响 B）', () async {
+    test('后端账号互相独立（A 登录不影响 B/C）', () async {
       await config.setUsername(SyncBackend.cloudflare, 'alice');
       await config.setUserToken(SyncBackend.cloudflare, 'cf-token');
 
@@ -161,11 +184,13 @@ void main() {
       expect(await config.resolveUserToken(SyncBackend.cloudbase), isNull);
       expect(await config.isLoggedIn(SyncBackend.cloudbase), isFalse);
       expect(await config.isLoggedIn(SyncBackend.vercel), isFalse);
+      expect(await config.isLoggedIn(SyncBackend.netlify), isFalse);
 
-      // key 也按后缀隔离（cf / cb / vc）。
+      // key 也按后缀隔离（cf / cb / vc / nf）。
       expect(prefs.getString('aimindtree.sync.cf_username'), 'alice');
       expect(prefs.getString('aimindtree.sync.cb_username'), isNull);
       expect(prefs.getString('aimindtree.sync.vc_username'), isNull);
+      expect(prefs.getString('aimindtree.sync.nf_username'), isNull);
       expect(await store.get('aimindtree.sync.cb_user_token'), isNull);
     });
 
@@ -215,12 +240,15 @@ void main() {
       // 选中项回落默认 cloudflare，代理清掉。
       expect(config.selectedBackend, SyncBackend.cloudflare);
       expect(config.cfProxy, isNull);
-      // 地址清空后回落到内置默认（CF/CB 有默认，Vercel 为空）。
+      // 地址清空后回落到内置默认（CF/CB/Vercel 均有默认）。
       expect(
         config.urlOf(SyncBackend.cloudflare),
         SyncConfig.kSyncCfDefaultBaseUrl,
       );
-      expect(config.urlOf(SyncBackend.vercel), '');
+      expect(
+        config.urlOf(SyncBackend.vercel),
+        SyncConfig.kSyncVercelDefaultBaseUrl,
+      );
     });
 
     test('clear() 顺带清掉历史遗留 key（llm 目标 / CF 直存共享 token）', () async {
