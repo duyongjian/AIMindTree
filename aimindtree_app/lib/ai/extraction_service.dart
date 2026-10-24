@@ -485,9 +485,9 @@ class ExtractionService {
     final statusStore = SyncStatusStore(prefs);
 
     SyncApi api;
-    // 多后端（Cloudflare / CloudBase / Vercel）：按用户选中的后端装配，
-    // 地址与每用户令牌都按后端隔离。未配地址（如 Vercel 域名待回填）或未
-    // 登录（没有每用户令牌）时退 MockSyncApi 占位——自动同步暂不可用，
+    // 多后端（Cloudflare / EdgeOne Pages / Netlify）：按用户选中的后端装配，
+    // 地址与每用户令牌都按后端隔离。未配地址（如 EdgeOne Pages 域名待回填）
+    // 或未登录（没有每用户令牌）时退 MockSyncApi 占位——自动同步暂不可用，
     // 用户仍可在设置页选后端、登录后手动上传/拉取。
     final syncBackend = syncConfig.selectedBackend;
     final syncBaseUrl = syncConfig.urlOf(syncBackend);

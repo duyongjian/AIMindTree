@@ -31,7 +31,7 @@
  *    「API 访问」模式（显式 siteID + token，见 sync.mjs），读写直达 API 源站，
  *    即强一致；``kPullLookbackMs`` 仅留 1s 覆盖同毫秒边界（详见其注释）。
  * 3. **Blobs 键名允许 Unicode（≤600B、不能以 / 开头）**：本版仍沿用另四版的
- *    UTF-16 hex 编码键名，保证键格式在五个后端间一致、可迁移。
+ *    UTF-16 hex 编码键名，保证键格式在各后端间一致、可迁移。
  * 4. **请求体上限**：Netlify Functions 没有 EdgeOne 那种 1MB 硬限（平台更宽松），
  *    本版把守卫放宽到 4MB（与 CF / CloudBase 版一致），App 端若接入 netlify
  *    后端可沿用 4MB / 6MB 预算，不必收 850KB。

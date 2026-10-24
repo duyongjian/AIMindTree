@@ -33,8 +33,8 @@ import '../sync/sync_outbox_writer.dart';
 /// 单张图片的字节上限（2MB）：超出拒收。
 ///
 /// 取 2MB 的理由：outbox push 批次预算默认 4MB（[SyncConfig.kSyncPushBatchBudgetBytes]，
-/// edgeone / cloudbase 收紧到 850KB），一张图最坏情况也要能给 envelope 留出余量；
-/// base64 还会再涨 33%。注：EdgeOne / CloudBase 链路单条上限仅 850KB，大图会被标记
+/// edgeone 收紧到 850KB），一张图最坏情况也要能给 envelope 留出余量；
+/// base64 还会再涨 33%。注：EdgeOne 链路单条上限仅 850KB，大图会被标记
 /// failed，建议这类数据走 CF / Netlify。
 const int kMaxAssetBytes = 2 * 1024 * 1024;
 

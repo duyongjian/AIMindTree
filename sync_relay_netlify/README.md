@@ -7,7 +7,8 @@ Netlify **Functions（Node.js）+ Blobs** 实现。HTTP 契约与
 > 状态（2026-10-24）：**已部署到生产并全链路实测通过**。
 > 站点 `aimindtree-sync-relay`（`https://aimindtree-sync-relay.netlify.app`），
 > 注册/登录/推送/manifest/拉取 + 401/409 错误路径均验证 OK；App 侧已接为
-> **第五同步后端**（设置页五选一），`kSyncNetlifyDefaultBaseUrl` 已回填。
+> **同步后端之一**（设置页三选一：Cloudflare / EdgeOne / Netlify），
+> `kSyncNetlifyDefaultBaseUrl` 已回填。
 
 ## 调研结论（可行性）
 
@@ -189,8 +190,7 @@ NETLIFY_AUTH_TOKEN=<token> ./node_modules/.bin/netlify env:set \
 ## App 集成（已完成，第五后端）
 
 - `SyncBackend.netlify`（UI 名 `Netlify`，keySuffix `nf`），设置页后端选择器
-  **五选一**（Cloudflare / CloudBase / Vercel / EdgeOne / Netlify），账号体系
-  互相独立。
+  **三选一**（Cloudflare / EdgeOne / Netlify），账号体系互相独立。
 - `kSyncNetlifyDefaultBaseUrl` 已回填 `https://aimindtree-sync-relay.netlify.app`
   （rewrite 收口全路径，**无需 `/api` 之类前缀**；用户手填覆盖优先）。
 - push 预算：Netlify 沿用 4MB / 6MB（平台无 1MB 硬限，不必收 850KB）。

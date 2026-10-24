@@ -1,18 +1,16 @@
 /// SettingsPage 中的「同步」分区。
 ///
-/// 多后端 UI（Cloudflare / 腾讯云 CloudBase / Vercel / EdgeOne Pages / Netlify
-/// 五选一；原 llm_server 目标已移除）：顶部后端选择器 → 当前后端的账号卡片
-/// （自助注册/登录）→ 上传/拉取按钮 → 「服务器与网络」卡片（自定义地址 +
-/// HTTP 代理 + 测试连接）。
+/// 多后端 UI（Cloudflare / EdgeOne Pages / Netlify 三选一；原 llm_server
+/// 目标已移除）：顶部后端选择器 → 当前后端的账号卡片（自助注册/登录）→
+/// 上传/拉取按钮 → 「服务器与网络」卡片（自定义地址 + HTTP 代理 + 测试连接）。
 ///
 /// 要点：
-/// - 五个中继的 HTTP 契约逐字一致，App 侧只换地址；五个后端的账号体系
-///   **互相独立**（同一用户在 CF 与 CloudBase 上是不同账号），用户名/令牌
+/// - 三个中继的 HTTP 契约逐字一致，App 侧只换地址；三个后端的账号体系
+///   **互相独立**（同一用户在 CF 与 Netlify 上是不同账号），用户名/令牌
 ///   按后端隔离存储（见 [SyncConfig]）；
-/// - CF / CloudBase 地址已内置，用户无需填写即可开箱即用；Vercel（已填部署
-///   域名）/ EdgeOne / Netlify 中选未回填的会明确提示「待配置」，不会静默失败；
-/// - EdgeOne Pages 是国内永久免费链路，但请求体 1MB 硬限；CloudBase 的 HTTP
-///   访问服务网关同样实测 ~1MB 请求体硬限（413）。两者的推送预算都收紧到
+/// - Cloudflare 地址已内置，用户无需填写即可开箱即用；EdgeOne Pages 域名待部署
+///   回填、Netlify 已部署，未回填的会明确提示「待配置」，不会静默失败；
+/// - EdgeOne Pages 是国内永久免费链路，但请求体 1MB 硬限，推送预算收紧到
 ///   850KB，大图片附件（note_assets）会被本机切批逻辑标记失败，建议这类数据
 ///   走 CF / Netlify；
 /// - Netlify 为海外/备份链路（函数跑美/欧单区，国内直连可达性差），非国内首选；
@@ -34,7 +32,6 @@ import '../../data/sync/sync_config.dart';
 import '../../data/sync/sync_outbox.dart';
 import '../../data/sync/sync_scheduler.dart';
 import '../../data/sync/sync_status.dart';
-import '../../data/sync/sync_url.dart';
 
 /// 「测试连接」的单次请求预算：够绕过一次 DNS + TLS 握手，又不让用户干等。
 const Duration _kTestTimeout = Duration(seconds: 15);
@@ -179,17 +176,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
       setUserProxy(proxy.isEmpty ? null : proxy);
       if (!mounted) return;
       setState(() {});
-      // Vercel 防呆：手填 *.vercel.app 裸域名时 normalizeSyncBaseUrl 会自动补
-      // /api（Vercel 平台把 api/ 函数挂在 /api/* 下，缺前缀在平台层 404，
-      // 实测「注册失败：auth auth/register 返回 404」即此）。明确告知补过，
-      // 避免「填的 A、实际请求 B」的困惑。
-      final typedUrl = _endpoint.text.trim();
-      final normalized = normalizeSyncBaseUrl(typedUrl);
-      if (normalized.isNotEmpty && normalized != typedUrl) {
-        _snack('已自动为 Vercel 地址补充 /api 前缀：$normalized');
-      } else {
-        _snack('已保存，需重启应用后完全生效');
-      }
+      _snack('已保存，需重启应用后完全生效');
     } on Object catch (e) {
       _snack('保存失败：$e', ok: false);
     } finally {
@@ -206,7 +193,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   ///
   /// 之所以不探测根路径 `/`：CF Worker 对 `/` 固定 404，而平台级 404（地址填错、
   /// 少前缀）与业务 404 无法从状态码区分——旧实现「任意状态码判通」就把填错
-  /// 地址显示的 404 报成了「已连通」（Vercel 裸域名事故即此）。
+  /// 地址显示的 404 报成了「已连通」（这正是当初踩过的坑）。
   ///
   /// 客户端走 [createDirectHttpClient]（DoH / 代理 / 探测逻辑与真实同步链路
   /// 完全一致），测出来的结论才有意义；换一个普通 HttpClient 会得到不一样
@@ -446,8 +433,8 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
           children: [
             for (final b in SyncBackend.values)
               Tooltip(
-                // 禁用后端置灰不可点，原因经 Tooltip 可见（Vercel / CloudBase
-                // 实测有阻塞性问题，见 SyncBackend.disabledReason）。
+                // 禁用后端置灰不可点，原因经 Tooltip 可见（见
+                // [SyncBackend.disabledReason]，当前三个后端均可用）。
                 message: b.disabledReason ?? b.label,
                 child: ChoiceChip(
                   label: Text(_chipLabel(b)),
@@ -469,12 +456,11 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     );
   }
 
-  /// Chip 文案；Vercel / EdgeOne 内置域名还没回填时加「（待配置）」提示，
-  /// 回填后该提示自动消失（域名是编译期常量）；暂不可用的后端加「（暂不可用）」。
+  /// Chip 文案；EdgeOne 内置域名还没回填时加「（待配置）」提示，回填后该提示
+  /// 自动消失（域名是编译期常量）；暂不可用的后端加「（暂不可用）」。
   String _chipLabel(SyncBackend b) {
     if (b.disabledReason != null) return '${b.label}（暂不可用）';
     final builtInEmpty = switch (b) {
-      SyncBackend.vercel => SyncConfig.kSyncVercelDefaultBaseUrl.isEmpty,
       SyncBackend.edgeone => SyncConfig.kSyncEoDefaultBaseUrl.isEmpty,
       SyncBackend.netlify => SyncConfig.kSyncNetlifyDefaultBaseUrl.isEmpty,
       _ => false,
@@ -615,8 +601,8 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
 
   /// 上传 / 拉取按钮（对当前选中后端）。
   ///
-  /// 后端没配地址时按钮禁用并给出明确原因——Vercel 域名待部署回填就是典型
-  /// 场景，不能静默失败。
+  /// 后端没配地址时按钮禁用并给出明确原因——EdgeOne Pages 域名待部署回填就是
+  /// 典型场景，不能静默失败。
   Widget _syncButtons() {
     final theme = Theme.of(context);
     final disabledReason = _backend.disabledReason;
@@ -657,7 +643,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
             padding: const EdgeInsets.only(top: 6),
             child: Text(
               '${_backend.label} 尚未配置地址，暂不能同步'
-              '（Vercel / EdgeOne 域名待部署完成后回填，其他后端可在下方自定义地址）。',
+              '（EdgeOne Pages 域名待部署完成后回填，其他后端可在下方自定义地址）。',
               style: TextStyle(color: theme.hintColor, fontSize: 11),
             ),
           ),

@@ -131,7 +131,7 @@ EdgeOne 支持绑定自有域名（DNS / 文件 / 委派验证 + 免费证书）
 
 ## App 集成（已完成）
 
-App 侧已把 EdgeOne 作为**第四同步后端**接好（与 CF / CloudBase / Vercel 平行）：
+App 侧已把 EdgeOne 作为**同步后端之一**接好（与 Cloudflare / Netlify 平行）：
 
 - `SyncBackend.edgeone`（UI 名 `EdgeOne Pages`，pref/SecretStore key 后缀 `eo`），
   设置页后端选择器**四选一**，账号体系与其他后端互相独立（各自注册/登录）。
@@ -140,7 +140,7 @@ App 侧已把 EdgeOne 作为**第四同步后端**接好（与 CF / CloudBase / 
 - `HttpSyncApi` 构造时携带 `backend`，`SyncEngine` 在 push / pushAll 时按
   `SyncBackend.pushBatchBudgetBytes` / `maxEnvelopeBytes` 读预算——edgeone 取
   **850KB**（其余后端沿用 4MB / 6MB），大图片附件（note_assets）单条超 850KB 会
-  被本机标记 failed 并提示用户换 CF / CloudBase 同步，而非把整批发到中继吃 413。
+  被本机标记 failed 并提示用户换 CF / Netlify 同步，而非把整批发到中介吃 413。
 - 自动同步（bootstrap）与设置页手动上传/拉取都已带上 `backend`，预算自动生效。
 
 > 回填域名：把 EdgeOne Pages 分配的项目域名（形如 `https://<project>.pages.dev`）

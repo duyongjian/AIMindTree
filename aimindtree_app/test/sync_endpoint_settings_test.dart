@@ -321,13 +321,13 @@ void main() {
           File('lib/features/settings/sync_settings_section.dart').readAsStringSync();
       // 探针路径：不带令牌 GET <base>/sync/manifest，401 + JSON error=unauthorized
       // 才判连通。若退回 GET <base>/ 的「任意状态码即通」，平台 404（地址填错/
-      // 少前缀）会被误报成「已连通」——Vercel 裸域名事故即此。
+      // 少前缀）会被误报成「已连通」。
       expect(source, contains('/sync/manifest'));
       expect(source, contains("'unauthorized'"));
       // 旧的宽判定痕迹不应复活：不再把 404 当连通证据。
       expect(source, isNot(contains('404 即链路通')));
-      // 暂不可用后端置灰禁选（vercel / cloudbase，2026-10-24 用户拍板）：
-      // chip / 按钮 / 操作入口都必须读 disabledReason，防回归成可点。
+      // 暂不可用后端置灰禁选：chip / 按钮 / 操作入口都必须读 disabledReason，
+      // 防回归成可点（当前三个后端均可用，机制保留供日后某后端故障置灰）。
       expect(source, contains('disabledReason'));
     });
   });

@@ -1,23 +1,17 @@
-/// SyncConfig：多后端同步配置（T03 演进：Cloudflare / CloudBase / Vercel /
-/// EdgeOne Pages / Netlify 五套链路，一人一条）。
+/// SyncConfig：多后端同步配置（Cloudflare / EdgeOne Pages / Netlify 三套链路）。
 ///
-/// 五个同步中继的 HTTP 契约逐字一致（同样的 5 端点、同样字段、同样 Bearer
+/// 三个同步中继的 HTTP 契约逐字一致（同样的 5 端点、同样字段、同样 Bearer
 /// 鉴权），App 侧换后端只换地址；原 llm_server 同步目标已随「中继化」移除。
 ///
 /// EdgeOne Pages 是国内永久免费（官方 FAQ 明示）的边缘托管，1GB KV + 不限流量，
-/// 作国内主力的第四链路；其请求体硬限 1MB，故本机 push 对 edgeone 后端
+/// 作国内主力的第一链路；其请求体硬限 1MB，故本机 push 对 edgeone 后端
 /// 把单批字节预算与单条 envelope 硬上限都收紧到 850KB（见 [SyncBackend] 的
-/// 预算 getter），避免大图片附件把整批打 413。腾讯云 CloudBase 的 HTTP 访问
-/// 服务网关**同样受 ~1MB 请求体硬限约束**（2026-10-24 实测 1MB 测试包即返
-/// 413 `EXCEED_MAX_PAYLOAD_SIZE`，网关层拒绝、云函数不执行），故 cloudbase
-/// 后端也按同策收紧到 850KB（见 [SyncConfig.kSyncCbPushBudgetBytes]）。
-/// Netlify 为海外/备份第五链路
-/// （函数跑美/欧单区，国内直连可达性差，非国内首选），预算沿用默认 4MB / 6MB。
+/// 预算 getter），避免大图片附件把整批打 413。Cloudflare / Netlify 为海外/备用
+/// 链路（函数跑美/欧单区，国内直连可达性差，非国内首选），预算沿用默认 4MB / 6MB。
 ///
-/// 可用性（2026-10-24 用户实测拍板）：Vercel 注册链路异常、CloudBase 上传
-/// 受网关 ~1MB 请求体硬限所困，两者在设置页**置灰禁选**（原因见
-/// [SyncBackend.disabledReason]，修复后把对应分支改回 null 即恢复，UI 无需动）；
-/// 当前可选 Cloudflare / EdgeOne Pages / Netlify。
+/// 可用性：当前三个后端均可用（Cloudflare / EdgeOne Pages / Netlify），设置页
+/// 后端选择器三选一；EdgeOne Pages 内置域名待部署回填前 UI 显示「（待配置）」，
+/// 不会静默失败。
 ///
 /// 存储口径：
 /// - 每个后端三件套独立存放：地址 / 用户名（明文 prefs）+ 每用户令牌
@@ -33,19 +27,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/secret_store.dart';
 
-/// 同步后端枚举（设置页四选一）。
+/// 同步后端枚举（设置页三选一）。
 enum SyncBackend {
   cloudflare,
-  cloudbase,
-  vercel,
   edgeone,
   netlify;
 
   /// UI 展示名（中文）。
   String get label => switch (this) {
         SyncBackend.cloudflare => 'Cloudflare',
-        SyncBackend.cloudbase => '腾讯云 CloudBase',
-        SyncBackend.vercel => 'Vercel',
         SyncBackend.edgeone => 'EdgeOne Pages',
         SyncBackend.netlify => 'Netlify',
       };
@@ -55,8 +45,6 @@ enum SyncBackend {
   /// cloudflare 用 `cf` 是为了兼容老用户已存的数据（见类文档）。
   String get keySuffix => switch (this) {
         SyncBackend.cloudflare => 'cf',
-        SyncBackend.cloudbase => 'cb',
-        SyncBackend.vercel => 'vc',
         SyncBackend.edgeone => 'eo',
         SyncBackend.netlify => 'nf',
       };
@@ -64,21 +52,17 @@ enum SyncBackend {
   /// 内置默认地址（用户未覆盖时回落）。
   String get defaultBaseUrl => switch (this) {
         SyncBackend.cloudflare => SyncConfig.kSyncCfDefaultBaseUrl,
-        SyncBackend.cloudbase => SyncConfig.kSyncCbDefaultBaseUrl,
-        SyncBackend.vercel => SyncConfig.kSyncVercelDefaultBaseUrl,
         SyncBackend.edgeone => SyncConfig.kSyncEoDefaultBaseUrl,
         SyncBackend.netlify => SyncConfig.kSyncNetlifyDefaultBaseUrl,
       };
 
   /// 单批 push 字节预算（按后端）。
   ///
-  /// 默认 4MB 与 CF / Vercel / Netlify 的放宽上限一致；edgeone 受平台请求体
+  /// 默认 4MB 与 Cloudflare / Netlify 的放宽上限一致；edgeone 受平台请求体
   /// 1MB 硬限约束，收紧到 850KB（留 ~50KB 给 HTTP 头部与 JSON
-  /// 结构开销，远小于中继侧 900KB 的 413 守卫）；cloudbase 的 HTTP 访问服务
-  /// 网关同样实测 ~1MB 请求体硬限，同策收紧到 850KB。
+  /// 结构开销，远小于中继侧 900KB 的 413 守卫）。
   /// [SyncEngine] 据此贪心切批。
   int get pushBatchBudgetBytes => switch (this) {
-        SyncBackend.cloudbase => SyncConfig.kSyncCbPushBudgetBytes,
         SyncBackend.edgeone => SyncConfig.kSyncEoPushBudgetBytes,
         _ => SyncConfig.kSyncPushBatchBudgetBytes,
       };
@@ -86,31 +70,19 @@ enum SyncBackend {
   /// 单条 envelope 硬上限（按后端）。
   ///
   /// 超过它的 envelope 不会被切批逻辑无限重试：直接 `markFailed` + warning，
-  /// 避免一条畸形巨包把整个 outbox 队列永久堵住。edgeone / cloudbase 同样取
-  /// 850KB——大图片附件（data_base64）单条就超，标记失败后提示用户换
-  /// CF / Netlify 同步，而不是把整批发到中继侧吃 413。
+  /// 避免一条畸形巨包把整个 outbox 队列永久堵住。edgeone 取 850KB——大图片
+  /// 附件（data_base64）单条就超，标记失败后提示用户换 CF / Netlify 同步，
+  /// 而不是把整批发到中继侧吃 413。
   int get maxEnvelopeBytes => switch (this) {
-        SyncBackend.cloudbase => SyncConfig.kSyncCbPushBudgetBytes,
         SyncBackend.edgeone => SyncConfig.kSyncEoPushBudgetBytes,
         _ => SyncConfig.kSyncMaxEnvelopeBytes,
       };
 
   /// 暂不可用原因（null = 可用）。
   ///
-  /// 2026-10-24 用户实测拍板：以下后端存在阻塞性问题，设置页据此**置灰禁选**
-  /// 并在账号卡片给出原因，避免误选后反复踩坑。修复后把对应分支改回 null
-  /// 即恢复，UI / 测试都不用动。
-  String? get disabledReason => switch (this) {
-        // CloudBase：HTTP 访问服务网关 ~1MB 请求体硬限，大图附件 push 413。
-        // App 侧已收紧 850KB 预算（d8927ff），用户实测上传仍失败，整链暂禁；
-        // 大图同步请用 CF / Netlify。
-        SyncBackend.cloudbase => '上传链路受限（网关请求体约 1MB 硬限），暂不可用',
-        // Vercel：注册链路异常（平台层 404）。App 侧已加 /api 地址自动补全
-        // （68c3803）+ 中继 rewrites 双链路（540a656），用户实测仍失败，
-        // 待生产侧定位后恢复。
-        SyncBackend.vercel => '注册链路异常，暂不可用',
-        _ => null,
-      };
+  /// 当前三个后端均无阻塞性问题，全部可用；若日后某后端出现平台级故障，
+  /// 在此加分支返回原因即可让 UI 置灰禁选并给出提示，UI / 测试都不用动。
+  String? get disabledReason => null;
 }
 
 class SyncConfig {
@@ -122,30 +94,12 @@ class SyncConfig {
   static const String kSyncCfDefaultBaseUrl =
       'https://aimindtree-sync-relay.tuanx.workers.dev';
 
-  /// 内置默认地址：腾讯云 CloudBase 同步中继（sync_relay_cn，已部署）。
-  ///
-  /// ⚠️ 必须带 `/sync-relay` 路径前缀：CloudBase 的 HTTP 访问服务是按「触发路径」
-  /// 路由的，我们在网关建的路由是 `path=/sync-relay`（`upstreamResourceType=SCF`）。
-  /// 少了这段前缀请求会落到静态托管的 404 上，看起来像「服务没起」。
-  /// 也不要加结尾斜杠——App 是 `<base>/auth/register` 直接拼接的。
-  static const String kSyncCbDefaultBaseUrl =
-      'https://mindtree-d7glv6crkd8e9fba9-1409358097.ap-shanghai.app.tcloudbase.com/sync-relay';
-
-  /// 内置默认地址：Vercel 同步中继（sync_relay_vercel，已部署）。
-  ///
-  /// ⚠️ 必须带 `/api` 前缀：Vercel 把 `api/` 目录下的函数挂在 `/api/*` 下
-  /// （见 `vercel.json` 的 `api/**/*.js` 配置，无 rewrite），App 的
-  /// `<base>/auth/register`、`<base>/sync/push` 因此必须落在 `/api` 之下。
-  /// 若日后改为根路径挂载（加 rewrite），删掉 `/api` 即可。用户手填的覆盖值优先。
-  static const String kSyncVercelDefaultBaseUrl =
-      'https://aimindtree-syncrelayvercel.vercel.app/api';
-
   /// 内置默认地址：EdgeOne Pages 同步中继（sync_relay_eo）。
   ///
   /// ⚠️ 域名待 EdgeOne Pages 部署完成后由主理人回填；空串表示「尚未配置」——
-  /// 与 [kSyncVercelDefaultBaseUrl] 同口径：UI 据此禁用上传/拉取并提示，
-  /// 不会静默失败。用户手填的覆盖值（EdgeOne Pages 控制台分配的
-  /// `https://<project>.pages.dev`）不受影响，优先于内置默认。
+  /// UI 据此禁用上传/拉取并提示，不会静默失败。用户手填的覆盖值
+  /// （EdgeOne Pages 控制台分配的 `https://<project>.pages.dev`）不受影响，
+  /// 优先于内置默认。
   static const String kSyncEoDefaultBaseUrl = '';
 
   /// 内置默认地址：Netlify 同步中继（sync_relay_netlify）。
@@ -161,16 +115,15 @@ class SyncConfig {
 
   /// 单批 push 字节预算默认值（4MB）。
   ///
-  /// 与 CF / Vercel / Netlify 的放宽上限一致；edgeone / cloudbase 另有收紧值
-  /// （见 [kSyncEoPushBudgetBytes] / [kSyncCbPushBudgetBytes]）。
-  /// [SyncBackend.pushBatchBudgetBytes] 据此按后端返回。
+  /// 与 Cloudflare / Netlify 的放宽上限一致；edgeone 另有收紧值
+  /// （见 [kSyncEoPushBudgetBytes]）。[SyncBackend.pushBatchBudgetBytes]
+  /// 据此按后端返回。
   static const int kSyncPushBatchBudgetBytes = 4 * 1024 * 1024;
 
   /// 单条 envelope 硬上限默认值（6MB）。
   ///
-  /// 超过它的 envelope 直接 `markFailed` 跳过（不进切批）。edgeone / cloudbase
-  /// 收紧到 850KB（见 [kSyncEoPushBudgetBytes] / [kSyncCbPushBudgetBytes]）。
-  /// 见 [SyncBackend.maxEnvelopeBytes]。
+  /// 超过它的 envelope 直接 `markFailed` 跳过（不进切批）。edgeone 收紧到
+  /// 850KB（见 [kSyncEoPushBudgetBytes]）。见 [SyncBackend.maxEnvelopeBytes]。
   static const int kSyncMaxEnvelopeBytes = 6 * 1024 * 1024;
 
   /// edgeone 后端的单批预算 / 单条 envelope 硬上限（850KB）。
@@ -179,15 +132,6 @@ class SyncConfig {
   /// 850KB 给 HTTP 头部与 JSON 结构开销留出安全余量，确保整批 body 一定
   /// 落在 900KB 守卫以内。
   static const int kSyncEoPushBudgetBytes = 850 * 1024;
-
-  /// cloudbase 后端的单批预算 / 单条 envelope 硬上限（850KB）。
-  ///
-  /// 与 edgeone 同策：CloudBase HTTP 访问服务网关实测请求体 ~1MB 硬限
-  /// （2026-10-24 实测 1MB 测试包即 413 EXCEED_MAX_PAYLOAD_SIZE，网关层拒绝、
-  /// 云函数不执行，relay.js/index.js 无体积检查）。本机取 850KB 给
-  /// base64(+33%) / HTTP 头 / JSON 结构留余量。代价：≥640KB 的图片附件单条
-  /// envelope 会被 markFailed（该后端上大图附件不同步，提示换 CF / Netlify）。
-  static const int kSyncCbPushBudgetBytes = 850 * 1024;
 
   /// 当前选中后端（pref 存枚举 name；读不到 / 脏值 → cloudflare）。
   static const _kBackend = 'aimindtree.sync.backend';
@@ -237,7 +181,7 @@ class SyncConfig {
   String? urlOverrideOf(SyncBackend b) => prefs.getString(_kUrl(b));
 
   /// 后端实际地址：用户覆盖优先，未配置时回落到内置默认地址。
-  /// 普通用户开箱即用，无需在设置里填 URL；Vercel 域名未回填时返回空串。
+  /// 普通用户开箱即用，无需在设置里填 URL；EdgeOne Pages 域名未回填时返回空串。
   String urlOf(SyncBackend b) {
     final v = urlOverrideOf(b)?.trim();
     return (v != null && v.isNotEmpty) ? v : b.defaultBaseUrl;
@@ -254,7 +198,7 @@ class SyncConfig {
   }
 
   // ---- 每后端：账号（用户名 + 每用户令牌）----
-  // 三个后端的账号体系互相独立（同一用户在 CF 与 CloudBase 上是不同账号），
+  // 三个后端的账号体系互相独立（同一用户在 CF 与 Netlify 上是不同账号），
   // 用户名 / 令牌按后端隔离存储，A 后端登录不影响 B。
   // 用户名明文落 prefs；每用户令牌经 SecretStore 保存（本机，不随 DB 上传）。
 

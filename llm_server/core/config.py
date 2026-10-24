@@ -92,9 +92,7 @@ DEFAULTS: dict[str, Any] = {
             'token': '',
             'proxy': '',
         },
-        'vercel': {'base_url': '', 'token': '', 'proxy': ''},
         'edgeone': {'base_url': '', 'token': '', 'proxy': ''},
-        'cloudbase': {'base_url': '', 'token': '', 'proxy': ''},
     },
 }
 
@@ -105,9 +103,7 @@ BACKEND_OVERRIDE_KEYS = ('base_url', 'protocol', 'default_model', 'models', 'api
 RELAY_BACKENDS: tuple[str, ...] = (
     'cloudflare',
     'netlify',
-    'vercel',
     'edgeone',
-    'cloudbase',
 )
 
 #: 各中继后端的默认管理 API 地址（``relay_admin.<name>.base_url`` 留空时兜底）。
@@ -203,7 +199,7 @@ def _merge_relay_admin(
 ) -> dict[str, dict[str, str]]:
     """合并 ``relay_admin`` 段，返回 ``{后端名: {base_url, token, proxy}}``。
 
-    :data:`RELAY_BACKENDS` 里的五个后端**恒定存在**（缺省为空串），这样
+    :data:`RELAY_BACKENDS` 里的后端**恒定存在**（缺省为空串），这样
     ``GET /v1/admin/relay/config`` 的下拉项不会随配置文件抖动。
     ``override`` 里只认 ``base_url`` / ``token`` / ``proxy`` 三个字符串键（类型
     不对就忽略，具体报错由 PUT 端点负责）；``base_url`` 空串 = 回落默认地址

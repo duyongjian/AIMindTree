@@ -60,12 +60,12 @@ const Set<String> kSyncTableAllowlist = <String>{
 
 /// 单批 push 的**字节预算** / 单条 envelope 的**硬上限**——按后端取值。
 ///
-/// 默认 4MB / 6MB（与 CF / Vercel / Netlify 的放宽上限一致）；edgeone /
-/// cloudbase 受网关请求体 ~1MB 硬限约束，经
+/// 默认 4MB / 6MB（与 Cloudflare / Netlify 的放宽上限一致）；edgeone
+/// 受平台请求体 ~1MB 硬限约束，经
 /// [SyncBackend.pushBatchBudgetBytes] / [SyncBackend.maxEnvelopeBytes]
 /// 收紧到 850KB。具体数值见 [SyncConfig]
 /// （`kSyncPushBatchBudgetBytes` / `kSyncMaxEnvelopeBytes` /
-/// `kSyncEoPushBudgetBytes` / `kSyncCbPushBudgetBytes`），[push] / [pushAll]
+/// `kSyncEoPushBudgetBytes`），[push] / [pushAll]
 /// 在运行时从目标 [SyncApi] 读出对应后端的预算再切批，不再写死常量。
 ///
 /// 背景：一条图片附件的 `data_base64` 可达 2.7MB，若和别的行挤在同一批里，

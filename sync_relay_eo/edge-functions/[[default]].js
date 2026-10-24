@@ -241,7 +241,7 @@ async function readJsonBody(request) {
         {
           error:
             `请求体超过 ${Math.floor(kMaxBodyBytes / 1024)}KB 上限` +
-            '（EdgeOne Pages 限制 1MB）。大图片附件请换 CloudBase/CF 后端同步。',
+            '（EdgeOne Pages 限制 1MB）。大图片附件请换 CF / Netlify 后端同步。',
         },
         413,
       ),
@@ -259,7 +259,7 @@ async function readJsonBody(request) {
         {
           error:
             `请求体超过 ${Math.floor(kMaxBodyBytes / 1024)}KB 上限` +
-            '（EdgeOne Pages 限制 1MB）。大图片附件请换 CloudBase/CF 后端同步。',
+            '（EdgeOne Pages 限制 1MB）。大图片附件请换 CF / Netlify 后端同步。',
         },
         413,
       ),
@@ -504,7 +504,7 @@ export async function handleFetch(request, env) {
       {
         error:
           `请求体超过 ${Math.floor(kMaxBodyBytes / 1024)}KB 上限` +
-          '（EdgeOne Pages 限制 1MB）。大图片附件请换 CloudBase/CF 后端同步。',
+          '（EdgeOne Pages 限制 1MB）。大图片附件请换 CF / Netlify 后端同步。',
       },
       413,
     );

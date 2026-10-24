@@ -1062,12 +1062,12 @@ def check_relay_admin(c: TestClient, secrets: dict[str, str]) -> None:
         check(rb.status_code == 400, '未知 backend → 400', str(rb.status_code))
 
         # ---- 8c.5 未配置后端 → 400 relay_not_configured ----
-        rn = c.get('/v1/admin/relay/stats?backend=vercel')
+        rn = c.get('/v1/admin/relay/stats?backend=edgeone')
         seen.append(rn.text)
         check(
             rn.status_code == 400
             and rn.json().get('error', {}).get('code') == 'relay_not_configured',
-            '未配置后端（vercel）→ 400 relay_not_configured',
+            '未配置后端（edgeone）→ 400 relay_not_configured',
             f'{rn.status_code} {rn.text[:120]}',
         )
 

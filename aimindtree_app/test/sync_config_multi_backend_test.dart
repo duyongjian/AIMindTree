@@ -1,9 +1,8 @@
-/// SyncConfig 多后端（Cloudflare / 腾讯云 CloudBase / Vercel / EdgeOne Pages /
-/// Netlify）单元测试。
+/// SyncConfig 多后端（Cloudflare / EdgeOne Pages / Netlify）单元测试。
 ///
-/// 覆盖：五后端默认/覆盖地址、cloudflare 沿用旧 key（老用户数据零迁移）、
+/// 覆盖：三后端默认/覆盖地址、cloudflare 沿用旧 key（老用户数据零迁移）、
 /// selectedBackend 持久化、每后端账号独立隔离、clear() 清所有后端、
-/// Vercel / Netlify 已回填部署域名（EdgeOne 未填时 urlOf 返回空）、
+/// Netlify / EdgeOne 已部署/待回填域名（EdgeOne 未填时 urlOf 返回空）、
 /// 各后端 push 字节预算取值。
 library;
 
@@ -27,35 +26,20 @@ void main() {
 
     test('枚举展示名与 pref key 后缀稳定', () {
       expect(SyncBackend.cloudflare.label, 'Cloudflare');
-      expect(SyncBackend.cloudbase.label, '腾讯云 CloudBase');
-      expect(SyncBackend.vercel.label, 'Vercel');
       expect(SyncBackend.edgeone.label, 'EdgeOne Pages');
       expect(SyncBackend.netlify.label, 'Netlify');
       expect(
         SyncBackend.values.map((b) => b.keySuffix).toList(),
-        <String>['cf', 'cb', 'vc', 'eo', 'nf'],
+        <String>['cf', 'eo', 'nf'],
       );
     });
 
-    test('五个后端各自读内置默认地址', () {
+    test('三个后端各自读内置默认地址', () {
       expect(
         config.urlOf(SyncBackend.cloudflare),
         SyncConfig.kSyncCfDefaultBaseUrl,
       );
-      expect(
-        config.urlOf(SyncBackend.cloudbase),
-        SyncConfig.kSyncCbDefaultBaseUrl,
-      );
-      // Vercel / Netlify 均已部署，内置默认非空（Vercel 带 /api 前缀，
-      // Netlify 只需根域名）；EdgeOne 待回填，空串。
-      expect(
-        config.urlOf(SyncBackend.vercel),
-        SyncConfig.kSyncVercelDefaultBaseUrl,
-      );
-      expect(
-        SyncConfig.kSyncVercelDefaultBaseUrl,
-        'https://aimindtree-syncrelayvercel.vercel.app/api',
-      );
+      // Netlify 已部署，内置默认非空（只需根域名）；EdgeOne 待回填，空串。
       expect(
         config.urlOf(SyncBackend.netlify),
         SyncConfig.kSyncNetlifyDefaultBaseUrl,
@@ -68,11 +52,10 @@ void main() {
       expect(config.urlOf(SyncBackend.edgeone), '');
     });
 
-    test('push 字节预算 / 单条硬上限按后端取值（edgeone / cloudbase 收紧 850KB）', () {
-      // 默认（CF / Vercel / Netlify）：4MB / 6MB。
+    test('push 字节预算 / 单条硬上限按后端取值（edgeone 收紧 850KB）', () {
+      // 默认（CF / Netlify）：4MB / 6MB。
       for (final b in [
         SyncBackend.cloudflare,
-        SyncBackend.vercel,
         SyncBackend.netlify,
       ]) {
         expect(b.pushBatchBudgetBytes, SyncConfig.kSyncPushBatchBudgetBytes);
@@ -84,18 +67,9 @@ void main() {
       expect(SyncBackend.edgeone.maxEnvelopeBytes,
           SyncConfig.kSyncEoPushBudgetBytes);
       expect(SyncConfig.kSyncEoPushBudgetBytes, 850 * 1024);
-      // cloudbase：网关实测请求体 ~1MB 硬限（413），同 edgeone 收紧 850KB。
-      expect(SyncBackend.cloudbase.pushBatchBudgetBytes,
-          SyncConfig.kSyncCbPushBudgetBytes);
-      expect(SyncBackend.cloudbase.maxEnvelopeBytes,
-          SyncConfig.kSyncCbPushBudgetBytes);
-      expect(SyncConfig.kSyncCbPushBudgetBytes, 850 * 1024);
     });
 
-    test('暂不可用后端有明确原因（vercel / cloudbase 置灰禁选，2026-10-24 拍板）', () {
-      // 用户实测两个后端有阻塞性问题，设置页据此置灰；修复后改回 null 即恢复。
-      expect(SyncBackend.vercel.disabledReason, isNotNull);
-      expect(SyncBackend.cloudbase.disabledReason, isNotNull);
+    test('当前三个后端均可用（disabledReason 全部为 null）', () {
       expect(SyncBackend.cloudflare.disabledReason, isNull);
       expect(SyncBackend.edgeone.disabledReason, isNull);
       expect(SyncBackend.netlify.disabledReason, isNull);
@@ -103,54 +77,42 @@ void main() {
 
     test('每个后端可独立覆盖地址（trim；空串=清除覆盖回落默认）', () async {
       await config.setUrl(
-        SyncBackend.cloudbase,
-        '  https://cb.example.com/  ',
+        SyncBackend.edgeone,
+        '  https://eo.example.com/  ',
       );
       expect(
-        config.urlOf(SyncBackend.cloudbase),
-        'https://cb.example.com/',
+        config.urlOf(SyncBackend.edgeone),
+        'https://eo.example.com/',
       );
       expect(
-        config.urlOverrideOf(SyncBackend.cloudbase),
-        'https://cb.example.com/',
+        config.urlOverrideOf(SyncBackend.edgeone),
+        'https://eo.example.com/',
       );
-      // 互不影响：其他后端仍是各自默认（Vercel 已回填部署域名）。
+      // 互不影响：其他后端仍是各自默认（Netlify 已部署）。
       expect(
         config.urlOf(SyncBackend.cloudflare),
         SyncConfig.kSyncCfDefaultBaseUrl,
       );
       expect(
-        config.urlOf(SyncBackend.vercel),
-        SyncConfig.kSyncVercelDefaultBaseUrl,
+        config.urlOf(SyncBackend.netlify),
+        SyncConfig.kSyncNetlifyDefaultBaseUrl,
       );
 
-      // 空串 → 清除覆盖 → 回落内置默认。
-      await config.setUrl(SyncBackend.cloudbase, '   ');
-      expect(config.urlOverrideOf(SyncBackend.cloudbase), isNull);
-      expect(
-        config.urlOf(SyncBackend.cloudbase),
-        SyncConfig.kSyncCbDefaultBaseUrl,
-      );
+      // 空串 → 清除覆盖 → 回落内置默认（EdgeOne 内置为空串）。
+      await config.setUrl(SyncBackend.edgeone, '   ');
+      expect(config.urlOverrideOf(SyncBackend.edgeone), isNull);
+      expect(config.urlOf(SyncBackend.edgeone), '');
     });
 
-    test('Vercel 内置默认已回填部署域名；用户手填覆盖优先', () async {
-      // Vercel 已部署，内置默认非空。
-      expect(
-        config.urlOf(SyncBackend.vercel),
-        SyncConfig.kSyncVercelDefaultBaseUrl,
-      );
-      expect(
-        SyncConfig.kSyncVercelDefaultBaseUrl,
-        startsWith('https://aimindtree-syncrelayvercel.vercel.app/api'),
-      );
-      // 用户手填仍优先于内置默认。
+    test('EdgeOne 内置默认待回填（空串）；用户手填覆盖优先', () async {
+      expect(config.urlOf(SyncBackend.edgeone), '');
       await config.setUrl(
-        SyncBackend.vercel,
-        'https://my-override.vercel.app/api',
+        SyncBackend.edgeone,
+        'https://my-override.pages.dev',
       );
       expect(
-        config.urlOf(SyncBackend.vercel),
-        'https://my-override.vercel.app/api',
+        config.urlOf(SyncBackend.edgeone),
+        'https://my-override.pages.dev',
       );
     });
 
@@ -183,13 +145,13 @@ void main() {
       expect(config.selectedBackend, SyncBackend.cloudflare);
       expect(prefs.getString('aimindtree.sync.backend'), isNull);
 
-      await config.setSelectedBackend(SyncBackend.cloudbase);
-      expect(config.selectedBackend, SyncBackend.cloudbase);
-      expect(prefs.getString('aimindtree.sync.backend'), 'cloudbase');
+      await config.setSelectedBackend(SyncBackend.edgeone);
+      expect(config.selectedBackend, SyncBackend.edgeone);
+      expect(prefs.getString('aimindtree.sync.backend'), 'edgeone');
 
       // 新实例（模拟重启 App）读回同一选择。
       final reloaded = SyncConfig(prefs: prefs, secretStore: store);
-      expect(reloaded.selectedBackend, SyncBackend.cloudbase);
+      expect(reloaded.selectedBackend, SyncBackend.edgeone);
 
       // 脏值回落 cloudflare。
       await prefs.setString('aimindtree.sync.backend', 'no-such-backend');
@@ -201,32 +163,30 @@ void main() {
       await config.setUserToken(SyncBackend.cloudflare, 'cf-token');
 
       expect(await config.isLoggedIn(SyncBackend.cloudflare), isTrue);
-      expect(config.usernameOf(SyncBackend.cloudbase), isNull);
-      expect(await config.resolveUserToken(SyncBackend.cloudbase), isNull);
-      expect(await config.isLoggedIn(SyncBackend.cloudbase), isFalse);
-      expect(await config.isLoggedIn(SyncBackend.vercel), isFalse);
+      expect(config.usernameOf(SyncBackend.edgeone), isNull);
+      expect(await config.resolveUserToken(SyncBackend.edgeone), isNull);
+      expect(await config.isLoggedIn(SyncBackend.edgeone), isFalse);
       expect(await config.isLoggedIn(SyncBackend.netlify), isFalse);
 
-      // key 也按后缀隔离（cf / cb / vc / nf）。
+      // key 也按后缀隔离（cf / eo / nf）。
       expect(prefs.getString('aimindtree.sync.cf_username'), 'alice');
-      expect(prefs.getString('aimindtree.sync.cb_username'), isNull);
-      expect(prefs.getString('aimindtree.sync.vc_username'), isNull);
+      expect(prefs.getString('aimindtree.sync.eo_username'), isNull);
       expect(prefs.getString('aimindtree.sync.nf_username'), isNull);
-      expect(await store.get('aimindtree.sync.cb_user_token'), isNull);
+      expect(await store.get('aimindtree.sync.eo_user_token'), isNull);
     });
 
     test('setUsername(null)/空串 清除；setUserToken(null) 登出', () async {
-      await config.setUsername(SyncBackend.vercel, 'bob');
-      await config.setUserToken(SyncBackend.vercel, 'vc-token');
-      expect(await config.isLoggedIn(SyncBackend.vercel), isTrue);
+      await config.setUsername(SyncBackend.edgeone, 'bob');
+      await config.setUserToken(SyncBackend.edgeone, 'eo-token');
+      expect(await config.isLoggedIn(SyncBackend.edgeone), isTrue);
 
-      await config.setUsername(SyncBackend.vercel, '  ');
-      expect(config.usernameOf(SyncBackend.vercel), isNull);
+      await config.setUsername(SyncBackend.edgeone, '  ');
+      expect(config.usernameOf(SyncBackend.edgeone), isNull);
 
-      await config.setUsername(SyncBackend.vercel, 'bob');
-      await config.setUserToken(SyncBackend.vercel, null);
-      expect(await config.isLoggedIn(SyncBackend.vercel), isFalse);
-      expect(await config.resolveUserToken(SyncBackend.vercel), isNull);
+      await config.setUsername(SyncBackend.edgeone, 'bob');
+      await config.setUserToken(SyncBackend.edgeone, null);
+      expect(await config.isLoggedIn(SyncBackend.edgeone), isFalse);
+      expect(await config.resolveUserToken(SyncBackend.edgeone), isNull);
     });
 
     test('clear() 清所有后端（含选中项与代理）', () async {
@@ -235,20 +195,20 @@ void main() {
         'https://cf.example.com',
       );
       await config.setUrl(
-        SyncBackend.cloudbase,
-        'https://cb.example.com',
+        SyncBackend.edgeone,
+        'https://eo.example.com',
       );
       await config.setUrl(
-        SyncBackend.vercel,
-        'https://vc.example.com',
+        SyncBackend.netlify,
+        'https://nf.example.com',
       );
       await config.setUsername(SyncBackend.cloudflare, 'alice');
-      await config.setUsername(SyncBackend.cloudbase, 'bob');
-      await config.setUsername(SyncBackend.vercel, 'carol');
+      await config.setUsername(SyncBackend.edgeone, 'bob');
+      await config.setUsername(SyncBackend.netlify, 'carol');
       await config.setUserToken(SyncBackend.cloudflare, 't1');
-      await config.setUserToken(SyncBackend.cloudbase, 't2');
-      await config.setUserToken(SyncBackend.vercel, 't3');
-      await config.setSelectedBackend(SyncBackend.vercel);
+      await config.setUserToken(SyncBackend.edgeone, 't2');
+      await config.setUserToken(SyncBackend.netlify, 't3');
+      await config.setSelectedBackend(SyncBackend.netlify);
       await config.setCfProxy('127.0.0.1:7890');
 
       await config.clear();
@@ -261,15 +221,16 @@ void main() {
       // 选中项回落默认 cloudflare，代理清掉。
       expect(config.selectedBackend, SyncBackend.cloudflare);
       expect(config.cfProxy, isNull);
-      // 地址清空后回落到内置默认（CF/CB/Vercel 均有默认）。
+      // 地址清空后回落到内置默认（Cloudflare / Netlify 均有默认；EdgeOne 为空串）。
       expect(
         config.urlOf(SyncBackend.cloudflare),
         SyncConfig.kSyncCfDefaultBaseUrl,
       );
       expect(
-        config.urlOf(SyncBackend.vercel),
-        SyncConfig.kSyncVercelDefaultBaseUrl,
+        config.urlOf(SyncBackend.netlify),
+        SyncConfig.kSyncNetlifyDefaultBaseUrl,
       );
+      expect(config.urlOf(SyncBackend.edgeone), '');
     });
 
     test('clear() 顺带清掉历史遗留 key（llm 目标 / CF 直存共享 token）', () async {
