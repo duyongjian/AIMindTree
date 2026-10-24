@@ -1,10 +1,10 @@
 /// 知识树工具栏「4 个分组图标菜单」测试。
 ///
-/// 背景：画布页顶部工具栏原来是一排 11 个平铺图标按钮，现按职责归组为
-/// 4 个 PopupMenuButton（知识树 / 内容导入 / 布局视图 / AI 与作业）。
+/// 背景：画布页顶部工具栏原来是一排平铺图标按钮，现按职责归组为
+/// 5 个 PopupMenuButton（知识树 / 内容导入 / 布局与连线 / AI 与作业 / ★2.0.0 画布组件）。
 ///
 /// 本测试守住两条铁律：
-/// 1. **动作不丢**：4 个分组按钮齐全，每组菜单项与原平铺图标一一对应；
+/// 1. **动作不丢**：5 个分组按钮齐全，每组菜单项与原平铺图标一一对应；
 /// 2. **禁用态保留**：`tree == null`（空库）时，除「新建知识树」外全部禁用。
 ///
 /// 另验证画布右下角悬浮栏的「框选模式」开关图标翻转（crop_free ⇄ deselect），
@@ -102,16 +102,17 @@ void main() {
     return item.enabled;
   }
 
-  group('工具栏渲染 4 个分组按钮', () {
-    testWidgets('4 个分组图标各出现一次，且都是 PopupMenuButton', (tester) async {
+  group('工具栏渲染 5 个分组按钮', () {
+    testWidgets('5 个分组图标各出现一次，且都是 PopupMenuButton', (tester) async {
       await pumpCanvasWithTree(tester);
 
-      expect(find.byType(PopupMenuButton<int>), findsNWidgets(4));
+      expect(find.byType(PopupMenuButton<int>), findsNWidgets(5));
       for (final icon in const <IconData>[
         Icons.account_tree, // ① 知识树
         Icons.playlist_add, // ② 内容导入
-        Icons.dashboard_outlined, // ③ 布局视图
+        Icons.dashboard_outlined, // ③ 布局与连线
         Icons.auto_awesome, // ④ AI 与作业
+        Icons.add_box_outlined, // ⑤ ★2.0.0 画布组件
       ]) {
         expect(find.byIcon(icon), findsOneWidget);
       }
@@ -429,6 +430,72 @@ void main() {
       );
       expect(res, isA<Success<AutoLinkResult>>());
       expect((res as Success<AutoLinkResult>).value.created, 1);
+    });
+  });
+
+  // ==================== ★2.0.0 画布组件（⑤ 组）====================
+  //
+  // 需求：无限画布可放置更多组件——笔记卡片（关联笔记自动取标题+摘要，或纯手填）、
+  // 透明文本框（随意移动）、圆珠笔手写、橡皮整笔擦除。
+
+  group('⑤ 画布组件（★2.0.0）', () {
+    testWidgets('选中树时：添加笔记卡片 / 添加透明文本框 / 圆珠笔 / 橡皮擦 全部可用',
+        (tester) async {
+      await pumpCanvasWithTree(tester);
+
+      final labels = await openGroup(tester, Icons.add_box_outlined);
+      expect(labels, <String>[
+        '添加笔记卡片',
+        '添加透明文本框',
+        '圆珠笔',
+        '橡皮擦',
+      ]);
+      expect(itemEnabled(tester, '添加笔记卡片'), isTrue);
+      expect(itemEnabled(tester, '添加透明文本框'), isTrue);
+      expect(itemEnabled(tester, '圆珠笔'), isTrue);
+      expect(itemEnabled(tester, '橡皮擦'), isTrue);
+    });
+
+    testWidgets('空库（tree == null）时：全部依赖树的动作禁用', (tester) async {
+      await pumpPage(tester);
+
+      final labels = await openGroup(tester, Icons.add_box_outlined);
+      expect(labels, <String>[
+        '添加笔记卡片',
+        '添加透明文本框',
+        '圆珠笔',
+        '橡皮擦',
+      ]);
+      expect(itemEnabled(tester, '添加笔记卡片'), isFalse);
+      expect(itemEnabled(tester, '添加透明文本框'), isFalse);
+      expect(itemEnabled(tester, '圆珠笔'), isFalse);
+      expect(itemEnabled(tester, '橡皮擦'), isFalse);
+    });
+
+    testWidgets('圆珠笔开关：点一下变「退出圆珠笔」，再点变回「圆珠笔」',
+        (tester) async {
+      await pumpCanvasWithTree(tester);
+
+      await tester.pump(const Duration(seconds: 3)); // 清掉任何遗留 SnackBar
+      await tester.pumpAndSettle();
+      final labels0 = await openGroup(tester, Icons.add_box_outlined);
+      expect(labels0, contains('圆珠笔'));
+      expect(labels0, isNot(contains('退出圆珠笔')));
+
+      await tester.tap(find.text('圆珠笔'));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 3)); // 关掉「圆珠笔」toast
+      await tester.pumpAndSettle();
+      final labels1 = await openGroup(tester, Icons.add_box_outlined);
+      expect(labels1, contains('退出圆珠笔'));
+
+      await tester.tap(find.text('退出圆珠笔'));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 3)); // 关掉「退出」toast
+      await tester.pumpAndSettle();
+      final labels2 = await openGroup(tester, Icons.add_box_outlined);
+      expect(labels2, contains('圆珠笔'));
+      expect(labels2, isNot(contains('退出圆珠笔')));
     });
   });
 }

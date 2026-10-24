@@ -39,6 +39,7 @@ import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
 import '../../features/homework/homework_page.dart';
 import '../../features/knowledge/kp_dedup.dart' show kpDedupSchedule;
+import '../../data/models/canvas_content.dart';
 
 /// 补前置入库「笔记归属」四选项（默认 [manual]，见 [_pickSupplementMode]）。
 enum _SupplementMode {
@@ -90,6 +91,17 @@ class CanvasPageState extends State<CanvasPage> {
 
   /// 当前画布上框选 / 多选选中的知识点 id（作业模式与框选模式共用同一份状态）。
   final Set<String> _selectedKpIds = <String>{};
+
+  /// ★2.0.0：圆珠笔 / 橡皮模式（二者互斥，且与作业 / 框选模式互斥）。
+  bool _penMode = false;
+  bool _eraserMode = false;
+
+  /// ★2.0.0：当前画布上的文本卡片与手写笔迹（由 [_loadForTree] 载入）。
+  List<CanvasCardVm> _cards = <CanvasCardVm>[];
+  List<CanvasStrokeVm> _strokes = <CanvasStrokeVm>[];
+
+  /// ★2.0.0：画布视口中心对应的场景坐标（建卡时定位到可视区中央）。
+  Offset _viewportCenter = Offset.zero;
 
   /// 作业仓储（落库 + 历史）。
   late final HomeworkRepository _homeworks =
@@ -213,6 +225,15 @@ class CanvasPageState extends State<CanvasPage> {
       if (!mounted) return;
       setState(() => _mastery[p.id] = m);
     }
+
+    // ★2.0.0：载入画布富组件（文本卡片 / 手写笔迹）。
+    final cards = await _treesRepo.listCards(treeId);
+    final strokes = await _treesRepo.listStrokes(treeId);
+    if (!mounted) return;
+    setState(() {
+      _cards = cards;
+      _strokes = strokes;
+    });
   }
 
   MasteryStatus _masteryOf(String kpId) => _mastery[kpId] ?? MasteryStatus.unknown;
@@ -302,6 +323,235 @@ class CanvasPageState extends State<CanvasPage> {
         pinned: true,
       );
     }
+  }
+
+  // ================= ★2.0.0 画布富组件（卡片 / 笔迹）=================
+
+  /// 圆珠笔模式开关（与橡皮 / 作业 / 框选模式互斥）。
+  void _togglePenMode() {
+    setState(() {
+      _penMode = !_penMode;
+      if (_penMode) {
+        _eraserMode = false;
+        _homeworkMode = false;
+        _frameMode = false;
+        _selectedKpIds.clear();
+      }
+    });
+    if (_penMode) {
+      _toast('圆珠笔：在画布上拖拽手写；用橡皮擦整笔擦除');
+    }
+  }
+
+  /// 橡皮擦模式开关（与画笔 / 作业 / 框选模式互斥）。
+  void _toggleEraserMode() {
+    setState(() {
+      _eraserMode = !_eraserMode;
+      if (_eraserMode) {
+        _penMode = false;
+        _homeworkMode = false;
+        _frameMode = false;
+        _selectedKpIds.clear();
+      }
+    });
+    if (_eraserMode) {
+      _toast('橡皮擦：点 / 拖过手写字迹即整笔擦除');
+    }
+  }
+
+  /// 在视口中心新建一张文本卡片，建好后立即打开编辑框。
+  Future<void> _addCard({required String kind}) async {
+    final treeId = _selectedTree?.id;
+    if (treeId == null) return;
+    final c = _viewportCenter;
+    final res = await _treesRepo.createCard(treeId, c.dx, c.dy, kind);
+    if (!mounted) return;
+    res.fold((vm) {
+      setState(() => _cards = [..._cards, vm]);
+      _editCard(vm);
+    }, (e, _) => _toast('创建卡片失败：$e'));
+  }
+
+  /// 卡片拖动结束（落点已吸附网格）：更新本地坐标并持久化。
+  Future<void> _onMoveCard(String nodeId, double x, double y) async {
+    final parts = nodeId.split(':');
+    if (parts.length != 2) return;
+    final res = await _treesRepo.moveCard(parts[0], parts[1], x, y);
+    if (!mounted) return;
+    res.fold(
+      (_) => setState(() {
+        _cards = [
+          for (final card in _cards)
+            if (card.nodeId == nodeId)
+              CanvasCardVm(
+                id: card.id,
+                nodeId: card.nodeId,
+                x: x,
+                y: y,
+                w: card.w,
+                h: card.h,
+                noteId: card.noteId,
+                title: card.title,
+                body: card.body,
+                kind: card.kind,
+              )
+            else
+              card,
+        ];
+      }),
+      (e, _) => _toast('移动卡片失败：$e'),
+    );
+  }
+
+  /// 画笔抬笔：持久化一笔（repo 生成真 id）。
+  Future<void> _onAddStroke(CanvasStrokeVm stroke) async {
+    final treeId = _selectedTree?.id;
+    if (treeId == null) return;
+    final res =
+        await _treesRepo.addStroke(treeId, stroke.points, stroke.color, stroke.width);
+    if (!mounted) return;
+    res.fold(
+      (vm) => setState(() => _strokes = [..._strokes, vm]),
+      (e, _) => _toast('保存笔迹失败：$e'),
+    );
+  }
+
+  /// 橡皮命中：删除整笔。
+  Future<void> _onEraseStroke(String strokeId) async {
+    final res = await _treesRepo.deleteStroke(strokeId);
+    if (!mounted) return;
+    res.fold(
+      (_) => setState(
+          () => _strokes = _strokes.where((s) => s.id != strokeId).toList()),
+      (e, _) => _toast('擦除失败：$e'),
+    );
+  }
+
+  /// 由画布点选卡片触发：打开编辑框（标题 / 正文 / 关联笔记 / 删除）。
+  Future<void> _editCard(CanvasCardVm vm) async {
+    final isNoteCard = vm.kind == 'note_card';
+    String? linkedNoteId = vm.noteId;
+    final titleCtl = TextEditingController(text: vm.title);
+    final bodyCtl = TextEditingController(text: vm.body);
+    final action = await showDialog<String?>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSt) => AlertDialog(
+          title: Text(isNoteCard ? '编辑笔记卡片' : '编辑文本框'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                if (isNoteCard)
+                  DropdownButton<String?>(
+                    value: linkedNoteId,
+                    hint: const Text('关联笔记（可选）'),
+                    items: <DropdownMenuItem<String?>>[
+                      const DropdownMenuItem<String?>(
+                        value: null,
+                        child: Text('不关联（纯手填）'),
+                      ),
+                      for (final n in _notes)
+                        DropdownMenuItem<String?>(
+                          value: n.id,
+                          child: Text(_titleOf(n)),
+                        ),
+                    ],
+                    onChanged: (id) {
+                      setSt(() => linkedNoteId = id);
+                      if (id != null) {
+                        final n = _notes.firstWhere((x) => x.id == id);
+                        titleCtl.text = _titleOf(n);
+                        bodyCtl.text = _noteSummary(n);
+                      }
+                    },
+                  ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: titleCtl,
+                  decoration: const InputDecoration(labelText: '标题'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: bodyCtl,
+                  decoration: const InputDecoration(labelText: '内容 / 摘要'),
+                  maxLines: 4,
+                ),
+              ],
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop('delete'),
+              child: const Text('删除'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop('save'),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (action == 'delete') {
+      final r = await _treesRepo.deleteCard(vm.id);
+      r.fold(
+        (_) => setState(
+            () => _cards = _cards.where((c) => c.id != vm.id).toList()),
+        (e, _) => _toast('删除卡片失败：$e'),
+      );
+      return;
+    }
+    if (action == 'save') {
+      final r = await _treesRepo.updateCard(
+        vm.id,
+        title: titleCtl.text,
+        body: bodyCtl.text,
+        noteId: linkedNoteId,
+        kind: vm.kind,
+      );
+      r.fold(
+        (_) => setState(() {
+          _cards = [
+            for (final card in _cards)
+              if (card.id == vm.id)
+                CanvasCardVm(
+                  id: card.id,
+                  nodeId: card.nodeId,
+                  x: card.x,
+                  y: card.y,
+                  w: card.w,
+                  h: card.h,
+                  noteId: linkedNoteId,
+                  title: titleCtl.text,
+                  body: bodyCtl.text,
+                  kind: card.kind,
+                )
+              else
+                card,
+          ];
+        }),
+        (e, _) => _toast('保存卡片失败：$e'),
+      );
+    }
+    titleCtl.dispose();
+    bodyCtl.dispose();
+  }
+
+  /// 由关联笔记派生「摘要」：取正文首个非空段落，超 120 字截断。
+  String _noteSummary(Note n) {
+    final paras = n.contentMd
+        .split('\n')
+        .where((l) => l.trim().isNotEmpty)
+        .map((l) => l.trim())
+        .toList();
+    final first = paras.isNotEmpty ? paras.first : '';
+    return first.length > 120 ? '${first.substring(0, 120)}…' : first;
   }
 
   Future<void> _onRelayout() async {
@@ -2994,6 +3244,38 @@ class CanvasPageState extends State<CanvasPage> {
           ),
         ],
       ),
+      // ⑤ ★2.0.0 画布组件（笔记卡片 / 透明文本框 / 圆珠笔 / 橡皮）
+      _toolbarGroupButton(
+        icon: Icons.add_box_outlined,
+        tooltip: '画布组件：笔记卡片 / 透明文本框 / 圆珠笔 / 橡皮',
+        itemBuilder: (_) => <PopupMenuEntry<int>>[
+          _toolbarMenuItem(
+            icon: Icons.sticky_note_2_outlined,
+            label: '添加笔记卡片',
+            enabled: hasTree,
+            onTap: () => _addCard(kind: 'note_card'),
+          ),
+          _toolbarMenuItem(
+            icon: Icons.text_fields,
+            label: '添加透明文本框',
+            enabled: hasTree,
+            onTap: () => _addCard(kind: 'text_box'),
+          ),
+          const PopupMenuDivider(),
+          _toolbarMenuItem(
+            icon: _penMode ? Icons.check_box : Icons.edit,
+            label: _penMode ? '退出圆珠笔' : '圆珠笔',
+            enabled: hasTree,
+            onTap: _togglePenMode,
+          ),
+          _toolbarMenuItem(
+            icon: _eraserMode ? Icons.check_box : Icons.auto_fix_off,
+            label: _eraserMode ? '退出橡皮擦' : '橡皮擦',
+            enabled: hasTree,
+            onTap: _toggleEraserMode,
+          ),
+        ],
+      ),
     ];
   }
 
@@ -3110,6 +3392,16 @@ class CanvasPageState extends State<CanvasPage> {
                           frameMode: _frameMode,
                           onToggleFrameMode: _toggleFrameMode,
                           onMoveNodes: _onMoveNodes,
+                          // ★2.0.0：画布富组件
+                          cards: _cards,
+                          strokes: _strokes,
+                          penMode: _penMode,
+                          eraserMode: _eraserMode,
+                          onEditCard: _editCard,
+                          onMoveCard: _onMoveCard,
+                          onAddStroke: _onAddStroke,
+                          onEraseStroke: _onEraseStroke,
+                          onViewportCenter: (c) => _viewportCenter = c,
                         ),
         ),
       ],

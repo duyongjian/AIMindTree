@@ -97,6 +97,26 @@ class SyncOutboxWriter {
         toMap: canvasNodeRowToMap,
       );
 
+  /// 画布自由文本卡片 upsert（★2.0.0：笔记卡片 / 透明文本框）。
+  Future<void> upsertCanvasCard(String id) => _upsert(
+        table: 'canvas_cards',
+        id: id,
+        load: () => (_db.select(_db.canvasCards)
+              ..where((t) => t.id.equals(id)))
+            .getSingleOrNull(),
+        toMap: canvasCardRowToMap,
+      );
+
+  /// 画布手写笔迹 upsert（★2.0.0：圆珠笔 + 橡皮）。
+  Future<void> upsertCanvasStroke(String id) => _upsert(
+        table: 'canvas_strokes',
+        id: id,
+        load: () => (_db.select(_db.canvasStrokes)
+              ..where((t) => t.id.equals(id)))
+            .getSingleOrNull(),
+        toMap: canvasStrokeRowToMap,
+      );
+
   /// AI 会话 upsert。
   Future<void> upsertAiSession(String id) => _upsert(
         table: 'ai_sessions',
@@ -195,6 +215,14 @@ class SyncOutboxWriter {
   /// 画布节点硬删（成员关系解除 / 树被删）。
   Future<void> hardDeleteCanvasNodes(Iterable<CanvasNodeRow> rows) =>
       _hardDelete(table: 'canvas_nodes', rows: rows, toMap: canvasNodeRowToMap);
+
+  /// 画布自由文本卡片硬删（★2.0.0）。卡片内容随卡片节点一起被删。
+  Future<void> hardDeleteCanvasCards(Iterable<CanvasCardRow> rows) =>
+      _hardDelete(table: 'canvas_cards', rows: rows, toMap: canvasCardRowToMap);
+
+  /// 画布手写笔迹硬删（★2.0.0：橡皮整笔擦除 / 画布清空）。
+  Future<void> hardDeleteCanvasStrokes(Iterable<CanvasStrokeRow> rows) =>
+      _hardDelete(table: 'canvas_strokes', rows: rows, toMap: canvasStrokeRowToMap);
 
   /// 知识树（画布）硬删。
   Future<void> hardDeleteCanvases(Iterable<CanvasRow> rows) =>

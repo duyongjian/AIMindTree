@@ -10,11 +10,15 @@
 ///   直接就是「这篇笔记的树」的成员。
 library;
 
+import 'dart:convert';
+
 import 'package:drift/drift.dart';
 
+import '../../core/id.dart';
 import '../../core/logger.dart';
 import '../../core/result.dart';
 import '../db/drift_database.dart';
+import '../models/canvas_content.dart';
 import '../models/knowledge_tree.dart';
 import '../sync/sync_outbox_writer.dart';
 
@@ -250,4 +254,286 @@ class TreeRepository {
         name: r.name,
         notebookId: r.notebookId,
       );
+
+  // ============ 画布文本卡片（★2.0.0）============
+
+  /// 从样式 JSON 里取卡片种类（`note_card` / `text_box`），缺省 `text_box`。
+  static String _cardKind(String styleJson) {
+    try {
+      final m = jsonDecode(styleJson) as Map<String, dynamic>;
+      final k = m['kind'];
+      if (k == 'note_card' || k == 'text_box') return k as String;
+    } on Object {
+      // 忽略：解析失败按默认处理
+    }
+    return 'text_box';
+  }
+
+  /// 列出某画布上的全部文本卡片（内容 + 位置一起取回）。
+  Future<List<CanvasCardVm>> listCards(String canvasId) async {
+    final nodes = await (_db.select(_db.canvasNodes)
+          ..where(
+              (t) => t.canvasId.equals(canvasId) & t.targetType.equals('card')))
+        .get();
+    if (nodes.isEmpty) return const <CanvasCardVm>[];
+    final cardIds = nodes.map((n) => n.targetId).toList();
+    final cards = await (_db.select(_db.canvasCards)
+          ..where((t) => t.id.isIn(cardIds)))
+        .get();
+    final byId = <String, CanvasCardRow>{for (final c in cards) c.id: c};
+    final out = <CanvasCardVm>[];
+    for (final n in nodes) {
+      final c = byId[n.targetId];
+      if (c == null) continue;
+      out.add(CanvasCardVm(
+        id: c.id,
+        nodeId: n.id,
+        x: n.x,
+        y: n.y,
+        w: n.w,
+        h: n.h,
+        noteId: c.noteId,
+        title: c.title,
+        body: c.body,
+        kind: _cardKind(c.styleJson),
+      ));
+    }
+    return out;
+  }
+
+  /// 在画布上创建一张文本卡片（同时插 `CanvasCards` + `CanvasNodes`）。
+  ///
+  /// 关联笔记时由调用方先取好标题/摘要再传入；这里只负责落库 + 登记同步。
+  Future<Result<CanvasCardVm>> createCard(
+    String canvasId,
+    double x,
+    double y,
+    String kind, {
+    String? noteId,
+    String? title,
+    String? body,
+  }) async {
+    try {
+      final cardId = newUlid();
+      final nodeId = '$canvasId:$cardId';
+      await _db.batch((b) {
+        b.insert(_db.canvasCards, CanvasCardsCompanion(
+              id: Value(cardId),
+              noteId: Value(noteId),
+              title: Value(title ?? ''),
+              body: Value(body ?? ''),
+              styleJson: Value(jsonEncode(<String, dynamic>{'kind': kind})),
+              updatedAt: Value(DateTime.now().toUtc()),
+              version: const Value(1),
+              deviceId: Value(deviceId),
+            ));
+        b.insert(_db.canvasNodes, CanvasNodesCompanion(
+              id: Value(nodeId),
+              canvasId: Value(canvasId),
+              targetType: const Value('card'),
+              targetId: Value(cardId),
+              x: Value(x),
+              y: Value(y),
+              updatedAt: Value(DateTime.now().toUtc()),
+              version: const Value(1),
+              deviceId: Value(deviceId),
+            ));
+      });
+      await _sync.upsertCanvasCard(cardId);
+      await _sync.upsertCanvasNode(nodeId);
+      return Success(CanvasCardVm(
+        id: cardId,
+        nodeId: nodeId,
+        x: x,
+        y: y,
+        noteId: noteId,
+        title: title ?? '',
+        body: body ?? '',
+        kind: kind,
+      ));
+    } on Object catch (e, s) {
+      _log.e('创建画布卡片失败', error: e, stackTrace: s);
+      return Failure(e, s);
+    }
+  }
+
+  /// 更新卡片内容（标题 / 正文 / 关联笔记 / 种类）其一或其组合。
+  Future<Result<void>> updateCard(
+    String cardId, {
+    String? title,
+    String? body,
+    String? noteId,
+    String? kind,
+  }) async {
+    try {
+      final existing = await (_db.select(_db.canvasCards)
+            ..where((t) => t.id.equals(cardId)))
+          .getSingleOrNull();
+      if (existing == null) return const Success<void>(null);
+      final nextKind = kind ?? _cardKind(existing.styleJson);
+      await (_db.update(_db.canvasCards)..where((t) => t.id.equals(cardId)))
+          .write(CanvasCardsCompanion(
+        title: Value(title ?? existing.title),
+        body: Value(body ?? existing.body),
+        noteId: Value(noteId ?? existing.noteId),
+        styleJson: Value(jsonEncode(<String, dynamic>{'kind': nextKind})),
+        updatedAt: Value(DateTime.now().toUtc()),
+        version: const Value(1),
+      ));
+      await _sync.upsertCanvasCard(cardId);
+      return const Success<void>(null);
+    } on Object catch (e, s) {
+      _log.e('更新画布卡片失败', error: e, stackTrace: s);
+      return Failure<void>(e, s);
+    }
+  }
+
+  /// 删除卡片：内容行 + 其 `CanvasNodes` 行一起物理删，二者都登记同步。
+  Future<Result<void>> deleteCard(String cardId) async {
+    try {
+      final card = await (_db.select(_db.canvasCards)
+            ..where((t) => t.id.equals(cardId)))
+          .getSingleOrNull();
+      if (card == null) return const Success<void>(null);
+      final node = await (_db.select(_db.canvasNodes)
+            ..where((t) =>
+                t.targetType.equals('card') & t.targetId.equals(cardId)))
+          .getSingleOrNull();
+      await (_db.delete(_db.canvasCards)..where((t) => t.id.equals(cardId)))
+          .go();
+      if (node != null) {
+        await (_db.delete(_db.canvasNodes)..where((t) => t.id.equals(node.id)))
+            .go();
+      }
+      await _sync.hardDeleteCanvasCards(<CanvasCardRow>[card]);
+      if (node != null) {
+        await _sync.hardDeleteCanvasNodes(<CanvasNodeRow>[node]);
+      }
+      return const Success<void>(null);
+    } on Object catch (e, s) {
+      _log.e('删除画布卡片失败', error: e, stackTrace: s);
+      return Failure<void>(e, s);
+    }
+  }
+
+  /// 移动卡片位置（更新其 `CanvasNodes` 行；target_type 保持 'card'）。
+  ///
+  /// 不能复用 [KnowledgeRepository.saveNodePosition]，后者会把 target_type 写死成
+  /// 'kp'，会把卡片节点覆盖成知识点节点而破坏卡片。这里按 nodeId 直接改 x/y。
+  Future<Result<void>> moveCard(
+    String canvasId,
+    String cardId,
+    double x,
+    double y,
+  ) async {
+    final nodeId = '$canvasId:$cardId';
+    try {
+      final existing = await (_db.select(_db.canvasNodes)
+            ..where((t) => t.id.equals(nodeId)))
+          .getSingleOrNull();
+      await (_db.update(_db.canvasNodes)..where((t) => t.id.equals(nodeId)))
+          .write(CanvasNodesCompanion(
+        x: Value(x),
+        y: Value(y),
+        pinned: const Value(true),
+        updatedAt: Value(DateTime.now().toUtc()),
+        version: Value((existing?.version ?? 0) + 1),
+      ));
+      await _sync.upsertCanvasNode(nodeId);
+      return const Success<void>(null);
+    } on Object catch (e, s) {
+      _log.e('移动画布卡片失败', error: e, stackTrace: s);
+      return Failure<void>(e, s);
+    }
+  }
+
+  // ============ 画布手写笔迹（★2.0.0）============
+
+  /// 画布坐标点序列 ↔ JSON 互转（drift 只能存字符串）。
+  static List<({double x, double y})> _decodePoints(String json) {
+    try {
+      final list = jsonDecode(json) as List<dynamic>;
+      return <({double x, double y})>[
+        for (final e in list)
+          if (e is Map)
+            (
+              x: (e['x'] as num?)?.toDouble() ?? 0,
+              y: (e['y'] as num?)?.toDouble() ?? 0,
+            ),
+      ];
+    } on Object {
+      return const [];
+    }
+  }
+
+  static String _encodePoints(List<({double x, double y})> pts) =>
+      jsonEncode(<Map<String, dynamic>>[
+        for (final p in pts) <String, dynamic>{'x': p.x, 'y': p.y},
+      ]);
+
+  static CanvasStrokeVm _strokeVmFromRow(CanvasStrokeRow r) => CanvasStrokeVm(
+        id: r.id,
+        canvasId: r.canvasId,
+        points: _decodePoints(r.pointsJson),
+        color: r.color,
+        width: r.width,
+      );
+
+  /// 列出某画布上的全部笔迹。
+  Future<List<CanvasStrokeVm>> listStrokes(String canvasId) async {
+    final rows = await (_db.select(_db.canvasStrokes)
+          ..where((t) => t.canvasId.equals(canvasId)))
+        .get();
+    return rows.map(_strokeVmFromRow).toList();
+  }
+
+  /// 新增一条笔迹（落库 + 登记同步）。
+  Future<Result<CanvasStrokeVm>> addStroke(
+    String canvasId,
+    List<({double x, double y})> points,
+    String color,
+    double width,
+  ) async {
+    try {
+      final id = newUlid();
+      await _db.into(_db.canvasStrokes).insert(CanvasStrokesCompanion(
+            id: Value(id),
+            canvasId: Value(canvasId),
+            pointsJson: Value(_encodePoints(points)),
+            color: Value(color),
+            width: Value(width),
+            updatedAt: Value(DateTime.now().toUtc()),
+            version: const Value(1),
+            deviceId: Value(deviceId),
+          ));
+      await _sync.upsertCanvasStroke(id);
+      return Success(CanvasStrokeVm(
+        id: id,
+        canvasId: canvasId,
+        points: points,
+        color: color,
+        width: width,
+      ));
+    } on Object catch (e, s) {
+      _log.e('新增笔迹失败', error: e, stackTrace: s);
+      return Failure(e, s);
+    }
+  }
+
+  /// 删除一条笔迹（橡皮整笔擦除）。
+  Future<Result<void>> deleteStroke(String strokeId) async {
+    try {
+      final row = await (_db.select(_db.canvasStrokes)
+            ..where((t) => t.id.equals(strokeId)))
+          .getSingleOrNull();
+      if (row == null) return const Success<void>(null);
+      await (_db.delete(_db.canvasStrokes)..where((t) => t.id.equals(strokeId)))
+          .go();
+      await _sync.hardDeleteCanvasStrokes(<CanvasStrokeRow>[row]);
+      return const Success<void>(null);
+    } on Object catch (e, s) {
+      _log.e('删除笔迹失败', error: e, stackTrace: s);
+      return Failure<void>(e, s);
+    }
+  }
 }

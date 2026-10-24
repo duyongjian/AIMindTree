@@ -41,7 +41,9 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../data/models/canvas_content.dart';
 import '../../data/models/knowledge_point.dart';
+import 'canvas_text_card.dart';
 import 'edge_router.dart';
 import 'knowledge_node_card.dart';
 import 'layout_engine.dart';
@@ -97,7 +99,20 @@ class TreeCanvas extends StatefulWidget {
     this.frameMode = false,
     this.onToggleFrameMode,
     this.config = const LayoutConfig(),
+    // ★2.0.0：自由文本卡片 / 手写笔迹
+    this.cards = const [],
+    this.strokes = const [],
+    this.penMode = false,
+    this.eraserMode = false,
+    this.onEditCard,
+    this.onMoveCard,
+    this.onAddStroke,
+    this.onEraseStroke,
+    this.onViewportCenter,
   });
+
+  /// 视口中心场景坐标变化时回调（父组件新建卡片时用来定位到可视区中央）。
+  final void Function(Offset sceneCenter)? onViewportCenter;
 
   final List<KnowledgePoint> points;
   final List<PrerequisiteEdge> edges;
@@ -145,6 +160,32 @@ class TreeCanvas extends StatefulWidget {
   final VoidCallback? onToggleFrameMode;
 
   final LayoutConfig config;
+
+  // ── ★2.0.0：自由文本卡片 / 手写笔迹 ──
+
+  /// 画布上的自由文本卡片（笔记卡片 / 透明文本框）。
+  final List<CanvasCardVm> cards;
+
+  /// 已持久化的手写笔迹。
+  final List<CanvasStrokeVm> strokes;
+
+  /// 画笔模式：true = 用笔画线。
+  final bool penMode;
+
+  /// 橡皮模式：true = 擦除整笔。
+  final bool eraserMode;
+
+  /// 点击卡片 → 打开编辑器（由父组件接线对话框）。
+  final ValueChanged<CanvasCardVm>? onEditCard;
+
+  /// 卡片拖动结束：(cardNodeId, x, y)。
+  final void Function(String cardNodeId, double x, double y)? onMoveCard;
+
+  /// 画笔抬笔 → 持久化一笔：(stroke)。
+  final void Function(CanvasStrokeVm stroke)? onAddStroke;
+
+  /// 橡皮命中 → 删除整笔：(strokeId)。
+  final void Function(String strokeId)? onEraseStroke;
 
   @override
   State<TreeCanvas> createState() => TreeCanvasState();
@@ -259,6 +300,36 @@ class TreeCanvasState extends State<TreeCanvas> {
   /// 卡片与光标偏离越大。绝对式每一帧都从**同一起点**重算，误差无法累积。
   Offset _dragSceneAtStart = Offset.zero;
   Offset _dragPosAtStart = Offset.zero;
+
+  /// 当前拖动的是否为「卡片」（true 走卡片位置表 _cardPos / onMoveCard，
+  /// false 走 KP 节点位置表 _pos / onMoveNode）。
+  bool _draggingCard = false;
+
+  // ── ★2.0.0：自由文本卡片 / 手写笔迹的状态 ──
+
+  /// 卡片实时位置（nodeId → 场景坐标），拖动时写入；未拖动则回退到 vm 的 x/y。
+  final Map<String, Offset> _cardPos = <String, Offset>{};
+
+  /// 卡片场景矩形缓存，供命中测试用（build 里写入）。
+  Map<String, Rect> _cardRects = const <String, Rect>{};
+
+  /// 卡片实际绘制顺序（底 → 顶），与渲染共用，保证「所见即所抓」。
+  List<String> _cardPaintOrder = const <String>[];
+
+  /// 被拖到最上层的卡片 nodeId（绘制/命中顺序置顶）。
+  String? _frontCardNodeId;
+
+  /// 当前正在画的笔迹点（屏幕坐标 → 场景坐标后累积）；空 = 没在画。
+  List<Offset> _currentStroke = const <Offset>[];
+
+  /// 是否处于绘制中（仅在 penMode 下为 true）。
+  bool _drawing = false;
+
+  /// 本次擦除手势中已经删掉的笔迹 id，避免同一笔被重复回调。
+  final Set<String> _erasedThisGesture = <String>{};
+
+  /// 最近一次指针按下点的场景坐标，供 _onCanvasTap 命中卡片（onTap 拿不到位置）。
+  Offset _lastTapScene = Offset.zero;
 
   /// 是否按住 Space：**强制平移画布**（即使指针在卡片上也平移，不拖卡片）。
   ///
@@ -554,6 +625,23 @@ class TreeCanvasState extends State<TreeCanvas> {
   // ---- 指针 / 滚轮手势 ----
 
   void _onScaleStart(ScaleStartDetails details) {
+    // 记录按下点的场景坐标，供 _onCanvasTap 命中卡片用（onTap 拿不到位置）。
+    _lastTapScene = _toScene(details.localFocalPoint);
+
+    // ── 画笔 / 橡皮模式：直接接管手势，禁止平移/拖节点 ──
+    if (widget.penMode || widget.eraserMode) {
+      final scene = _lastTapScene;
+      if (widget.penMode) {
+        _drawing = true;
+        _currentStroke = <Offset>[scene];
+        setState(() {});
+      } else {
+        _erasedThisGesture.clear();
+        _eraseAt(scene);
+      }
+      return;
+    }
+
     if (widget.selectionMode) {
       // ── 框选整组移动：指针压在**已选中**节点上 → 开始整组拖动，而非开新框选 ──
       if (widget.allowGroupDrag) {
@@ -596,10 +684,12 @@ class TreeCanvasState extends State<TreeCanvas> {
     // 单指、未按 Space、指针下有节点 → 拖节点；否则 → 平移画布。
     // 这是 Figma/Miro 的直觉：拖东西就移动东西，拖空白 / Space 就平移。
     // 双指一律走平移/缩放（不拖节点，避免捏合与拖动打架）。
-    if (details.pointerCount == 1 && !_spaceHeld) {
+    if (details.pointerCount == 1 && !_spaceHeld &&
+        !widget.penMode && !widget.eraserMode) {
       final hit = _nodeAt(_sceneFocalAtStart);
       if (hit != null) {
         _dragId = hit;
+        _draggingCard = false;
         // ⚠️ 坐标空间：外层 onScale 的 GestureDetector 在 Transform **之外**，
         // `details.localFocalPoint` 是**屏幕坐标**；而 `_nodeRects` / `_pos` 是
         // **场景坐标**。两者不能直接相加 —— 必须把 focal 转成场景坐标再算位移。
@@ -610,10 +700,38 @@ class TreeCanvasState extends State<TreeCanvas> {
         if (_frontKpId != hit) setState(() => _frontKpId = hit);
         return;
       }
+      // 命中卡片（非 KP 节点）→ 拖卡片（复用同一套阈值/绝对位移逻辑）。
+      final cardHit = _cardAt(_sceneFocalAtStart);
+      if (cardHit != null) {
+        _dragId = cardHit;
+        _draggingCard = true;
+        _dragSceneAtStart = _sceneFocalAtStart;
+        _dragPosAtStart = _cardRects[cardHit]?.topLeft ?? Offset.zero;
+        _dragStarted = false;
+        if (_frontCardNodeId != cardHit) {
+          setState(() => _frontCardNodeId = cardHit);
+        }
+        return;
+      }
     }
   }
 
   void _onScaleUpdate(ScaleUpdateDetails details) {
+    // ── 画笔：把当前点追加进正在画的笔迹 ──
+    if (widget.penMode && _drawing) {
+      _currentStroke = <Offset>[
+        ..._currentStroke,
+        _toScene(details.localFocalPoint),
+      ];
+      setState(() {});
+      return;
+    }
+    // ── 橡皮：沿移动轨迹逐段擦除整笔 ──
+    if (widget.eraserMode) {
+      _eraseAt(_toScene(details.localFocalPoint));
+      return;
+    }
+
     if (widget.selectionMode) {
       // ── 框选整组移动：按整组位移实时更新各成员位置（不吸附，松手再吸附）──
       if (_groupDragIds.isNotEmpty) {
@@ -656,20 +774,52 @@ class TreeCanvasState extends State<TreeCanvas> {
         }
         _dragStarted = true;
       }
-      setState(() => _pos[_dragId!] = raw);
+      setState(() {
+        if (_draggingCard) {
+          _cardPos[_dragId!] = raw;
+        } else {
+          _pos[_dragId!] = raw;
+        }
+      });
       return;
     }
-    final nextScale = (_scaleAtStart * details.scale).clamp(_minScale, _maxScale);
-    setState(() {
-      _scale = nextScale;
-      // focal_now = scale_new * sceneFocus + t_new ⇒ t_new = focal - scale * scene
-      // 单指时 details.scale 恒为 1，focal 的位移就是平移量；双指捏合时
-      // focal 是两指中点，平移与缩放一次算完，不会互相打架。
-      _translation = details.localFocalPoint - _sceneFocalAtStart * nextScale;
-    });
+    if (!widget.penMode && !widget.eraserMode) {
+      final nextScale = (_scaleAtStart * details.scale).clamp(_minScale, _maxScale);
+      setState(() {
+        _scale = nextScale;
+        // focal_now = scale_new * sceneFocus + t_new ⇒ t_new = focal - scale * scene
+        // 单指时 details.scale 恒为 1，focal 的位移就是平移量；双指捏合时
+        // focal 是两指中点，平移与缩放一次算完，不会互相打架。
+        _translation = details.localFocalPoint - _sceneFocalAtStart * nextScale;
+      });
+    }
   }
 
   void _onScaleEnd(ScaleEndDetails details) {
+    // ── 画笔收笔：点足够多则上报持久化 ──
+    if (widget.penMode && _drawing) {
+      if (_currentStroke.length >= 2) {
+        widget.onAddStroke?.call(CanvasStrokeVm(
+          id: '',
+          canvasId: '',
+          points: <({double x, double y})>[
+            for (final o in _currentStroke) (x: o.dx, y: o.dy),
+          ],
+          color: '#1a1a1a',
+          width: 3.0,
+        ));
+      }
+      _drawing = false;
+      _currentStroke = const <Offset>[];
+      setState(() {});
+      return;
+    }
+    // ── 橡皮收笔：清空本次手势已擦集合 ──
+    if (widget.eraserMode) {
+      _erasedThisGesture.clear();
+      return;
+    }
+
     if (widget.selectionMode) {
       // ── 框选整组移动收尾 ──
       if (_groupDragIds.isNotEmpty) {
@@ -720,15 +870,22 @@ class TreeCanvasState extends State<TreeCanvas> {
       });
       return;
     }
-    // 节点拖动收尾：松手才吸附到网格 + 写库。没真正拖动过（< 阈值）不写库。
+    // 节点/卡片拖动收尾：松手才吸附到网格 + 写库。没真正拖动过（< 阈值）不写库。
     if (_dragId != null) {
       if (_dragStarted) {
-        final snapped = _snap(_pos[_dragId] ?? Offset.zero);
-        setState(() => _pos[_dragId!] = snapped);
-        widget.onMoveNode?.call(_dragId!, snapped.dx, snapped.dy);
+        if (_draggingCard) {
+          final snapped = _snap(_cardPos[_dragId] ?? Offset.zero);
+          setState(() => _cardPos[_dragId!] = snapped);
+          widget.onMoveCard?.call(_dragId!, snapped.dx, snapped.dy);
+        } else {
+          final snapped = _snap(_pos[_dragId] ?? Offset.zero);
+          setState(() => _pos[_dragId!] = snapped);
+          widget.onMoveNode?.call(_dragId!, snapped.dx, snapped.dy);
+        }
       }
       _dragId = null;
       _dragStarted = false;
+      _draggingCard = false;
     }
   }
 
@@ -746,6 +903,70 @@ class TreeCanvasState extends State<TreeCanvas> {
       if (r != null && r.contains(p)) found = id;
     }
     return found;
+  }
+
+  /// 命中测试：场景点 [p] 落在哪个卡片矩形里（返回卡片 nodeId）。
+  ///
+  /// 与 [_nodeAt] 同理，必须按**实际绘制顺序**（[_cardPaintOrder]）从底往上取最
+  /// 后一个命中的，保证「所见即所抓」。
+  String? _cardAt(Offset p) {
+    String? found;
+    for (final id in _cardPaintOrder) {
+      final r = _cardRects[id];
+      if (r != null && r.contains(p)) found = id;
+    }
+    return found;
+  }
+
+  /// 卡片的实时场景坐标：拖动中优先用 [_cardPos]，否则回退到 vm 自带的 x/y。
+  Offset posOfCard(CanvasCardVm card) =>
+      _cardPos[card.nodeId] ?? Offset(card.x, card.y);
+
+  /// 卡片绘制顺序：被拖到最上层的卡片排到最后（在上层），保证「所见即所抓」。
+  List<CanvasCardVm> _orderedCards(List<CanvasCardVm> cards) {
+    final front = _frontCardNodeId;
+    if (front == null) return cards;
+    final idx = cards.indexWhere((c) => c.nodeId == front);
+    if (idx < 0 || idx == cards.length - 1) return cards;
+    final out = <CanvasCardVm>[...cards];
+    out.add(out.removeAt(idx));
+    return out;
+  }
+
+  /// 橡皮擦：场景点 [scene] 落到某条笔迹附近 → 删除整笔（回调一次）。
+  void _eraseAt(Offset scene) {
+    for (final s in widget.strokes) {
+      if (_erasedThisGesture.contains(s.id)) continue;
+      if (_strokeHit(s, scene)) {
+        _erasedThisGesture.add(s.id);
+        widget.onEraseStroke?.call(s.id);
+      }
+    }
+  }
+
+  /// [scene] 是否命中笔迹 [s]（距任一线段 ≤ 阈值 `8 + 线宽/2`）。
+  bool _strokeHit(CanvasStrokeVm s, Offset scene) {
+    final pts = <Offset>[for (final p in s.points) Offset(p.x, p.y)];
+    if (pts.isEmpty) return false;
+    if (pts.length == 1) {
+      return (pts.first - scene).distance <= 8.0 + s.width / 2;
+    }
+    final limit = 8.0 + s.width / 2;
+    for (var i = 0; i < pts.length - 1; i++) {
+      if (_distanceToSegment(scene, pts[i], pts[i + 1]) <= limit) return true;
+    }
+    return false;
+  }
+
+  /// 点 [p] 到线段 [a]–[b] 的最短距离。
+  double _distanceToSegment(Offset p, Offset a, Offset b) {
+    final ab = b - a;
+    final len2 = ab.distanceSquared;
+    if (len2 == 0) return (p - a).distance;
+    var t = ((p.dx - a.dx) * ab.dx + (p.dy - a.dy) * ab.dy) / len2;
+    t = t.clamp(0.0, 1.0);
+    final proj = a + ab * t;
+    return (p - proj).distance;
   }
 
   /// 悬停置顶：鼠标挪到哪张卡，哪张卡就排到最上层。
@@ -798,6 +1019,8 @@ class TreeCanvasState extends State<TreeCanvas> {
   /// 任意位置都能进来；挂在单条连线的 Positioned 上的话，只有 1.4px 宽的那条
   /// 线本身能命中，实际几乎不可能触发。
   void _onCanvasHover(PointerHoverEvent event) {
+    // 画笔/橡皮模式不处理节点 hover / 置顶，避免干扰绘制。
+    if (widget.penMode || widget.eraserMode) return;
     // 校正 Space 缓存：保证「按下那一刻」平移门控已是真值（见 _syncSpaceState）。
     _syncSpaceState();
     final scene = _toScene(event.localPosition);
@@ -835,6 +1058,21 @@ class TreeCanvasState extends State<TreeCanvas> {
   /// 清掉连线选中态，不会和节点点选冲突。
   void _onCanvasTap() {
     if (widget.selectionMode) return;
+    // 画笔/橡皮模式下点击用于落笔/擦除，不触发卡片编辑。
+    if (widget.penMode || widget.eraserMode) return;
+    // 先判断是不是点到了卡片 → 打开编辑器。
+    final cardHit = _cardAt(_lastTapScene);
+    if (cardHit != null) {
+      CanvasCardVm? vm;
+      for (final c in widget.cards) {
+        if (c.nodeId == cardHit) {
+          vm = c;
+          break;
+        }
+      }
+      if (vm != null) widget.onEditCard?.call(vm);
+      return;
+    }
     setState(() => _selectedEdgeId = _hoveredEdgeId);
   }
 
@@ -992,6 +1230,14 @@ class TreeCanvasState extends State<TreeCanvas> {
     final ordered = _orderedNodes(layout.nodes);
     _paintOrder = <String>[for (final n in ordered) n.kpId];
 
+    // ── ★2.0.0：卡片（自由文本 / 笔记卡片）命中测试缓存 ──
+    final orderedCards = _orderedCards(widget.cards);
+    final cardRects = <String, Rect>{
+      for (final c in orderedCards) c.nodeId: posOfCard(c) & Size(c.w, c.h),
+    };
+    _cardRects = cardRects;
+    _cardPaintOrder = <String>[for (final c in orderedCards) c.nodeId];
+
     // ── 内容包围盒：只按节点算，从 0 起 ──
     // 分组功能已整体下线（框/标签/拖组都移除了），内容不再有任何超出节点矩形
     // 的部件，因此不需要再为「外扩的组框 + 上探的标签条」预留空间，也**不需要**
@@ -1096,6 +1342,21 @@ class TreeCanvasState extends State<TreeCanvas> {
               ),
             ),
           ),
+          // ── ★2.0.0：手写笔迹（已持久化 + 当前正在画的那一笔）──
+          // 与连线同一套场景坐标系，跟随画布一起缩放/平移；不手动套矩阵。
+          Positioned(
+            left: -_paintMargin,
+            top: -_paintMargin,
+            right: -_paintMargin,
+            bottom: -_paintMargin,
+            child: CustomPaint(
+              painter: _StrokesPainter(
+                strokes: widget.strokes,
+                current: _drawing ? _currentStroke : const <Offset>[],
+                origin: const Offset(_paintMargin, _paintMargin),
+              ),
+            ),
+          ),
           // 置顶的那张排到最后（后绘制 = 在上层），避免被别的卡片盖住。
           for (final n in ordered)
             Positioned(
@@ -1125,6 +1386,21 @@ class TreeCanvasState extends State<TreeCanvas> {
                     widget.onKpTap?.call(byId[n.kpId]!);
                   }
                 },
+              ),
+            ),
+          // ── ★2.0.0：自由文本卡片 / 笔记卡片 ──
+          for (final c in orderedCards)
+            Positioned(
+              key: ValueKey<String>('canvas-card:${c.nodeId}'),
+              left: posOfCard(c).dx,
+              top: posOfCard(c).dy,
+              width: c.w,
+              height: c.h,
+              child: CanvasTextCard(
+                title: c.title,
+                body: c.body,
+                kind: c.kind,
+                linked: c.noteId != null,
               ),
             ),
           // 连线上的删除按钮：**只有鼠标悬停的那条线才会渲染**（以前是每条线
@@ -1201,6 +1477,9 @@ class TreeCanvasState extends State<TreeCanvas> {
           autofocus: true,
           child: LayoutBuilder(builder: (context, constraints) {
             _viewport = Size(constraints.maxWidth, constraints.maxHeight);
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) widget.onViewportCenter?.call(_sceneCenter());
+            });
             _autoFitOnce(posOf, layout.nodes);
             // ── 连线 hover 层 ──
             // 挂在**整个 Stack 的外面**（而不是某条线的 Positioned 上）：
@@ -1215,11 +1494,16 @@ class TreeCanvasState extends State<TreeCanvas> {
                 widget.allowGroupDrag &&
                 _hoveredKpId != null &&
                 widget.selectedKpIds.contains(_hoveredKpId);
-            final cursor = _spaceHeld
-                ? SystemMouseCursors.grab
-                : (groupHover || (!widget.selectionMode && _hoveredKpId != null))
-                    ? SystemMouseCursors.move
-                    : SystemMouseCursors.basic;
+            final cursor = widget.penMode
+                ? SystemMouseCursors.cell
+                : widget.eraserMode
+                    ? SystemMouseCursors.click
+                    : (_spaceHeld
+                        ? SystemMouseCursors.grab
+                        : (groupHover ||
+                                (!widget.selectionMode && _hoveredKpId != null))
+                            ? SystemMouseCursors.move
+                            : SystemMouseCursors.basic);
             return MouseRegion(
               cursor: cursor,
               onHover: _onCanvasHover,
@@ -1607,4 +1891,82 @@ class _EdgesPainter extends CustomPainter {
       old.linkingFrom != linkingFrom ||
       old.hoveredEdgeId != hoveredEdgeId ||
       old.origin != origin;
+}
+
+/// 把 `#rrggbb`（或 `#RRGGBB`）十六进制颜色解析成 Flutter [Color]。
+///
+/// 只取低 24 位 RGB，alpha 固定不透明（笔迹不需要透明度）。
+Color _parseHex(String hex) {
+  final h = hex.replaceFirst('#', '').trim();
+  final v = int.parse(h, radix: 16);
+  return Color(0xFF000000 | v);
+}
+
+/// 画布手写笔迹绘制（已持久化笔迹 + 当前正在画的那一笔）。
+///
+/// 在**场景坐标系**里绘制（调用方把它放在画布的 `Transform` 之内），所以笔迹会
+/// 跟着画布一起缩放 / 平移。与 [_EdgesPainter] 一样用 [origin] 补偿掉外层
+/// `Positioned` 的 `-_paintMargin` 偏移，避免被裁掉。
+class _StrokesPainter extends CustomPainter {
+  const _StrokesPainter({
+    required this.strokes,
+    this.current = const <Offset>[],
+    this.origin = Offset.zero,
+  });
+
+  /// 已持久化的笔迹。
+  final List<CanvasStrokeVm> strokes;
+
+  /// 当前正在画的笔迹（跟随手指的实时点）；空 = 没在画。
+  final List<Offset> current;
+
+  /// painter 局部坐标系原点对应的场景坐标（见 [_paintMargin]）。
+  final Offset origin;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (final s in strokes) {
+      _drawStroke(
+        canvas,
+        <Offset>[for (final p in s.points) Offset(p.x, p.y)],
+        _parseHex(s.color),
+        s.width,
+      );
+    }
+    if (current.length >= 2) {
+      _drawStroke(canvas, current, _parseHex('#1a1a1a'), 3.0);
+    } else if (current.length == 1) {
+      // 单点也画一个圆点，避免「点一下没反应」。
+      canvas.drawCircle(
+        current.first + origin,
+        1.5,
+        Paint()..color = _parseHex('#1a1a1a'),
+      );
+    }
+  }
+
+  void _drawStroke(
+      Canvas canvas, List<Offset> pts, Color color, double width) {
+    if (pts.isEmpty) return;
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = width
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..style = PaintingStyle.stroke;
+    if (pts.length == 1) {
+      canvas.drawCircle(pts.first + origin, width / 2, paint);
+      return;
+    }
+    final path = Path()
+      ..moveTo(pts.first.dx + origin.dx, pts.first.dy + origin.dy);
+    for (var i = 1; i < pts.length; i++) {
+      path.lineTo(pts[i].dx + origin.dx, pts[i].dy + origin.dy);
+    }
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _StrokesPainter old) =>
+      !identical(old.strokes, strokes) || !identical(old.current, current);
 }
