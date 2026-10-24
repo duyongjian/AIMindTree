@@ -13,11 +13,16 @@
 三条铁律（面板与验收脚本都按此断言）：
 
 1. **令牌永不回显**：只给 ``token_set`` / ``token_masked``；令牌也不进日志、
-   不进错误消息（日志只打「方法 + 子路径 + 后端名」，错误只打 base_url）。
+   不进错误消息（日志只打「方法 + 子路径 + 后端名 + 是否走代理」，错误只打
+   base_url / proxy —— 代理地址不是密钥）。
 2. **上游非 2xx 原样透传**状态码与 body —— 面板要把中继的原始错误显示出来，
    不许在这里二次包装成 ``internal``。
 3. 网络 / 超时（15s）→ 502 ``backend_unreachable``；该后端未配置 →
    400 ``relay_not_configured``。
+
+出站代理：``relay_admin.<name>.proxy``（可选，空 = 直连）。转发一律
+``trust_env=False``，也就是**不吃环境变量里的代理**——这台机器要访问
+``*.workers.dev`` 只能走本地代理时，必须在面板里显式填这一栏。
 """
 
 from __future__ import annotations
@@ -53,6 +58,11 @@ def _mask_token(token: str) -> str | None:
     if len(token) <= 8:
         return f'{token[:2]}…'
     return f'{token[:4]}…{token[-4:]}'
+
+
+def _has_http_scheme(url: str) -> bool:
+    """``http://`` / ``https://`` 开头（base_url 与 proxy 共用同一套校验）。"""
+    return url.startswith('http://') or url.startswith('https://')
 
 
 def _configured(conf: dict[str, str]) -> bool:
@@ -123,33 +133,50 @@ async def _forward(
         path: 中继侧的子路径（如 ``/admin/stats``），必须已含前缀 ``/admin``。
         params: query 参数（值为 ``None`` 的键会被丢掉）。
         body: POST 的 JSON body（``None`` = 不带 body）。
+
+    出站代理：该后端配了 ``relay_admin.<name>.proxy`` 就经它出网，否则直连。
+    ``trust_env=False`` 意味着**不吃环境变量里的代理**（HTTPS_PROXY 等）——
+    需要代理的机器必须在面板里显式填这一栏（``*.workers.dev`` 常见）。
     """
     conf = config.relay_conf(name)
     base = conf['base_url']
+    proxy = conf['proxy']
     url = f'{base}{path}'
-    # 只打「方法 + 子路径 + 后端名」：令牌与完整 query 都不进日志。
-    _log.info('中继代理 %s %s → %s', method, path, name)
+    # 只打「方法 + 子路径 + 后端名 + 是否走代理」：令牌与完整 query 都不进日志。
+    _log.info(
+        '中继代理 %s %s → %s（%s）',
+        method,
+        path,
+        name,
+        f'proxy={proxy}' if proxy else '直连',
+    )
     headers = {
         'Authorization': f"Bearer {conf['token']}",
         'Accept': 'application/json',
     }
     clean = {k: v for k, v in (params or {}).items() if v}
+    # 代理地址不是密钥，可以出现在错误消息里；令牌仍然只进请求头。
+    via = f'（经代理 {proxy}）' if proxy else ''
     try:
-        async with httpx.AsyncClient(timeout=_RELAY_TIMEOUT_S, trust_env=False) as client:
+        async with httpx.AsyncClient(
+            timeout=_RELAY_TIMEOUT_S,
+            trust_env=False,
+            proxy=(proxy or None),
+        ) as client:
             resp = await client.request(
                 method, url, params=clean or None, json=body, headers=headers
             )
     except httpx.TimeoutException as exc:
         raise LlmError(
             'backend_unreachable',
-            f'云端中继 {name} 在 {_RELAY_TIMEOUT_S:g}s 内没有响应（{base}）。',
+            f'云端中继 {name} 在 {_RELAY_TIMEOUT_S:g}s 内没有响应（{base}）{via}。',
             http_status=502,
         ) from exc
     except httpx.HTTPError as exc:
         raise LlmError(
             'backend_unreachable',
-            f'无法连接云端中继 {name}（{base}）：{type(exc).__name__}。'
-            '请检查网络，或确认该中继已部署 / base_url 正确。',
+            f'无法连接云端中继 {name}（{base}）{via}：{type(exc).__name__}。'
+            '请检查网络 / 代理设置，或确认该中继已部署、base_url 正确。',
             http_status=502,
         ) from exc
 
@@ -165,7 +192,11 @@ async def _forward(
 
 
 def _relay_config_payload(config: Config) -> dict:
-    """``GET / PUT /v1/admin/relay/config`` 的同构响应体（**无令牌明文**）。"""
+    """``GET / PUT /v1/admin/relay/config`` 的同构响应体。
+
+    **无令牌明文**（只 ``token_set`` / ``token_masked``）；``proxy`` 是普通配置
+    （非密钥），明文回显以便面板回填修改。
+    """
     backends: list[dict[str, Any]] = []
     for name in RELAY_BACKENDS:
         conf = config.relay_conf(name)
@@ -174,6 +205,7 @@ def _relay_config_payload(config: Config) -> dict:
             {
                 'name': name,
                 'base_url': conf['base_url'],
+                'proxy': conf['proxy'],
                 'token_set': bool(token),
                 'token_masked': _mask_token(token),
                 # 派生字段：面板据此判断「能不能直接拉数据」（避免前端重复拼规则）
@@ -201,11 +233,13 @@ async def put_relay_config(request: Request) -> JSONResponse:
 
     body::
 
-        {"backend": "cloudflare", "base_url": "https://...", "token": "..."}
+        {"backend": "cloudflare", "base_url": "https://...",
+         "token": "...", "proxy": "http://127.0.0.1:7890"}
 
-    ``backend`` 必填且在 :data:`RELAY_BACKENDS` 内；``base_url`` / ``token``
-    均可选（**缺 key = 不修改**）：``base_url`` 空串 = 回落默认地址，
-    ``token`` 空串 = 清空令牌。类型不对 → 400 ``invalid_request``。
+    ``backend`` 必填且在 :data:`RELAY_BACKENDS` 内；``base_url`` / ``token`` /
+    ``proxy`` 均可选（**缺 key = 不修改**）：``base_url`` 空串 = 回落默认地址，
+    ``token`` 空串 = 清空令牌，``proxy`` 空串 / null = 清空（回落直连）。
+    类型不对 / 代理地址没有 scheme → 400 ``invalid_request``。
     """
     state = request.app.state
     config = state.config  # type: ignore[attr-defined]
@@ -225,9 +259,7 @@ async def put_relay_config(request: Request) -> JSONResponse:
             patch['base_url'] = base_url.strip()
         else:
             raise invalid_request('base_url 必须是字符串或 null')
-        if patch['base_url'] and not (
-            patch['base_url'].startswith('http://') or patch['base_url'].startswith('https://')
-        ):
+        if patch['base_url'] and not _has_http_scheme(patch['base_url']):
             raise invalid_request('base_url 必须以 http:// 或 https:// 开头')
     if 'token' in body:
         token = body.get('token')
@@ -237,9 +269,19 @@ async def put_relay_config(request: Request) -> JSONResponse:
             patch['token'] = token.strip()  # 空串 / 纯空白 = 清空
         else:
             raise invalid_request('token 必须是字符串或 null')
+    if 'proxy' in body:
+        proxy = body.get('proxy')
+        if proxy is None:
+            patch['proxy'] = ''
+        elif isinstance(proxy, str):
+            patch['proxy'] = proxy.strip()  # 空串 / 纯空白 = 直连
+        else:
+            raise invalid_request('proxy 必须是字符串或 null')
+        if patch['proxy'] and not _has_http_scheme(patch['proxy']):
+            raise invalid_request('代理地址必须以 http:// 或 https:// 开头')
 
     if not patch:
-        # 两个键都没传 → 视为「不修改」（与 sync / routes 口径一致）。
+        # 三个键都没传 → 视为「不修改」（与 sync / routes 口径一致）。
         return JSONResponse(
             _relay_config_payload(config), headers={'Cache-Control': 'no-store'}
         )
@@ -247,10 +289,11 @@ async def put_relay_config(request: Request) -> JSONResponse:
     config.save_settings({'relay_admin': {name: patch}})  # type: ignore[attr-defined]
     config.load()  # type: ignore[attr-defined]  # 立即生效
     _log.info(
-        '已保存云端中继配置（backend=%s，base_url=%s，token_set=%s）',
+        '已保存云端中继配置（backend=%s，base_url=%s，token_set=%s，proxy=%s）',
         name,
         patch.get('base_url', '—'),
         bool(patch.get('token')),
+        patch.get('proxy') or '直连',
     )
     return JSONResponse(_relay_config_payload(config), headers={'Cache-Control': 'no-store'})
 

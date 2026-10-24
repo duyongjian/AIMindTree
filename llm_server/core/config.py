@@ -75,22 +75,26 @@ DEFAULTS: dict[str, Any] = {
         'relay_token': '',
     },
     #: 云端同步中继的**管理 API** 配置（M11「云端同步」面板用）。
-    #: 按后端分别存 ``{base_url, token}``；token 只落盘，管理接口只回
+    #: 按后端分别存 ``{base_url, token, proxy}``；token 只落盘，管理接口只回
     #: ``token_set`` / ``token_masked``（与 ``sync`` 段同一套口径）。
     #: ``base_url`` 留空 = 用 :data:`RELAY_ADMIN_DEFAULTS` 的默认地址。
+    #: ``proxy`` 留空 = 直连（转发时 ``trust_env=False``，**不吃环境变量代理**，
+    #: 所以需要走代理的机器必须在这里显式填，例如 ``http://127.0.0.1:7890``）。
     #: 中继未配置 ``ADMIN_TOKEN`` 时，其 ``/admin/*`` 一律 404。
     'relay_admin': {
         'cloudflare': {
             'base_url': 'https://aimindtree-sync-relay.tuanx.workers.dev',
             'token': '',
+            'proxy': '',
         },
         'netlify': {
             'base_url': 'https://aimindtree-sync-relay.netlify.app',
             'token': '',
+            'proxy': '',
         },
-        'vercel': {'base_url': '', 'token': ''},
-        'edgeone': {'base_url': '', 'token': ''},
-        'cloudbase': {'base_url': '', 'token': ''},
+        'vercel': {'base_url': '', 'token': '', 'proxy': ''},
+        'edgeone': {'base_url': '', 'token': '', 'proxy': ''},
+        'cloudbase': {'base_url': '', 'token': '', 'proxy': ''},
     },
 }
 
@@ -197,22 +201,24 @@ def _merge_relay_admin(
     base: Mapping[str, Any] | None,
     override: Mapping[str, Any] | None,
 ) -> dict[str, dict[str, str]]:
-    """合并 ``relay_admin`` 段，返回 ``{后端名: {base_url, token}}``。
+    """合并 ``relay_admin`` 段，返回 ``{后端名: {base_url, token, proxy}}``。
 
     :data:`RELAY_BACKENDS` 里的五个后端**恒定存在**（缺省为空串），这样
     ``GET /v1/admin/relay/config`` 的下拉项不会随配置文件抖动。
-    ``override`` 里只认 ``base_url`` / ``token`` 两个字符串键（类型不对就忽略，
-    具体报错由 PUT 端点负责）；``base_url`` 空串 = 回落默认地址（见
-    :meth:`Config.relay_conf`），``token`` 空串 = 清空。
+    ``override`` 里只认 ``base_url`` / ``token`` / ``proxy`` 三个字符串键（类型
+    不对就忽略，具体报错由 PUT 端点负责）；``base_url`` 空串 = 回落默认地址
+    （见 :meth:`Config.relay_conf`），``token`` 空串 = 清空，``proxy`` 空串 =
+    直连（不走任何代理）。
     """
     out: dict[str, dict[str, str]] = {}
     source = base or {}
     for name in RELAY_BACKENDS:
-        item = {'base_url': '', 'token': ''}
+        item = {'base_url': '', 'token': '', 'proxy': ''}
         cur = source.get(name)
         if isinstance(cur, Mapping):
             item['base_url'] = str(cur.get('base_url') or '').strip()
             item['token'] = str(cur.get('token') or '')
+            item['proxy'] = str(cur.get('proxy') or '').strip()
         out[name] = item
     for name, sub in (override or {}).items():
         key = str(name)
@@ -222,6 +228,8 @@ def _merge_relay_admin(
             out[key]['base_url'] = sub['base_url'].strip()
         if isinstance(sub.get('token'), str):
             out[key]['token'] = sub['token']
+        if isinstance(sub.get('proxy'), str):
+            out[key]['proxy'] = sub['proxy'].strip()
     return out
 
 
@@ -435,18 +443,23 @@ class Config:
         return out
 
     def relay_conf(self, name: str) -> dict[str, str]:
-        """某云端中继后端的管理 API 配置 ``{base_url, token}``。
+        """某云端中继后端的管理 API 配置 ``{base_url, token, proxy}``。
 
         ``base_url`` 已做兜底（留空 → :data:`RELAY_ADMIN_DEFAULTS`）并去掉尾部
         ``/``；``token`` 为**明文**，只允许用于拼 ``Authorization`` 头，
-        绝不回显 / 打日志。
+        绝不回显 / 打日志；``proxy`` 为空串 = 直连（``trust_env=False``，
+        不使用环境变量里的代理）。
         """
         key = str(name or '').strip()
         item = dict((self.relay_admin or {}).get(key) or {})
         base = str(item.get('base_url') or '').strip().rstrip('/')
         if not base:
             base = RELAY_ADMIN_DEFAULTS.get(key, '')
-        return {'base_url': base, 'token': str(item.get('token') or '').strip()}
+        return {
+            'base_url': base,
+            'token': str(item.get('token') or '').strip(),
+            'proxy': str(item.get('proxy') or '').strip(),
+        }
 
     def settings_mtime(self) -> float:
         """``settings.json`` 的 mtime；不存在 / 不可读返回 ``0.0``。"""
@@ -628,6 +641,8 @@ class Config:
                     cur['base_url'] = str(sub.get('base_url') or '').strip()
                 if 'token' in sub:  # 空串 = 清空令牌
                     cur['token'] = str(sub.get('token') or '').strip()
+                if 'proxy' in sub:  # 空串 = 直连（不走代理）
+                    cur['proxy'] = str(sub.get('proxy') or '').strip()
                 merged_relay[key] = cur
             out['relay_admin'] = merged_relay
         if isinstance(data.get('task_backends'), dict):

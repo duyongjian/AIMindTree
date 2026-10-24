@@ -25,7 +25,8 @@ var RELAY_BACKEND_LABEL = {
 };
 
 var RELAY_HEAD_CFG = '<h2>中继连接</h2><p class="hint">GET/PUT /v1/admin/relay/config'
-  + ' —— 写入 settings.json 的 relay_admin 段；令牌只写不读（只回 token_masked）</p>';
+  + ' —— 写入 settings.json 的 relay_admin 段；令牌只写不读（只回 token_masked），'
+  + '代理地址明文回显</p>';
 var RELAY_HEAD_STAT = '<h2>数据概览</h2><p class="hint">GET /v1/admin/relay/stats'
   + ' —— 云端中继实时统计（用户 / 令牌 / 同步行数）</p>';
 var RELAY_HEAD_USERS = '<h2>用户与同步数据</h2><p class="hint">GET /v1/admin/relay/users'
@@ -137,24 +138,38 @@ function renderRelay(root) {
   tokInput.type = 'password';
   tokInput.autocomplete = 'off';
 
+  var lbProxy = makeEl('label', '', '出站代理（可选，留空 = 直连）');
+  var proxyInput = makeEl('input');
+  proxyInput.type = 'text';
+  proxyInput.autocomplete = 'off';
+  proxyInput.placeholder = 'http://127.0.0.1:7890';
+
   var bar = makeEl('div', 'actions');
   var saveBtn = makeEl('button', 'btn', '保存');
   var testBtn = makeEl('button', 'btn ghost', '测试连接');
   var clearBtn = makeEl('button', 'btn ghost', '清空令牌');
+  var clearProxyBtn = makeEl('button', 'btn ghost', '清空代理');
   var cfgMsg = makeEl('span', 'msg');
   bar.appendChild(saveBtn);
   bar.appendChild(testBtn);
   bar.appendChild(clearBtn);
+  bar.appendChild(clearProxyBtn);
   bar.appendChild(cfgMsg);
 
   cfgBody.innerHTML = '';
   cfgBody.appendChild(row);
+  cfgBody.appendChild(lbProxy);
+  cfgBody.appendChild(proxyInput);
   cfgBody.appendChild(lbTok);
   cfgBody.appendChild(tokInput);
   cfgBody.appendChild(makeEl('p', 'field-help',
     '令牌只写不读：管理接口永不回显明文（只有 token_set / token_masked）。'
     + '文本框留空 = 不修改已保存值；点「清空令牌」= 删除。'
     + '中继侧未配置 ADMIN_TOKEN 时，其 /admin/* 一律 404。'));
+  cfgBody.appendChild(makeEl('p', 'field-help',
+    '出站代理：本服务转发时**不吃环境变量里的代理**（trust_env=False），'
+    + '所以访问 *.workers.dev 需要走代理的机器必须在这里显式填（例如 '
+    + 'http://127.0.0.1:7890）；留空 = 直连。代理地址会明文回显，便于修改。'));
   cfgBody.appendChild(bar);
 
   /* ---------- 工具 ---------- */
@@ -169,6 +184,7 @@ function renderRelay(root) {
   function fillForm() {
     var c = cfgOf(state.backend) || {};
     urlInput.value = c.base_url || '';
+    proxyInput.value = c.proxy || '';
     tokInput.value = '';
     tokInput.placeholder = c.token_set
       ? '已配置 ' + (c.token_masked || '') + '，留空 = 不修改'
@@ -201,6 +217,10 @@ function renderRelay(root) {
       '</div><div class="l">服务器时间</div>';
     grid.appendChild(time);
     statBody.appendChild(grid);
+
+    var c = cfgOf(state.backend) || {};
+    statBody.appendChild(makeEl('p', 'small muted',
+      esc('出站代理：' + (c.proxy ? c.proxy : '直连（trust_env=False，不吃环境变量代理）'))));
 
     var per = s.per_user || [];
     if (per.length) {
@@ -373,9 +393,17 @@ function renderRelay(root) {
   saveBtn.addEventListener('click', function () {
     saveBtn.disabled = true;
     testBtn.disabled = true;
+    clearBtn.disabled = true;
+    clearProxyBtn.disabled = true;
     cfgMsg.className = 'msg';
     cfgMsg.textContent = '保存中…';
-    var body = { backend: state.backend, base_url: urlInput.value.trim() };
+    // proxy 是明文普通配置 → 每次都提交（清空输入框 = 直连）；
+    // token 只写不读 → 留空 = 不修改。
+    var body = {
+      backend: state.backend,
+      base_url: urlInput.value.trim(),
+      proxy: proxyInput.value.trim(),
+    };
     if (tokInput.value) body.token = tokInput.value;
     saveRelayConfig(body)
       .then(function (data) {
@@ -398,6 +426,8 @@ function renderRelay(root) {
       .then(function () {
         saveBtn.disabled = false;
         testBtn.disabled = false;
+        clearBtn.disabled = false;
+        clearProxyBtn.disabled = false;
       });
   });
 
@@ -405,6 +435,8 @@ function renderRelay(root) {
     if (!window.confirm('确认清空 ' + state.backend + ' 的管理令牌？清空后不能再拉云端数据。')) return;
     saveBtn.disabled = true;
     testBtn.disabled = true;
+    clearBtn.disabled = true;
+    clearProxyBtn.disabled = true;
     cfgMsg.className = 'msg';
     cfgMsg.textContent = '清空中…';
     saveRelayConfig({ backend: state.backend, token: '' })
@@ -424,6 +456,36 @@ function renderRelay(root) {
       .then(function () {
         saveBtn.disabled = false;
         testBtn.disabled = false;
+        clearBtn.disabled = false;
+        clearProxyBtn.disabled = false;
+      });
+  });
+
+  clearProxyBtn.addEventListener('click', function () {
+    cfgMsg.className = 'msg';
+    cfgMsg.textContent = '清空代理中…';
+    saveBtn.disabled = true;
+    clearProxyBtn.disabled = true;
+    saveRelayConfig({ backend: state.backend, proxy: '' })
+      .then(function (data) {
+        state.configs = (data && data.backends) || state.configs;
+        var keep = state.backend;
+        return loadConfig().then(function () {
+          state.backend = keep;
+          sel.value = keep;
+          fillForm();
+          cfgMsg.textContent = '代理已清空（回到直连）✅';
+          cfgMsg.className = 'msg ok';
+          reloadData();
+        });
+      })
+      .catch(function (e) {
+        cfgMsg.textContent = '清空代理失败：' + relayErrText(e);
+        cfgMsg.className = 'msg err';
+      })
+      .then(function () {
+        saveBtn.disabled = false;
+        clearProxyBtn.disabled = false;
       });
   });
 
@@ -435,7 +497,9 @@ function renderRelay(root) {
       return;
     }
     // 测试用**已保存**的配置（输入框里未保存的改动不参与）
-    var dirty = (urlInput.value.trim() !== (c.base_url || '')) || !!tokInput.value;
+    var dirty = (urlInput.value.trim() !== (c.base_url || ''))
+      || (proxyInput.value.trim() !== (c.proxy || ''))
+      || !!tokInput.value;
     testBtn.disabled = true;
     cfgMsg.className = 'msg';
     cfgMsg.textContent = '连接中…';

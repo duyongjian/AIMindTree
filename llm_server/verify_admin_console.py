@@ -27,6 +27,8 @@
     配置端点（形状 / 令牌零明文 / 空串清空 / 缺 key 不修改 / 类型错 400）+
     **代理转发**（起本地临时假中继：路径 / Bearer / body / 上游 4xx·5xx 原样
     透传 / 不可达 502）+ **还原**；
+8d. M11 出站代理 ``relay_admin.<name>.proxy``：保存回显 / 空串清空 / 非法值 400 /
+    **不可达代理 → 502（证明代理真的被用上）** / 清空后恢复 200 + **还原**；
 9. 静态资源挂载（``/admin``、``/static/*``）；
 10. 可选：真实链路 ``POST /v1/task/T1`` + ``POST /v1/chat``（blocking 与 SSE
     两条路径都要进埋点）（``--live``，需要本机 Ollama 在跑，约 60s）。
@@ -1233,6 +1235,137 @@ def check_relay_admin(c: TestClient, secrets: dict[str, str]) -> None:
         print('  ↩️  settings.json 已还原（relay_admin 段一并回滚）')
 
 
+def check_relay_proxy(c: TestClient, secrets: dict[str, str]) -> None:
+    """[8d] 每后端可选出站代理：保存 / 清空 / 非法值 / **真的被用上**。
+
+    「真的被用上」靠两条互补断言：配一个**不可达**代理 + 本地可达的假中继 →
+    必须 502（若代理被忽略、悄悄直连，就会误判成功）；清空代理 → 恢复 200。
+    """
+    print('\n[8d] M11 出站代理（relay_admin.<name>.proxy）')
+    settings_path = _HERE / 'settings.json'
+    original: str | None = None
+    existed = settings_path.is_file()
+    if existed:
+        original = settings_path.read_text(encoding='utf-8')
+
+    token = 'verify-relay-proxy-token-should-never-echo'
+    dead_proxy = 'http://127.0.0.1:1'  # 本机 1 号端口：必然连不上
+    seen: list[str] = []
+    try:
+        r = c.get('/v1/admin/relay/config')
+        seen.append(r.text)
+        items = r.json().get('backends') or []
+        check(all('proxy' in b for b in items), 'GET /relay/config 每个后端都带 proxy 字段',
+              str(sorted(items[0])) if items else '(空)')
+        cf = next((b for b in items if b.get('name') == 'cloudflare'), {})
+        check(isinstance(cf.get('proxy'), str), 'proxy 为字符串（明文，非掩码）', str(cf.get('proxy')))
+
+        # ---- 保存 → 回显一致 ----
+        r1 = c.put('/v1/admin/relay/config', json={
+            'backend': 'cloudflare', 'proxy': 'http://127.0.0.1:7890',
+        })
+        seen.append(r1.text)
+        cf1 = next((b for b in (r1.json().get('backends') or [])
+                    if b.get('name') == 'cloudflare'), {})
+        check(
+            r1.status_code == 200 and cf1.get('proxy') == 'http://127.0.0.1:7890',
+            'PUT proxy 保存成功且回显一致（明文）',
+            str(cf1.get('proxy')),
+        )
+        r1b = c.get('/v1/admin/relay/config')
+        seen.append(r1b.text)
+        cf1b = next((b for b in (r1b.json().get('backends') or [])
+                     if b.get('name') == 'cloudflare'), {})
+        check(cf1b.get('proxy') == 'http://127.0.0.1:7890', 'GET 回读 proxy 一致')
+
+        # ---- 非法值 → 400（必须说清要带 scheme）----
+        for bad in ('127.0.0.1:7890', 'socks5://127.0.0.1:7890'):
+            rb = c.put('/v1/admin/relay/config', json={'backend': 'cloudflare', 'proxy': bad})
+            msg = rb.json().get('error', {}).get('message', '') if rb.status_code == 400 else ''
+            check(
+                rb.status_code == 400
+                and rb.json().get('error', {}).get('code') == 'invalid_request'
+                and '代理地址必须以 http:// 或 https:// 开头' in msg,
+                f'PUT proxy={bad!r} → 400 invalid_request（提示要带 scheme）',
+                f'{rb.status_code} {msg[:80]}',
+            )
+        rb = c.put('/v1/admin/relay/config', json={'backend': 'cloudflare', 'proxy': 5})
+        check(rb.status_code == 400, 'PUT proxy 类型错 → 400', str(rb.status_code))
+
+        # ---- 缺 key = 不修改 ----
+        r2 = c.put('/v1/admin/relay/config', json={'backend': 'cloudflare'})
+        cf2 = next((b for b in (r2.json().get('backends') or [])
+                    if b.get('name') == 'cloudflare'), {})
+        check(
+            r2.status_code == 200 and cf2.get('proxy') == 'http://127.0.0.1:7890',
+            'PUT 缺 proxy key → 不修改（缺 key 语义）',
+            str(cf2.get('proxy')),
+        )
+
+        # ---- 真的被用上：不可达代理 + 本地假中继 → 502 ----
+        with _FakeRelay() as fake:
+            c.put('/v1/admin/relay/config', json={
+                'backend': 'cloudflare', 'base_url': fake.base_url,
+                'token': token, 'proxy': dead_proxy,
+            })
+            r902 = c.get('/v1/admin/relay/ping?backend=cloudflare')
+            seen.append(r902.text)
+            check(
+                r902.status_code == 502
+                and r902.json().get('error', {}).get('code') == 'backend_unreachable',
+                '不可达代理 + 可达中继 → 502 backend_unreachable（证明确实走了代理）',
+                f'{r902.status_code} {r902.text[:140]}',
+            )
+            err = r902.json().get('error', {}).get('message', '')
+            check(
+                dead_proxy in err and token not in r902.text,
+                '错误消息带代理地址（可排查）、不带令牌',
+                err[:120],
+            )
+
+            # ---- proxy="" → 清空，同一假中继恢复 200 ----
+            r3 = c.put('/v1/admin/relay/config', json={
+                'backend': 'cloudflare', 'proxy': '',
+            })
+            seen.append(r3.text)
+            cf3 = next((b for b in (r3.json().get('backends') or [])
+                        if b.get('name') == 'cloudflare'), {})
+            check(cf3.get('proxy') == '', 'PUT proxy="" → 清空（回落直连）', str(cf3.get('proxy')))
+            r4 = c.get('/v1/admin/relay/ping?backend=cloudflare')
+            seen.append(r4.text)
+            check(
+                r4.status_code == 200 and r4.json().get('ok') is True,
+                '清空代理后同一中继恢复 200（证明清空生效）',
+                f'{r4.status_code} {r4.text[:120]}',
+            )
+
+            # ---- proxy=null 同样视为清空 ----
+            c.put('/v1/admin/relay/config', json={
+                'backend': 'netlify', 'base_url': fake.base_url, 'token': token,
+                'proxy': 'http://127.0.0.1:7890',
+            })
+            r5 = c.put('/v1/admin/relay/config', json={'backend': 'netlify', 'proxy': None})
+            seen.append(r5.text)
+            nf = next((b for b in (r5.json().get('backends') or [])
+                       if b.get('name') == 'netlify'), {})
+            check(nf.get('proxy') == '', 'PUT proxy=null → 清空', str(nf.get('proxy')))
+
+        # ---- 配置响应：有 proxy 明文、无 token 明文 ----
+        rc = c.get('/v1/admin/relay/config')
+        seen.append(rc.text)
+        blob = ''.join(seen)
+        check('"proxy"' in rc.text, 'config 响应确实含 proxy 字段')
+        check(token not in blob, '全部响应不含令牌明文（proxy 明文是可以的）')
+        assert_no_secret(blob, secrets, '/v1/admin/relay/*（含 proxy）')
+    finally:
+        if existed and original is not None:
+            settings_path.write_text(original, encoding='utf-8')
+        elif settings_path.is_file():
+            settings_path.unlink()
+        c.post('/v1/admin/reload')
+        print('  ↩️  settings.json 已还原（relay_admin.proxy 一并回滚）')
+
+
 def check_static(c: TestClient) -> None:
     print('\n[9] 静态资源挂载（AC-09）')
     index = _HERE / 'static' / 'index.html'
@@ -1362,6 +1495,7 @@ def main(argv: list[str] | None = None) -> int:
         check_config_roundtrip(c)
         check_sync_endpoints(c, secrets)
         check_relay_admin(c, secrets)
+        check_relay_proxy(c, secrets)
         check_static(c)
         if live:
             check_live_t1(c)
