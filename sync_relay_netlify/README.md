@@ -94,7 +94,27 @@ node test_protocol.mjs        # 期望：通过 97，失败 0
 > `netlify dev` 可验证读路径（本地 Blobs 服务器 GET 正常），**写路径因上述
 > EXDEV 缺陷不可用**——写/全链路验证以生产部署为准（CLI 一条命令，见下）。
 
-## 部署（CLI + 令牌，2026-10-24 实操通过）
+## 日常重新部署（一条命令）
+
+代码或 `netlify.toml` 有改动后（例如新增 `/admin/*` rewrite、CORS 补 DELETE），
+用 `deploy.sh` 一条命令完成「写环境变量 → 推生产 → 冒烟验证」。
+**顺序不能反**：`env:set` 必须在 `deploy` 之前，否则会部署出一个函数读不到
+`ADMIN_TOKEN` 的版本（`/admin/*` 全部 404）。
+
+```bash
+cd sync_relay_netlify
+./deploy.sh                            # 复用已登录的 CLI 会话
+NETLIFY_AUTH_TOKEN=<pat> ./deploy.sh   # 或者用令牌免登录
+```
+
+脚本自身不写入库任何令牌，依次从三处取 `ADMIN_TOKEN` 与 `NETLIFY_BLOBS_TOKEN`：
+环境变量 → `.workbuddy/backups/netlify_deploy.env`（已 gitignore）→ 交互式输入。
+`NETLIFY_BLOBS_TOKEN` 若站点已存在则保持原值不覆盖（避免冲掉历史值）。
+部署完成后自动用 `/admin/ping` 冒烟，**200 即代表中继管理接口已开**，随后到本地
+M11「云端同步」把后端切到 netlify 点「测试连接」即可（netlify 免代理可达，
+「出站代理」留空）。
+
+## 首次建站（CLI + 令牌，2026-10-24 实操通过）
 
 ```bash
 # 0) 装 CLI（锁 17.0.0：latest 版在本机 npm 缓存有 zip-it-and-ship-it 解析故障）
