@@ -34,6 +34,7 @@ import '../../data/repositories/ai_session_repository.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
 import '../knowledge/kp_dedup.dart';
+import '../shared/session_context.dart';
 import '../shared/session_ui.dart';
 
 // 会话相关的共享工具已搬到 `lib/features/shared/session_ui.dart`；
@@ -442,7 +443,12 @@ class AgentPageState extends State<AgentPage> {
     // 经用户逐项勾选批准后才执行，被拒的不写；否则即为最终答案。
     // 轮数上限 kAgentToolMaxRounds 防模型反复调用工具不回答。
     final memoryCtx = await _buildMemoryContext();
-    final sessionCtx = _buildSessionContext();
+    // L2 前文：由公共纯函数组装（AI 助手与老师模式共用同一份实现，避免两份
+    // 同构实现各自漂移）。默认 maxMessages=12 / maxChars=0 → 与迁移前的私有
+    // 实现 `_buildSessionContext()` **输出逐字相同**。
+    final sessionCtx = buildSessionContext(
+      _history.map((m) => (role: m.role, content: m.content)).toList(),
+    );
     final toolLog = StringBuffer();
     for (var round = 1; round <= kAgentToolMaxRounds; round++) {
       final buf = StringBuffer();
@@ -644,19 +650,6 @@ class AgentPageState extends State<AgentPage> {
 
   /// 单会话前文：把当前会话里最近的 user/assistant 轮回灌给模型，
   /// 保证同一会话内问答互相参考、不彼此孤立。
-  String _buildSessionContext() {
-    final turns = _history
-        .where((m) => m.role == 'user' || m.role == 'assistant')
-        .toList();
-    final recent = turns.length > 12 ? turns.sublist(turns.length - 12) : turns;
-    if (recent.isEmpty) return '';
-    final b = StringBuffer('【本会话前文】（同一会话内此前的问答，请参考上下文）\n');
-    for (final m in recent) {
-      b.writeln('${m.role == 'user' ? '用户' : 'AI'}：${m.content}');
-    }
-    return b.toString().trimRight();
-  }
-
   /// 写入操作审批：列出操作清单，每项一个勾选框，返回用户勾选批准的部分。
   /// 返回空列表 = 用户全部拒绝（不执行任何写入）。
   Future<List<AgentToolPlan>> _requestApproval(List<AgentToolPlan> plans) async {

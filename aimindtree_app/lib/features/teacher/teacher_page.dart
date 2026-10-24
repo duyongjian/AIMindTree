@@ -9,6 +9,11 @@
 ///
 /// B4 互斥：会话打开期间持 `kp:{id}` 资源锁（入口处挡「同点另开老师模式」），
 /// 托盘同步显示一行计时；生成中 / 空闲两种文案联动。
+///
+/// L2 上下文注入（2026-10-24 新增）：
+/// - 追问（T5）：历史快照取自 `_askMessages`，注入用户问题之前。
+/// - 讲解（T6）：历史快照取自 `_askMessages`（追问会话），
+///   避免将上次讲解原文重复注入。
 library;
 
 import 'package:flutter/material.dart';
@@ -19,6 +24,11 @@ import '../../ai/ai_task.dart';
 import '../../data/models/knowledge_point.dart';
 import '../../data/repositories/ai_session_repository.dart';
 import '../../data/repositories/knowledge_repository.dart';
+import '../shared/session_context.dart';
+
+/// 老师模式 L2 注入常量（裁决 8）。
+const int kTeacherContextMaxMessages = 10; // 10 条 = 5 轮
+const int kTeacherContextMaxChars = 4000;
 
 class TeacherPage extends StatefulWidget {
   const TeacherPage({
@@ -97,6 +107,8 @@ class _TeacherPageState extends State<TeacherPage>
   }
 
   /// 生成讲解（T6）：流式调用，结果作为一条 assistant 消息持久化。
+  ///
+  /// L2 注入：从追问会话（_askMessages）取历史，避免重复注入讲解原文。
   Future<void> _generateExplain() async {
     if (_explainBusy) return;
     setState(() {
@@ -108,9 +120,21 @@ class _TeacherPageState extends State<TeacherPage>
     final ctx = '知识点：${widget.kp.name}（${widget.kp.type.label}）。\n'
         '定义：${widget.kp.definition}\n'
         '来源：${widget.kp.sourceQuote}';
-    final query = '$ctx\n\n'
-        '请用通俗、循序渐进的方式讲解这个概念，帮助初学者建立直观理解，'
-        '并点出它容易和哪些概念混淆。';
+
+    // L2：从追问会话取历史（不含本轮问题）
+    final askTurns = _askMessages
+        .map((m) => (role: m.role, content: m.content))
+        .toList();
+    final l2 = buildSessionContext(
+      askTurns,
+      maxMessages: kTeacherContextMaxMessages,
+      maxChars: kTeacherContextMaxChars,
+    );
+
+    final query = l2.isEmpty
+        ? '$ctx\n\n请用通俗、循序渐进的方式讲解这个概念，帮助初学者建立直观理解，并点出它容易和哪些概念混淆。'
+        : '$ctx\n\n$l2\n\n请用通俗、循序渐进的方式讲解这个概念，帮助初学者建立直观理解，并点出它容易和哪些概念混淆。';
+
     final buf = StringBuffer();
     try {
       await for (final chunk in widget.ai.chat(AiTask.t6Explain, query)) {
@@ -148,13 +172,29 @@ class _TeacherPageState extends State<TeacherPage>
     });
     _ticket('正在回答追问…');
 
+    // L2：快照在写入本轮 user 消息之前，确保本轮问题不出现在前文块中。
+    final historySnapshot = List<ChatMessage>.from(_askMessages);
+
     await widget.sessions.addMessage(
         sessionId: _askSessionId, role: 'user', content: text);
 
     final ctx = '知识点：${widget.kp.name}（${widget.kp.type.label}）。\n'
         '定义：${widget.kp.definition}\n'
         '来源：${widget.kp.sourceQuote}';
-    final fullQuery = '$ctx\n\n用户问题：$text';
+
+    // L2：从历史快照组装前文（不含本轮刚写入的 user 消息）
+    final turns = historySnapshot
+        .map((m) => (role: m.role, content: m.content))
+        .toList();
+    final l2 = buildSessionContext(
+      turns,
+      maxMessages: kTeacherContextMaxMessages,
+      maxChars: kTeacherContextMaxChars,
+    );
+
+    final fullQuery = l2.isEmpty
+        ? '$ctx\n\n用户问题：$text'
+        : '$ctx\n\n$l2\n\n用户问题：$text';
 
     // 累加流式增量：原实现 `answer = chunk.delta` 每片覆盖，最终只剩最后一个
     // 分片（界面上就是一个「）」），这里改为 StringBuffer 拼接整段回答。
@@ -462,13 +502,13 @@ class _KpHeader extends StatelessWidget {
                 style: const TextStyle(fontSize: 12, color: Colors.grey)),
             if (kp.definition.isNotEmpty)
               Padding(
-                padding: const EdgeInsets.only(top: 6),
+                padding: const EdgeInsets.only(top: 4),
                 child: Text(kp.definition,
                     style: const TextStyle(fontSize: 13)),
               ),
             if (kp.sourceQuote.isNotEmpty)
               Padding(
-                padding: const EdgeInsets.only(top: 6),
+                padding: const EdgeInsets.only(top: 4),
                 child: Text(
                   '原文：${kp.sourceQuote}',
                   style: const TextStyle(
