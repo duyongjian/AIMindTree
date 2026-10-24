@@ -222,7 +222,8 @@ class AgentPageState extends State<AgentPage> {
   String? _sessionId;
 
   /// H：会话仓储（与 main.dart 各自持有实例，底层同一个 AppDatabase）。
-  late final AiSessionRepository _sessions = AiSessionRepository(widget.db);
+  late final AiSessionRepository _sessions =
+      AiSessionRepository(widget.db, deviceId: widget.service.repo.deviceId);
 
   /// AI 助手长期记忆存储（设置里可开关 / 查看内容）。
   final AgentMemoryStore _memory = AgentMemoryStore();

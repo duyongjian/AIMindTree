@@ -117,7 +117,8 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     await Navigator.of(context).push<bool>(MaterialPageRoute(
       builder: (_) => TeacherPage(
         kp: kp,
-        sessions: AiSessionRepository(widget.db),
+        sessions: AiSessionRepository(widget.db,
+            deviceId: widget.service.repo.deviceId),
         ai: widget.service.ai,
         repo: widget.service.repo,
         jobs: widget.service.jobs,

@@ -97,7 +97,8 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> {
   int _index = 0;
-  late final AiSessionRepository _sessions = AiSessionRepository(widget.db);
+  late final AiSessionRepository _sessions =
+      AiSessionRepository(widget.db, deviceId: widget.service.repo.deviceId);
   // 触发画布刷新（提取完后跳过去时用）
   final _canvasKey = GlobalKey<CanvasPageState>();
   // 笔记列表触发刷新
