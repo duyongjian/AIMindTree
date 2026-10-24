@@ -1,0 +1,66 @@
+flowchart TB
+  subgraph APP["aimindtree_app"]
+    subgraph ENTRY["入口层（本次仅改 2 行/处）"]
+      MAIN["main.dart:100 / :117<br/>_openTeacher → TeacherPage"]
+      NOTE["note_editor_page.dart:117<br/>_openKp → TeacherPage"]
+    end
+
+    subgraph TEACH["老师模式（本次主战场）"]
+      TP["teacher_page.dart<br/>单消息流 + 底部「再讲一次」"]
+      TSC["teacher_session_controller.dart（新增）<br/>页面状态机：bootstrap / 切换 / 删除接续"]
+      TSS["teacher_session_sheet.dart（新增）<br/>KP 作用域的会话管理面板"]
+      TSCOPY["teacher_session_copy.dart（新增）<br/>三处文案同源常量（PRD C11）"]
+    end
+
+    subgraph SHARED["共享层（session_ui 已由 T01b 落地；session_context 本次新增）"]
+      SUI["features/shared/session_ui.dart ✅已落地<br/>deriveSessionTitle / fmtSessionTime<br/>askNameDialog / confirmDialog"]
+      SCTX["🔴 features/shared/session_context.dart（新增）<br/>buildSessionContext（纯函数）<br/>【主链路】每次提问：组装历史 → 注入 query → 落库<br/>L2 规模 10 条（5 轮）/ ≤4000 字 / 从最老丢"]
+    end
+
+    subgraph AGENT["AI 助手（本次仅做等价搬迁）"]
+      AP["agent_page.dart<br/>_SessionManagerSheet 保持原样<br/>_buildSessionContext → 调用共享纯函数"]
+    end
+
+    subgraph DATA["数据层"]
+      REPO["ai_session_repository.dart<br/>getOrCreateForKp(修复) / listSessionsForKp<br/>primarySessionForKp / createSessionForKp<br/>mergeLegacyExplain / listMessages(id ASC)"]
+      ID["core/id.dart<br/>newUlid() + newDerivedUlid(确定性派生)"]
+    end
+
+    subgraph SYNC["同步层（本次零改动）"]
+      ROWMAP["sync_row_map.dart:149-175<br/>aiSessionRowToMap / aiMessageRowToMap"]
+      OBW["sync_outbox_writer.dart:101-117<br/>upsertAiSession / upsertAiMessage"]
+      ENG["sync_engine.dart<br/>push:178-186 / pull:586,621-624 / hydrate:744-751"]
+    end
+
+    AI["llm_server（零改动）<br/>routers/chat.py:36-38 无状态、仅回显"]
+  end
+
+  MAIN --> TP
+  NOTE --> TP
+  TP --> TSC
+  TP --> TSS
+  TSC --> TSCOPY
+  TSS --> TSCOPY
+  TSC --> REPO
+  TSS --> REPO
+  TSC --> SCTX
+  TSC --> AI
+  AP --> SCTX
+  AP --> SUI
+  TP --> SUI
+  TSS --> SUI
+  REPO --> ID
+  REPO --> OBW
+  OBW --> ROWMAP
+  ENG --> ROWMAP
+  ROWMAP -.payload.-> ENG
+  ENG -.HTTP.-> AI
+
+  classDef new fill:#e8f5e9,stroke:#2e7d32
+  classDef chg fill:#fff8e1,stroke:#f9a825
+  classDef same fill:#eceff1,stroke:#607d8b
+  classDef core fill:#ffebee,stroke:#c62828,stroke-width:3px
+  class SCTX core
+  class TSC,TSS,SUI,TSCOPY new
+  class TP,REPO,AP,MAIN,NOTE,ID chg
+  class ROWMAP,OBW,ENG,AI same

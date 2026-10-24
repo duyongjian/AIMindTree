@@ -1,0 +1,177 @@
+classDiagram
+direction LR
+
+  class AiSessionRepository {
+    -AppDatabase _db
+    -String deviceId
+    -SyncOutboxWriter _sync
+    +AiSessionRepository(AppDatabase db, String deviceId)
+    +Future~AiSessionRow~ getOrCreateForKp(String kpId, AiTask task)
+    +Future~List~ChatMessage~~ listMessages(String sessionId)
+    +Future~List~AiSessionRow~~ listSessionsForKp(String kpId)
+    +Future~AiSessionRow~ primarySessionForKp(String kpId)
+    +Future~AiSessionRow~ createSessionForKp(String kpId, String title)
+    +Future~LegacyMergeResult~ mergeLegacyExplain(String kpId)
+    +Future~AiSessionRow~ createAgentSession()
+    +Future~List~AiSessionRow~~ listAgentSessions()
+    +Future~void~ renameSession(String sessionId, String title)
+    +Future~int~ clearMessages(String sessionId)
+    +Future~void~ deleteSession(String sessionId)
+    -Future~void~ _touchSession(String sessionId, DateTime now)
+  }
+  note for AiSessionRepository "deviceId 默认 ''（空串兜底，禁 'local-dev'）<br/>listMessages 排序键 = 纯 id ASC<br/>createSessionForKp 的 title 默认 ''<br/>getOrCreateForKp 保留兼容，不加墓碑过滤会漏"
+
+  class ChatMessage {
+    +String id
+    +String sessionId
+    +String role
+    +String content
+    +DateTime createdAt
+    +String? modelId
+    +ChatMessage(String id, String sessionId, String role, String content, DateTime createdAt, String modelId)
+    +bool get isExplain
+  }
+  note for ChatMessage "isExplain = (modelId == 'dify-t6')<br/>modelId 为 null/其它值 → 普通消息，不崩"
+
+  class AiSessionRow {
+    +String id
+    +String type
+    +String targetRef
+    +String title
+    +String? kpId
+    +String? modelId
+    +String tutorState
+    +String? difficulty
+    +DateTime updatedAt
+    +int version
+    +String deviceId
+    +DateTime? deletedAt
+  }
+
+  class LegacyMergeOutcome {
+    <<enumeration>>
+    merged
+    skippedNoLegacy
+    failed
+  }
+
+  class LegacyMergeResult {
+    +LegacyMergeOutcome outcome
+    +String? chatSessionId
+    +String? explainSessionId
+    +int movedMessages
+    +int normalizedOnly
+    +Object? error
+  }
+
+  class TeacherSessionController {
+    -AiSessionRepository _repo
+    -KnowledgePoint _kp
+    -String? _currentSessionId
+    -String? _primarySessionId
+    -List~ChatMessage~ _messages
+    -List~AiSessionRow~ _sessions
+    +Future~TeacherBootResult~ bootstrap()
+    +Future~AiSessionRow~ createUserSession()
+    +Future~AiSessionRow~ createPrimarySessionWithExplain()
+    +String buildQuery(List~ChatMessage~ history, AiTask task, String currentQuestion)
+    +Future~void~ openSession(AiSessionRow row)
+    +Future~TeacherDeleteOutcome~ deleteSession(String sessionId)
+    +Future~void~ renameCurrent(String title)
+    +Future~int~ clearCurrent()
+  }
+  note for TeacherSessionController "autoExplain 落 controller 层（裁决 12）<br/>用户主动新建 = 不讲解；系统补建 = 自动讲解<br/>buildQuery(task) 是 T5/T6/再讲一次的【唯一】L2 注入入口"
+
+  class TeacherContextConst {
+    <<lib/features/teacher/teacher_session_controller.dart>>
+    +int kTeacherContextMaxMessages = 10
+    +int kTeacherContextMaxChars = 4000
+  }
+
+  class TeacherBootResult {
+    +AiSessionRow? session
+    +List~ChatMessage~ messages
+    +bool needAutoExplain
+    +LegacyMergeResult? merge
+  }
+
+  class TeacherDeleteOutcome {
+    +AiSessionRow? next
+    +bool recreated
+    +bool autoExplained
+  }
+
+  class TeacherPage {
+    +KnowledgePoint kp
+    +AiSessionRepository sessions
+    +AiService ai
+    +KnowledgeRepository repo
+    +AiJobService jobs
+  }
+
+  class TeacherSessionSheet {
+    +AiSessionRepository sessions
+    +String kpId
+    +String? currentSessionId
+    +String? primarySessionId
+    +Function onOpen
+    +Function onNew
+    +Function onCurrentMutated
+    +Function titleFallback
+    +Function deleteConfirmText
+  }
+  note for TeacherSessionSheet "面板行展示：标题/主会话「默认」标签/时间/【最后一条消息预览】<br/>删除主会话的三处文案同源于 teacher_session_copy.dart"
+
+  class SessionUi {
+    <<shared / lib/features/shared/session_ui.dart>>
+    +String deriveSessionTitle(String storedTitle, List~ChatMessage~ messages, String fallbackTitle)
+    +String fmtSessionTime(DateTime t)
+    +Future~String?~ askNameDialog(BuildContext context, String title, String hint, String initial)
+    +Future~bool~ confirmDialog(BuildContext context, String title, String message)
+  }
+  note for SessionUi "✅ 已由 T01b(f3c7176) 落地<br/>deriveSessionTitle 的 fallbackTitle 默认 '新对话'（不可改）"
+
+  class TurnRecord {
+    <<纯函数入参：Dart 记录类型，仅 2 字段 role/content>>
+    +String role
+    +String content
+  }
+
+  class SessionContext {
+    <<shared / lib/features/shared/session_context.dart>>
+    +String buildSessionContext(List~SessionTurn~ turns, int maxMessages, int maxChars, String header)
+  }
+  note for SessionContext "maxMessages 默认 12 = Agent 现状（不可改）<br/>老师模式显式传 kTeacherContextMaxMessages = 10（5 轮）<br/>老师模式传 at:null → 保持 listMessages 的 id ASC 顺序"
+
+  class IdHelper {
+    <<core / lib/core/id.dart>>
+    +String newUlid()
+    +String newDerivedUlid(String srcId)
+  }
+  note for IdHelper "newDerivedUlid(srcId)：整个 ULID 当 128 位大端整数 +1（带进位）<br/>性质：双射 / 保序 / 时间戳不动 / 幂等<br/>禁止「逐字节各自 +1 不进位」→ 时间戳 +2^40 ms ≈ 34.8 年<br/>禁止「只把随机尾巴 +1」→ 非全局双射"
+
+  class SyncOutboxWriter {
+    +Future~void~ upsertAiSession(String id)
+    +Future~void~ upsertAiMessage(String id)
+  }
+  note for SyncOutboxWriter "AI 两表【无】tombstoneAiSession/tombstoneAiMessage<br/>软删靠 payload 的 deleted_at 传播"
+
+  AiSessionRepository --> ChatMessage : 返回
+  AiSessionRepository --> AiSessionRow : 返回
+  AiSessionRepository --> LegacyMergeResult : 返回
+  AiSessionRepository --> SyncOutboxWriter : 写后登记 outbox
+  AiSessionRepository ..> IdHelper : newDerivedUlid（合并派生 id）
+  LegacyMergeResult --> LegacyMergeOutcome : outcome
+  TeacherSessionController --> AiSessionRepository : 读写会话/消息
+  TeacherSessionController --> SessionContext : buildSessionContext（L2 注入）
+  TeacherSessionController --> TeacherContextConst : 常量（10 条 / 4000 字）
+  TeacherSessionController --> TeacherBootResult : 返回
+  TeacherSessionController --> TeacherDeleteOutcome : 返回
+  TeacherPage --> TeacherSessionController : 驱动状态机
+  TeacherPage --> AiSessionRepository : 直接使用（addMessage）
+  TeacherPage --> SessionUi : deriveSessionTitle / confirmDialog
+  TeacherSessionSheet --> SessionUi : fmtSessionTime / askNameDialog / confirmDialog
+  TeacherSessionSheet --> AiSessionRepository : listSessionsForKp
+  TeacherSessionSheet --> TeacherSessionController : 回调 onOpen / onNew / onCurrentMutated
+  ChatMessage --> SessionUi : 标题派生输入
+  SessionContext ..> TurnRecord : 入参记录类型

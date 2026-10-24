@@ -1,0 +1,99 @@
+sequenceDiagram
+  autonumber
+  participant U as 用户
+  participant P as TeacherPage
+  participant C as TeacherSessionController
+  participant X as buildSessionContext(纯函数)
+  participant R as AiSessionRepository
+  participant D as SQLite(ai_sessions/ai_messages)
+  participant S as SyncOutboxWriter
+  participant L as llm_server
+
+  U->>P: 点知识点 → push TeacherPage
+  P->>C: bootstrap(kpId)
+  Note over C: 步骤 1：老数据合并（必须最先，裁决 16.1 / PRD IC2）
+  C->>R: mergeLegacyExplain(kpId)
+  R->>D: 读该 KP 下未删会话（按 type 分组）
+  alt 存在未删 explain 且存在未删 chat
+    R->>D: 读 explain 的未删消息（id ASC）
+    loop 每条源消息
+      R->>D: INSERT 新行（新 id=确定性派生，session_id=chat，updated_at=原值）
+      R->>S: upsertAiMessage(新 id)
+      R->>D: UPDATE 源行（deleted_at=now, version+1）
+      R->>S: upsertAiMessage(源 id)  %% 墓碑靠 payload.deleted_at 传播
+    end
+    R->>D: UPDATE explain 行（deleted_at=now, version+1）
+    R->>S: upsertAiSession(explain id)
+    R->>D: UPDATE chat 行（updated_at=now, version+1）
+    R->>S: upsertAiSession(chat id)
+  else 仅存在未删 explain
+    R->>D: UPDATE explain 行 type='chat'（version+1）
+    R->>S: upsertAiSession(explain id)  %% type 在 payload 内 → 必须入队才能让对端收敛（PRD R7）
+  end
+  Note over C: 步骤 2：取主会话（合并之后）
+  C->>R: primarySessionForKp(kpId)
+  R->>D: SELECT ... WHERE kp_id=? AND type='chat' AND deleted_at IS NULL ORDER BY id ASC LIMIT 1
+  alt 主会话存在
+    C->>R: listMessages(主会话 id)   %% 排序键 = id ASC
+    R->>D: SELECT ... WHERE session_id=? AND deleted_at IS NULL ORDER BY id ASC
+  else 主会话不存在
+    C->>R: createSessionForKp(kpId)
+    R->>D: INSERT ai_sessions(type='chat', kp_id)
+    R->>S: upsertAiSession(新 id)
+    Note over C: 裁决 6/12：系统补建 → 自动讲解
+  end
+  C-->>P: TeacherBootResult(session, messages, needAutoExplain)
+  alt needAutoExplain
+    P->>L: chat(T6, query = L1 + L2 + 讲解指令)
+    L-->>P: 流式 chunk
+    P->>R: addMessage(sessionId, role=assistant, modelId='dify-t6')
+    R->>D: INSERT ai_messages
+    R->>S: upsertAiMessage
+  end
+  P-->>U: 单条消息流（讲解气泡带「讲解」标签）
+
+  Note over U,L: —— 🔴 第二幕（首要目标）：追问 = 组装历史 → 注入 query → 落库 ——
+  U->>P: 输入问题并发送
+  P->>C: sendQuestion(text)
+  Note over C: ① 历史快照：必须在写入本轮 user 消息【之前】取
+  C->>R: listMessages(当前会话 id)
+  R-->>C: 历史消息（id ASC）
+  C->>X: buildSessionContext(历史, maxMessages=10, maxChars=4000)
+  Note over X: 裁剪从最老开始丢；至少保留最新一条；本轮问题不在入参内 → 永不裁
+  X-->>C: l2 块（含【本会话前文】段落）
+  C->>C: query = L1 + '\n\n' + l2 + '\n\n' + '用户问题：{text}'
+  C->>R: addMessage(user)
+  R->>D: INSERT ai_messages (role=user)
+  R->>S: upsertAiMessage
+  C->>L: chat(T5, query, conversationId=内存态)
+  L-->>C: 流式 chunk（服务端无状态：仅回显 conversation_id）
+  C->>R: addMessage(assistant, modelId='dify-t5')
+  R->>D: INSERT ai_messages (role=assistant)
+  R->>S: upsertAiMessage
+  C->>R: listMessages(当前会话 id)
+  C-->>P: 更新后的消息流
+  P-->>U: 消息流追加（第 3 轮的 query 里带着第 1 轮的内容 → T6）
+
+  Note over U,L: —— 第三幕：会话管理（新建 / 删除主会话 → 顺延 / 补建自动讲解）——
+  U->>P: 面板「新建对话」（提示：新会话从提问开始，不会自动讲解）
+  P->>C: createUserSession()
+  Note over C: 裁决 6/12：用户主动新建 → 【不】自动讲解
+  C->>R: createSessionForKp(kpId)
+  R->>D: INSERT ai_sessions(type='chat')
+  R->>S: upsertAiSession
+  C-->>P: 新会话（空消息流）
+
+  U->>P: 会话面板 → 删除主会话（二次确认文案逐字，PRD C11）
+  P->>R: deleteSession(primaryId)
+  R->>D: 软删会话 + 其消息
+  R->>S: upsertAiSession / upsertAiMessage（墓碑）
+  P->>R: primarySessionForKp(kpId)  %% 重新判定
+  alt 还有其它未删会话
+    P-->>U: 打开顺延到的会话 + toast「已切换到会话『X』」
+  else 已无任何会话
+    P->>R: createSessionForKp(kpId)
+    Note over P: 裁决 12：系统补建 → 自动讲解
+    P->>L: chat(T6, query = L1 + L2 + 讲解指令)
+    P->>R: addMessage(assistant, modelId='dify-t6')
+    P-->>U: 新会话 + 一条讲解消息
+  end
