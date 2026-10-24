@@ -884,7 +884,7 @@ SyncEngine({
         origin: Value((p['origin'] as String?) ?? 'ai_extract'),
         confidence: Value((p['confidence'] as num?)?.toDouble() ?? 0),
         // v5 新增两列：缺了这两行，对端 pull 时会静默丢掉置顶与创建时间。
-        pinned: Value((p['pinned'] as bool?) ?? false),
+        pinned: Value(_bool(p['pinned'], false)),
         createdAt: Value(_dt(p['created_at'])),
         updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
@@ -934,6 +934,26 @@ SyncEngine({
     if (v is DateTime) return v;
     if (v is String) return DateTime.tryParse(v);
     return null;
+  }
+
+  /// 布尔字段的容错解析：[fallback] 必须与该列的 **`withDefault` 值一致**。
+  ///
+  /// 为什么不能写 `p['x'] as bool?`：JSON 往返后 boolean 可能被服务端 / 网关
+  /// 回成 `0/1`（int）或 `'true'`（String），`as bool?` 一律算 null → 静默
+  /// 回落 → 测试全绿、线上无声丢失。
+  ///
+  /// ⚠️ [fallback] 的取值要对着 `tables.dart` 的 `withDefault` 抄：
+  /// `knowledge_points.pinned` 是 `Constant(false)`，`canvas_nodes.pinned`
+  /// 是 **`Constant(true)`** —— 抄错就会在每次 pull 时反向重置该列。
+  bool _bool(dynamic v, bool fallback) {
+    if (v is bool) return v;
+    if (v is num) return v != 0;
+    if (v is String) {
+      final s = v.toLowerCase().trim();
+      if (s == 'true' || s == '1') return true;
+      if (s == 'false' || s == '0') return false;
+    }
+    return fallback;
   }
 
   Map<String, dynamic>? _decodePayload(String json) {
@@ -996,7 +1016,11 @@ SyncEngine({
         w: Value((p['w'] as num?)?.toDouble() ?? 200),
         h: Value((p['h'] as num?)?.toDouble() ?? 120),
         z: Value((p['z'] as num?)?.toInt() ?? 0),
-        collapsed: Value((p['collapsed'] as bool?) ?? false),
+        collapsed: Value(_bool(p['collapsed'], false)),
+        // ⚠️ 回落值必须是 **true**，与 `CanvasNodes.pinned` 的列默认
+        // （`Constant(true)`）保持一致。抄 `knowledge_points` 的 `?? false` 会
+        // 让对端每次 pull 都把节点取消锁定（`_applyUpdate` 先删后插）。
+        pinned: Value(_bool(p['pinned'], true)),
         updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),

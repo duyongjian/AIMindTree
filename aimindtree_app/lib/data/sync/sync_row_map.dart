@@ -125,6 +125,9 @@ Map<String, dynamic> canvasNodeRowToMap(CanvasNodeRow r) => {
       'h': r.h,
       'z': r.z,
       'collapsed': r.collapsed,
+      // v5 补：布局锁定开关。少写 = 跨设备静默丢失（且 `_applyUpdate` 先删后插，
+      // 缺键会让对端每次 pull 都把该节点重置成列默认值 true）。
+      'pinned': r.pinned,
       'updated_at': r.updatedAt,
       'version': r.version,
       'device_id': r.deviceId,

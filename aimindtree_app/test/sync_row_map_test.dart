@@ -132,6 +132,10 @@ const Map<String, Set<String>> kSyncTableKeys = <String, Set<String>>{
     'h',
     'z',
     'collapsed',
+    // v5 补：布局锁定开关（列默认 true）。契约里写上它，才能倒逼
+    // `canvasNodeRowToMap` / `_canvasNodeFromMap` 补上这一对读写；
+    // 不写的话三集合互相印证仍相等 → 测试全绿、列照样静默丢失。
+    'pinned',
     'updated_at',
     'version',
     'device_id',
@@ -556,6 +560,9 @@ final List<_KeyProbe> _probes = <_KeyProbe>[
       'h': 4.5,
       'z': 9,
       'collapsed': true,
+      // 列默认是 true，所以探测值必须取 **false** 才有区分度：
+      // 若 payload 漏了这个键，`_canvasNodeFromMap` 会静默回落成 true 而测试不红。
+      'pinned': false,
       'deleted_at': _probeDeletedAt,
     },
     read: (db, id) async {
@@ -572,6 +579,7 @@ final List<_KeyProbe> _probes = <_KeyProbe>[
         'h': r.h,
         'z': r.z,
         'collapsed': r.collapsed,
+        'pinned': r.pinned,
         'updated_at': r.updatedAt,
         'version': r.version,
         'device_id': r.deviceId,
