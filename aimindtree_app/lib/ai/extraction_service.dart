@@ -9,6 +9,7 @@ library;
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../core/id.dart';
 import '../core/logger.dart';
 import '../core/remote_log_forwarder.dart';
 import '../core/result.dart';
@@ -366,7 +367,14 @@ class ExtractionService {
   }) async {
     final database = db ?? AppDatabase();
     final store = secretStore ?? await FileSecretStore.defaultInstance();
-    final did = deviceId ?? 'local-dev';
+    // 同步设备号：**必须**是「每台设备唯一且持久化」的值（[DeviceId] 存 prefs
+    // 的 ULID）。这里曾用常量 `'local-dev'` 兜底，而 main.dart 又是无参调用
+    // bootstrap，结果 PC 与手机拿到**同一个**号码 → pull 的自回声过滤
+    // （`sync_engine.dart` 的 `env.deviceId == deviceId`）把服务端**所有**行都
+    // 当成「本机自己上传的」跳过，表现为「应用变更 0 条，跳过 N 条」，
+    // 且换任何中继后端都一模一样（2026-10-24 用户实测）。
+    final did = deviceId ?? await DeviceId.get();
+    _log.i('同步设备号 = $did（自回声过滤依据，跨设备必须唯一）');
 
     // === Settings ===
     final settings = SettingsRepository(database, secretStore: store);
