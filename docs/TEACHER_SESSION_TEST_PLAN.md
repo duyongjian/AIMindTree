@@ -3,11 +3,12 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档类型 | **测试方案**（不写测试代码；只定义「测什么 / 怎么测 / 断言什么」） |
-| 版本 | **v1.3.2** —— 落实 team-lead **最终裁决**（🔴 不再讨论）：命名 `listSessionsForKp` / `primarySessionForKp`、规格 B = 纯 `id ASC`、规格 C = 纯函数**绝不重排**、派生 id = 整体 16 字节 +1、R-0 = **既有测试一行不改**、M-6 = `insertMessageRow` 失败注入钩子、基线订正 602/134；v1.3.1 = 与 PRD v1.4 校准版对齐（新增 §3.4 排查清单）；**v1.3.2 = 锚点去行号化 + 实现落地巡检快照（§0.6）** |
+| 版本 | **v1.4** —— 落实 team-lead **最终裁决**（🔴 不再讨论）：命名 `listSessionsForKp` / `primarySessionForKp`、规格 B = 纯 `id ASC`、规格 C = 纯函数**绝不重排**、派生 id = 整体 16 字节 +1、R-0 = **既有测试一行不改**、M-6 = `insertMessageRow` 失败注入钩子、基线订正 602/134；v1.3.1 = 与 PRD v1.4 校准版对齐（新增 §3.4 排查清单）；**v1.3.2 = 锚点去行号化 + 实现落地巡检快照（§0.6）**；**v1.4 = T05 落地后按最终实现订正（签名改 2 字段 / 派生 id 改带进位 / 「再讲一次」恒 T6 / 基线 602→670、134→139 / 实测 68 条），详见下一行** |
+| **v1.4 变更** | **T05 已落地，按最终实现订正**：① §0.1 / §3.1.1 的 `buildSessionContext` 签名改为 **2 字段** `List<({String role, String content})>`（删 `at` / `id`——Dart 记录类型的可空命名字段不能省略构造，会逼所有调用点补参；「绝不重排」由此从约定升级为**结构保证**）；② **派生 id 口径修正**：`newDerivedUlid` 由「逐字节 `(b+1)&0xFF` 不进位」改为 **128 位大端 +1（带进位）**——旧写法会把 ULID 时间最高位也 +1，时间戳凭空 **+2^40 ms ≈ 35 年**，合并后的老讲解被挤到会话末尾；新写法**毫秒不变**、迁移消息落在**原位**。M8① / M11 六条断言同步改写；③ T8「再讲一次」**恒走 `AiTask.t6Explain`**（`_taskForSession()` 启发式已删除、不得恢复）；④ §0.6 两项「⏳ 待实现」（`isExplainMessage` / `buildSessionContext`）改判为 **✅ 已落地**；⑤ **基线刷新**：`flutter test` 602（48 文件）→ **670（51 文件）**、`analyze_inproc` 134 → **139 文件**；⑥ 三个测试文件**实测条数**：仓储 **27** / 纯函数 **35** / widget **6** = **68**（原规划约 28/24/14 ≈ 66）
 | 作者 | Edward（QA 工程师） |
 | 被测对象 | 老师模式会话化重构（PRD：`docs/TEACHER_SESSION_PRD.md` **v1.4 校准版**；设计：`docs/TEACHER_SESSION_DESIGN.md`） |
 | 代码基线 | `aimindtree_app/lib/features/teacher/teacher_page.dart`（510 行）、`aimindtree_app/lib/data/repositories/ai_session_repository.dart`（261 行） |
-| 门禁基线 | `flutter test` **602/602 通过**（48 个测试文件，2026-10-24 实测）；`tool/analyze_inproc.dart` **134 文件 → 0 error / 0 warning / 3 info**（实测） |
+| 门禁基线 | `flutter test` **670/670 通过**（51 个测试文件，2026-10-24 实测）；`tool/analyze_inproc.dart` **139 文件 → 0 error / 0 warning / 3 info**（实测） |
 | v1.1 变更 | ① API 命名统一为**设计文档**口径；② L2 注入规模改为 **10 条 / 5 轮 + ≤4000 字符**（规格 A）；③ 消息排序键改为**纯 `id ASC`**（规格 B）；④ `ChatMessage.modelId` 明确为**可选 / 允许 null**；⑤ 测试文件改为设计文档 §7.3 的 **3 个文件名**；⑥ 新增隐患 **R-0**（`AiSessionRepository` 的 `deviceId` 参数必须可选） |
 | v1.2 变更 | ① 方法名按架构师 21:27 定稿改为 `primarySessionForKp` / `listSessionsForKp`；② 纯函数签名更新为含 `at`/`id` 的记录类型，并新增**双分支排序契约**（§3.1.1.1）；③ 规格 B 记录为**待 team-lead 拍板**（PRD D2 逐字要 `updated_at ASC, id ASC`，team-lead 规格 B 要纯 `id ASC`）→ **M8 夹具做成对两者都稳健**，拍板后无需改测试；④ 边界用例补 E18 / E19；⑤ 合并矩阵补 **M11**（`newDerivedUlid` 双射性）；⑥ 风险点补 P27 / P28 / P29 |
 | v1.3 变更 | ① 命名全文统一为 **`listSessionsForKp` / `primarySessionForKp`**（team-lead 最终裁决；数据层工程师 T01a 正在按此施工）；② 规格 B **已定案 = 纯 `id ASC`**（不再是待拍板）；③ **规格 C：`buildSessionContext` 绝不重排** → E13 改判 + E17 强化为「Agent 旧实现参考对照」+ E18 / E19 改判；④ 派生 id 改为 **`newDerivedUlid(String sourceId)`（整体 16 字节逐字节 `(b+1)&0xFF`，必须取模）** → M11 断言改为 6 条、M8 保序断言改为「毫秒 +1」；⑤ **R-0 终裁：既有 `test/agent_features_test.dart` 一行不改**（`deviceId` 走可选参数），验收 grep 限定 `lib/`（`test/` 的 27 处 `'local-dev'` 是合法多设备夹具）；⑥ **M-6 终裁：`insertMessageRow` 可覆写钩子**（**禁止** `@visibleForTesting` / `@protected` → `meta:` 未声明会触发 lint → 门禁失败），M6 改用 `_FailingRepo` 注入；⑦ **基线订正**：`flutter test` 598 → **602/602（48 个测试文件）**、`analyze_inproc` 132 → **134 文件**；⑧ 风险点补 P30（取模）/ P31（字节层 +1）/ P32（失败注入） |
@@ -29,13 +30,13 @@
 | 新建老师模式会话 | `createSessionForKp` | `Future<AiSessionRow> createSessionForKp(String kpId, {String title = ''})` | 设计文档 §2.3 ④ |
 | 老数据合并 | **`mergeLegacyExplain`** | `Future<LegacyMergeResult> mergeLegacyExplain(String kpId)` | 设计文档 §2.3 ⑤ |
 | 合并结果 | `LegacyMergeResult` / `LegacyMergeOutcome` | `outcome`(`merged`/`skippedNoLegacy`/`failed`)、`chatSessionId`、`explainSessionId`、`movedMessages`、`normalizedOnly`、`error` | 设计文档 §2.3 ⑤ |
-| L2 历史组装（**纯函数**） | **`buildSessionContext`** | `String buildSessionContext(List<({String role, String content, DateTime? at, String? id})> turns, {int maxMessages = 12, int maxChars = 0, String header = '【本会话前文】（同一会话内此前的问答，请参考上下文）'})`<br>⚠️ 记录类型保留 `at` / `id` 两个可空字段，但**仅作信息保留，本版本不参与排序**（规格 C：函数内部**绝不重排**） | team-lead 最终裁决 |
+| L2 历史组装（**纯函数**） | **`buildSessionContext`** | `String buildSessionContext(List<({String role, String content})> turns, {int maxMessages = 12, int maxChars = 0, String header = '【本会话前文】（同一会话内此前的问答，请参考上下文）'})`<br>⚠️ **记录只有 `role` / `content` 两个字段，不含 `at` / `id`**：Dart 记录类型的**可空命名字段不能省略构造**，加了会逼所有调用点补参。于是「函数内部绝不重排」从约定升级为**结构保证**（规格 C） | team-lead 最终裁决 |
 | 标题派生 | `deriveSessionTitle` | `String deriveSessionTitle({required String storedTitle, required List<ChatMessage> messages, String fallbackTitle = '新对话'})` | 设计文档 §3.5 |
 | 讲解消息判别（**唯一判别点**） | `isExplainMessage` | `bool isExplainMessage(ChatMessage m) => m.modelId == 'dify-t6';` | 设计文档 §3.2 / 裁决 15 |
 | 消息模型 | `ChatMessage`（**新增可选** `modelId`） | `this.modelId`（**null 合法**：`'dify-t6'`=讲解 / `'dify-t5'`=追问 / `null`=普通） | 设计文档 §2.3 ③ |
 | 控制器编排 | `TeacherSessionController` | `bootstrap()` / `createUserSession()` / `ensurePrimarySession()` / `createPrimarySessionWithExplain()` | 设计文档 §2.4 / §3.1 |
 | 文案同源常量 | `teacher_session_copy.dart` | 三处删除主会话文案由**同一常量**生成（PRD C11） | 设计文档 §2.4 末 |
-| 确定性派生 id | `newDerivedUlid` | `String newDerivedUlid(String sourceId)` —— **源 id 的 16 个字节逐字节 `(b + 1) & 0xFF`**（**整体 16 字节都 +1**，**必须取模**否则 0xFF 溢出破坏单射性）<br>→ **全局单射**（不同源不撞）+ **保序**（毫秒 +1 → 相对顺序不变）+ **幂等**（同源恒得同派生 id） | team-lead 最终裁决；`lib/core/id.dart` |
+| 确定性派生 id | `newDerivedUlid` | `String newDerivedUlid(String sourceId)` —— **把整个 ULID 当作 128 位大端整数 +1（带进位）**<br>→ **全局单射**（模 2^128 上的平移）+ **保序**（`x↦x+1` 在大端序上严格保序）+ **时间戳不动**（只有随机段全 `0xFF` 才进位到毫秒，概率 2^-80 → 迁移后消息带原毫秒、落在**原位**）+ **幂等**（同源恒得同派生 id） | team-lead 最终裁决；`lib/core/id.dart` |
 | ★ 测试接缝 | `insertMessageRow` | `Future<void> insertMessageRow(AiMessagesCompanion row)` —— `addMessage` 与 `mergeLegacyExplain` 的迁移**都走它**；测试可继承本类**覆写它注入失败**（验证合并的失败回退路径）<br>⚠️ **禁止**用 `@visibleForTesting` / `@protected`（`pubspec.yaml` 未声明 `meta:` → `import 'package:meta/meta.dart'` 会触发 `depend_on_referenced_packages` lint → **门禁失败**）→ **用纯文档注释标注「测试接缝」** | team-lead 最终裁决 |
 
 ### 0.2 规格 A —— L2 注入规模（team-lead 裁决）
@@ -121,7 +122,7 @@ buildSessionContext(turns, maxMessages: 10, maxChars: 4000, header: <默认>)
 | 规格 A（L2 规模） | **10 条 / 5 轮 + ≤4000 字符**；纯函数默认值仍 `maxMessages: 12, maxChars: 0`（Agent 零参数调用逐字等价），老师模式调用点显式传 10/4000 | ✅ 已定案（设计文档的 4 处 `12` 需同步改，由架构师处理） |
 | 规格 B（排序键） | **纯 `id ASC`** | ✅ 已定案（**PRD v1.4 裁决 R-A 已同步**，验收 D2 亦已改为「纯 `id ASC`」） |
 | 规格 C（纯函数排序） | **函数内部绝不重排**，严格按调用方传入顺序输出；`at` / `id` 仅作信息保留 | ✅ 已定案 |
-| 派生 id | `newDerivedUlid(String sourceId)`：**源 id 的 16 字节逐字节 `(b + 1) & 0xFF`**（整体 +1、必须取模） | ✅ 已定案 |
+| 派生 id | `newDerivedUlid(String sourceId)`：**整个 ULID 当 128 位大端整数 +1（带进位）** | ✅ 已定案（v1.4 按修正后的实现） |
 | R-0（既有测试） | `AiSessionRepository(this._db, {this.deviceId = ''})` → **既有 `test/agent_features_test.dart` 一行不改**（可选参数带默认值 → 原样可编译） | ✅ 已定案 |
 | M-6（失败注入） | 加**可覆写写入钩子** `insertMessageRow(AiMessagesCompanion row)`；**禁止** `@visibleForTesting` / `@protected`（`meta:` 未声明 → lint → 门禁失败），用**纯文档注释**标注「测试接缝」 | ✅ 已定案 |
 
@@ -133,7 +134,7 @@ buildSessionContext(turns, maxMessages: 10, maxChars: 4000, header: <默认>)
 
 | 契约项 | 实现现状 | 核对结果 |
 | --- | --- | --- |
-| `newDerivedUlid(String sourceId)` | `lib/core/id.dart`：**单参数**（无 `millis`）、16 字节逐字节 `(bytes[i] + 1) & 0xFF`、注释写明双射/保序/幂等三条性质 | ✅ **完全符合**（M11 六条断言可直接照写） |
+| `newDerivedUlid(String sourceId)` | `lib/core/id.dart`：**单参数**（无 `millis`）、从 byte15 往高位**带进位** +1，注释写明双射/保序/时间戳不动/幂等四条性质 | ✅ **完全符合**（M11 六条断言可直接照写） |
 | `AiSessionRepository(this._db, {this.deviceId = ''})` | 可选命名参数 + 默认值 | ✅ **符合** → 既有 `agent_features_test.dart` **一行不改**即可编译（R-0 达成） |
 | `insertMessageRow` 测试接缝 | 可覆写实例方法；**纯文档注释**、全文 `visibleForTesting` **0 处**；`addMessage` 与 `_migrateMessages` **两处都走它** | ✅ **符合**（M-6 达成；`meta:` 未引入 → 无 lint 风险） |
 | `listSessionsForKp(kpId)` | 过滤 `kpId == & deletedAt.isNull()`，排序 `updatedAt DESC, id DESC` | ✅ **符合**（PRD §4.1 会话列表口径） |
@@ -144,8 +145,8 @@ buildSessionContext(turns, maxMessages: 10, maxChars: 4000, header: <默认>)
 | **幂等** | 派生 id 已存在 → `continue` 跳过（且源行已软删 → 查询本就过滤掉）**双重保险** | ✅ **符合**（M10 / D12） |
 | **outbox 接线** | `_migrateMessages` 逐条 `upsertAiMessage(newId)`；归一化/软删走 `upsertAiSession` | ✅ **符合**（T9 / G19） |
 | **规格 B**（消息流纯 `id ASC`） | `listMessages` 与 `_migrateMessages` 均 `orderBy([asc(t.id)])`，**不含 `updated_at`** | ✅ **符合**（R-A / M8） |
-| `isExplainMessage` 判别函数 | **全仓 0 处命中** —— 尚未落地 | ⏳ **待实现**：T11 / N4 的唯一判别点，测试需等其到位（或按 `modelId == 'dify-t6'` 内联断言，但**判别逻辑必须只有一个来源**） |
-| `buildSessionContext` 纯函数 | 尚未落地（数据层之外，编排/共享层任务） | ⏳ 待实现：T6 核心 |
+| `isExplainMessage` 判别函数 | `teacher_session_controller.dart`：`m.modelId == 'dify-t6'`，null / 其它值一律 `false` 且不抛 | ✅ **已落地**（T03），~~⏳ 待实现~~：T11 / N4 的唯一判别点，测试需等其到位（或按 `modelId == 'dify-t6'` 内联断言，但**判别逻辑必须只有一个来源**） |
+| `buildSessionContext` 纯函数 | `features/shared/session_context.dart`（2 字段记录、绝不重排） | ✅ **已落地**（T02；E1–E19 / A1–A9 已覆盖） |
 
 > **给实现方的两条提醒**：
 > ① **`isExplainMessage` 必须落在共享层**（如 `lib/features/shared/` 或 `lib/core/`），**不要内联在 `teacher_page.dart` 里** —— 否则 Agent 侧与老师模式会出现两份判别逻辑，日后必然分叉（T11 的断言前提就是「唯一判别点」）。
@@ -186,9 +187,9 @@ buildSessionContext(turns, maxMessages: 10, maxChars: 4000, header: <默认>)
 
 | # | 路径 | 职责 | 覆盖 | 预计条数 |
 | --- | --- | --- | --- | --- |
-| 1 | `aimindtree_app/test/teacher_session_repo_test.dart` | 老师模式会话**仓储层 + 老数据合并**：墓碑过滤、主会话判定、列表隔离、合并矩阵、outbox 登记 | T1, T3, T4, T5, T7, T9, T11, T12 + N3, N8 | ~28 |
-| 2 | `aimindtree_app/test/teacher_session_context_test.dart` | **纯函数层**：`buildSessionContext`（L2 组装 + 规模裁剪 + 边界）+ `deriveSessionTitle`（标题派生） | **T6 纯函数层**、T10 + N1, N2 + §4 边界 | ~24 |
-| 3 | `aimindtree_app/test/teacher_page_widget_test.dart` | **老师模式页 widget**：历史回填、讲解标签容错、多轮记忆端到端、「再讲一次」追加、主会话删除接续 | T2, T3(补建), T5(页面序), **T6 端到端层**, T8 + N4, N5, N6, N7 | ~14 |
+| 1 | `aimindtree_app/test/teacher_session_repo_test.dart` | 老师模式会话**仓储层 + 老数据合并**：墓碑过滤、主会话判定、列表隔离、合并矩阵、outbox 登记 | T1, T3, T4, T5, T7, T9, T11, T12 + N3, N8 | ~28 → **27（实测）** |
+| 2 | `aimindtree_app/test/teacher_session_context_test.dart` | **纯函数层**：`buildSessionContext`（L2 组装 + 规模裁剪 + 边界）+ `deriveSessionTitle`（标题派生） | **T6 纯函数层**、T10 + N1, N2 + §4 边界 | ~24 → **35（实测）** |
+| 3 | `aimindtree_app/test/teacher_page_widget_test.dart` | **老师模式页 widget**：历史回填、讲解标签容错、多轮记忆端到端、「再讲一次」追加、主会话删除接续 | T2, T3(补建), T5(页面序), **T6 端到端层**, T8 + N4, N5, N6, N7 | ~14 → **6（实测）** |
 
 **不新建 `test/support/` 目录**：仓库既有假 Provider 一律是**文件内私有**（`test/ai_task_route_test.dart:38-52` 的 `_FakeProvider`、`test/note_editor_selection_test.dart:94`、`test/t15_selection_extract_test.dart:61`）→ 本方案沿用该约定，把 `_FakeProvider` 直接写在 `teacher_page_widget_test.dart` 内（**只有这一个文件需要它**）。
 
@@ -278,7 +279,7 @@ buildSessionContext(turns, maxMessages: 10, maxChars: 4000, header: <默认>)
 | 文件 | `test/teacher_page_widget_test.dart` |
 | 准备数据 | 预置主会话 + 1 条历史讲解消息（`model_id='dify-t6'`、`content='旧讲解'`）；假 provider 对 T6 任务返回 `'新讲解'` |
 | 断言点 | ① 库里该会话的 assistant 消息数 **1 → 2**（**追加**，不是覆盖）；② 两条内容**都在**（`'旧讲解'` 仍可读出，UI 上仍可见）；③ 新消息 `model_id == 'dify-t6'`；④ 新消息写入**当前会话**（当当前会话是**用户自建**会话时也如此——PRD §6 / 设计文档 §3.6）；⑤ 旧消息的 `content_md` / `updated_at` **未被改写**（读原始行比对）；⑥ UI：存在文案为「再讲一次」的按钮，且**不存在**「重新生成」（`teacher_page.dart:313`） |
-| 依赖 | 按钮文案改为「再讲一次」；位置在**消息流底部、与输入框同区**、靠右（设计文档 §3.6） |
+| 依赖 | 按钮文案改为「再讲一次」；位置在**消息流底部、与输入框同区**、靠右（设计文档 §3.6）；**该按钮恒走 `AiTask.t6Explain`**（`_generateExplainOnce` 只有两个调用点、语义都是产出讲解；`_taskForSession` 启发式**已删除、不得恢复**） |
 
 ### T9 — 会话写操作（重命名 / 清空 / 删除 / 迁移）均登记 outbox
 
@@ -335,7 +336,7 @@ buildSessionContext(turns, maxMessages: 10, maxChars: 4000, header: <默认>)
 
 ```dart
 String buildSessionContext(
-  List<({String role, String content, DateTime? at, String? id})> turns, {
+  List<({String role, String content})> turns, {
   int maxMessages = 12,     // 老师模式传 10（规格 A：5 轮）
   int maxChars = 0,         // 老师模式传 4000（规格 A）
   String header = '【本会话前文】（同一会话内此前的问答，请参考上下文）',
@@ -610,10 +611,10 @@ testWidgets('T6：第 3 轮能引用第 1 轮的内容（多轮记忆生效）',
 | **M5** | ★ **幂等：已合并过**（E 已软删） | 在 **M3 执行后**的状态上再次调用 `mergeLegacyExplain` | ① `outcome == LegacyMergeOutcome.skippedNoLegacy`（**无未删 explain 行 → 直接返回**，设计文档伪码 481-482）；② **消息 id 集合完全相同**：`expect(idsAfter, equals(idsBefore))`；③ E 仍 `deletedAt != null`；④ **不产生新的 outbox 记录**（长度不变）；⑤ 主会话仍是 C；⑥ 消息内容与顺序不变 |
 | **M6** | ★ **迁移失败（用 `insertMessageRow` 测试接缝注入）** | 造 explain 会话 E（1 条讲解消息）+ chat 会话 C；**用 `class _FailingRepo extends AiSessionRepository { @override Future<void> insertMessageRow(AiMessagesCompanion row) => throw StateError('injected'); }`** 跑 `mergeLegacyExplain` | ① `outcome == LegacyMergeOutcome.failed` 且 `error != null`（**不抛异常**给调用方）；② ★ **explain 行仍在库**、`deletedAt == null`；③ ★ **消息一条没少**（E 的讲解消息仍在、内容不变）；④ **不阻断进入**：主会话仍能取到（`primarySessionForKp` 返回 C）；⑤ ★ E **仍出现在 `listSessionsForKp`**（PRD D8：残留行必须可见、可点进去看原讲解）；⑥ 有**可检索日志** + **用户提示**（日志可断言 `AppLog`；toast 走人工验收 M-17）；⑦ **不产生半截数据**：不得出现「消息已复制但 E 未软删」的中间态（因接缝在**写入前**就抛 → 不会有半行落地） |
 | **M7** | ★ **消息带 `model_id='dify-t6'`** | M3 的讲解消息 | 迁移后该消息 **`model_id` 仍为 `'dify-t6'`**（**不是**被改成 `'dify-t5'`）；UI 上渲染「讲解」标签（widget 层配合断言 N4） |
-| **M8** | ★ **消息顺序（排序键 = 纯 `id ASC`，规格 B 已定案）** | E 下 3 条消息，**`id` 显式指定**为 A<B<C（字典序递增）；**`updated_at` 也显式指定为同一递增序**（两序一致） | 迁移后 chat 会话的 `listMessages` 顺序 == `['A','B','C']`；<br>① **新派生的 id 严格递增**（`newDerivedUlid` 整体 +1 → 毫秒 +1 → 相对顺序不变）；<br>② **每条新消息的 `updated_at` == 对应源行的 `updated_at`**（原样保留，IC3 / D9）；<br>③ **夹具让 `updated_at` 与 `id` 两个序严格一致** → 本用例对「`updated_at ASC, id ASC`」与「纯 `id ASC`」**两种口径都成立** → 口径若再变动**无需改测试**（好设计，保留）；<br>④ ⚠️ **禁止**只指定 `id` 而让 `updated_at` 相反/乱序 → 那样断言会变成「口径赌注」（风险点 P27） |
+| **M8** | ★ **消息顺序（排序键 = 纯 `id ASC`，规格 B 已定案）** | E 下 3 条消息，**`id` 显式指定**为 A<B<C（字典序递增）；**`updated_at` 也显式指定为同一递增序**（两序一致） | 迁移后 chat 会话的 `listMessages` 顺序 == `['A','B','C']`；<br>① **新派生的 id 严格递增**（`newDerivedUlid` = 128 位大端 +1 带进位 → **毫秒不变**、相对顺序不变）；<br>② **每条新消息的 `updated_at` == 对应源行的 `updated_at`**（原样保留，IC3 / D9）；<br>③ **夹具让 `updated_at` 与 `id` 两个序严格一致** → 本用例对「`updated_at ASC, id ASC`」与「纯 `id ASC`」**两种口径都成立** → 口径若再变动**无需改测试**（好设计，保留）；<br>④ ⚠️ **禁止**只指定 `id` 而让 `updated_at` 相反/乱序 → 那样断言会变成「口径赌注」（风险点 P27） |
 | **M9** | **explain 行已是墓碑** | `E.deletedAt != null`、C 存在 | ① `outcome == skippedNoLegacy`；② **不触发迁移**（不产生新行）；③ 不产生新 outbox；④ 主会话 = C；⑤ `listSessionsForKp` 只返回 C |
 | **M10** | **N3 · 合并幂等（崩溃重试）** | 同一批源消息**合并两次**（模拟第一次崩溃后重试） | 派生 id **确定性相同**（`newDerivedUlid(sourceId)` 纯函数 + 整体 +1）→ 第二次走「`NOT EXISTS` 则跳过」分支（**幂等由主键保证**）；断言：chat 会话消息条数**不变**、id 集合**完全相同**、**无重复行**、且第二次调用不产生新的 outbox 记录 |
-| **M11** | ★★ **派生 id 的规格（`newDerivedUlid(String sourceId)`，整体 16 字节 +1）** | 2–3 条源消息；含一条**字节含 0xFF** 的边界源 id | ① **派生 id ≠ 源 id**（+1 必异）；② **两个不同源 id 派生后不撞**（逐字节 +1 是 Z_256^16 上的**平移** → **全局单射**）；③ **保序**：整体 +1 → 派生 id 的**毫秒部分 == 原毫秒 + 1** → 相对顺序不变；④ **幂等**：同一源 id **两次派生结果完全相同** → 跨端重复合并不产生第二条；⑤ ★ **逐字节取模验证**：源 id 中任一字节为 `0xFF` → 派生后**该字节为 `0x00`**（**必须取模**，否则 0xFF 溢出破坏单射性）；⑥ 派生 id 仍是**合法 26 字符 Crockford Base32 ULID**（长度与字符集不变） |
+| **M11** | ★★ **派生 id 的规格（`newDerivedUlid(String sourceId)`，128 位大端 +1 带进位）** | 2–3 条源消息；含一条**字节含 0xFF** 的边界源 id | ① **派生 id ≠ 源 id**（+1 必异）；② **两个不同源 id 派生后不撞**（模 2^128 上的 `x↦x+1` 是**平移** → **全局单射**）；③ **保序**：`x↦x+1` 在大端序上严格保序，且**毫秒部分不变**（仅随机段全 `0xFF` 时才进位到毫秒）→ 迁移后消息落在**原位**；④ **幂等**：同一源 id **两次派生结果完全相同** → 跨端重复合并不产生第二条；⑤ ★ **进位验证**：源 id 最低位字节为 `0xFF` → 派生后**该字节为 `0x00` 并向高位进位**（**必须带进位**；早期「逐字节各自 +1 不进位」的写法会把时间最高位也 +1 → 时间戳凭空 +2^40 ms ≈ 35 年 → 全排到末尾，**已修**）；⑥ 派生 id 仍是**合法 26 字符 Crockford Base32 ULID**（长度与字符集不变） |
 
 > **M6 的失败注入接缝（已定案）**：`AiSessionRepository` 提供**可覆写的写入钩子**
 > ```dart
@@ -650,7 +651,7 @@ testWidgets('T6：第 3 轮能引用第 1 轮的内容（多轮记忆生效）',
 | `test/sync_outbox_wiring_test.dart` | 全文件 | 上行接线（T9 的基础设施） |
 | `test/sync_row_map_test.dart` | 全文件 | 同步 payload 结构不变（PRD F3） |
 | `test/schema_migration_test.dart` | 全文件 | **未新增表结构变更**（PRD F4） |
-| **全量 `flutter test`** | **602/602 通过**（2026-10-24 实测） | 改造后必须 **≥ 602 + 新增条数**，且 **0 失败**；且 **不新增 INFO**（设计文档 G17） |
+| **全量 `flutter test`** | **670/670 通过**（2026-10-24 实测，含本次新增 68 条） | 改造后必须 **≥ 670**，且 **0 失败**；且 **不新增 INFO**（设计文档 G17） |
 
 ### 6.2 可能因语义变更需要**复核**的既有测试（重点结论）
 
@@ -771,12 +772,12 @@ testWidgets('T6：第 3 轮能引用第 1 轮的内容（多轮记忆生效）',
 
 | 门禁 | 基线 | 实测命令输出 |
 | --- | --- | --- |
-| `flutter test` | **602 通过 / 0 失败**（48 个测试文件） | `00:15 +602: All tests passed!` |
+| `flutter test` | **670 通过 / 0 失败**（51 个测试文件） | `00:21 +670: All tests passed!` |
 | `test/agent_features_test.dart` | **15 条** | 与 `ai_job_service_notify_test.dart` 合计 `+17: All tests passed!` |
 | `test/ai_job_service_notify_test.dart` | **2 条** | 同上 |
-| `tool/analyze_inproc.dart` | **134 文件 → 0 error / 0 warning / 3 info** | `Analyzed 134 file(s) → 0 error(s), 0 warning(s), 3 info(s)` + `No issues found!` |
+| `tool/analyze_inproc.dart` | **139 文件 → 0 error / 0 warning / 3 info** | `Analyzed 139 file(s) → 0 error(s), 0 warning(s), 3 info(s)` + `No issues found!` |
 
-> ✅ **PRD v1.4 头部「测试基线」已订正**为 `flutter test` **602/602（48 个测试文件）** + `analyze_inproc` **134 文件 / 0 error / 0 warning / 3 info**，与本文档 §8.1 一致（更早版本写的「213/213」是旧基线，已作废）。门禁口径 = **602**，且改后须 **≥ 602 + 新增条数**。
+> ✅ **PRD v1.4 头部「测试基线」已订正**为 `flutter test` **670/670（51 个测试文件）** + `analyze_inproc` **139 文件 / 0 error / 0 warning / 3 info**，与本文档 §8.1 一致（更早版本写的「213/213」是旧基线，已作废）。门禁口径 = **670**，且改后须 **≥ 670**。
 > ⚠️ 门禁还要求 **不新增 INFO**（设计文档 G17）——当前 3 条 info 是存量（`agent_page.dart` / `knowledge_manage_page.dart` 的 `withOpacity` 弃用）。
 > ⚠️ **并发施工期门禁不可靠**：实测出现过「`flutter test` 602/602 全绿、但 `analyze_inproc` 报 **12 error**」的组合 —— 原因是**另一条任务正在改同一批文件**（读到半成品）。复测即回到 **0 error**。→ **门禁必须在「无人同时施工」的窗口跑**，且**报错时先确认是不是别人正在改**，再判定是回归还是瞬时态。
 > ⚠️ **`'local-dev'` 清理验收只扫 `lib/`**：`grep -rn "'local-dev'" aimindtree_app/lib` → **0 命中**（v1.3.2 复测确认）。**`test/` 目录里的 27 处是合法夹具（刻意模拟多设备），不许动** —— 实测分布：`sync_push_all_test.dart` 8 / `sync_outbox_wiring_test.dart` 8 / `sync_engine_test.dart` 6 / `sync_device_id_wiring_test.dart` 3 / `sync_row_map_test.dart` 2（明细见 §6 R-0）。
@@ -809,7 +810,7 @@ cd aimindtree_app && HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= \
 # ── 步骤 3：全量测试（门禁）
 cd aimindtree_app && HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= \
   D:/DevTools/flutter/bin/flutter.bat test
-# 期望：**≥ 602 + 新增条数**，0 失败，0 编译错误
+# 期望：**≥ 670**，0 失败，0 编译错误
 
 # ── 步骤 4：Dart 静态门禁（error 与 warning **都算失败**；flutter analyze 不作门禁，存量有 info）
 cd aimindtree_app && D:/DevTools/flutter/bin/cache/dart-sdk/bin/dart.exe tool/analyze_inproc.dart
@@ -822,13 +823,13 @@ cd aimindtree_app && D:/DevTools/flutter/bin/cache/dart-sdk/bin/dart.exe tool/an
 
 | 文件 | 规划条数 |
 | --- | --- |
-| `teacher_session_repo_test.dart` | ~28 |
-| `teacher_session_context_test.dart` | ~24 |
-| `teacher_page_widget_test.dart` | ~14 |
+| `teacher_session_repo_test.dart` | ~28 → **27（实测）** |
+| `teacher_session_context_test.dart` | ~24 → **35（实测）** |
+| `teacher_page_widget_test.dart` | ~14 → **6（实测）** |
 | **新增小计** | **~66** |
-| **全量目标** | **≥ 602 + 新增条数**（本方案规划 66 条 → 668），0 失败
+| **全量目标** | **≥ 670**（基线 602 + 实测新增 **68** 条），0 失败
 
-> 条数为规划值，实际以实现落地为准。**门禁的硬口径是「不低于 602 且 0 失败 + 3 个新增文件全绿」**；条数少于 66 时需说明是哪些用例被合并/省略。
+> 条数为规划值，实际以实现落地为准。**门禁的硬口径是「不低于 670 且 0 失败 + 3 个新增文件全绿」**；条数少于 68 时需说明是哪些用例被合并/省略。
 
 ---
 
@@ -882,7 +883,7 @@ cd aimindtree_app && D:/DevTools/flutter/bin/cache/dart-sdk/bin/dart.exe tool/an
 - [ ] T6 纯函数层按 **10 条 / 5 轮 + ≤4000 字符** 写（规格 A）
 - [ ] 消息顺序断言用 **纯 `id ASC`**（规格 B 已定案），会话列表排序断言仍用 **1.1s 步进**
 - [ ] **`buildSessionContext` 绝不重排**（规格 C）：E13 断言「乱序传入 → 顺序 == 传入序」；E17 写「Agent 旧实现参考对照」
-- [ ] 派生 id 用 **`newDerivedUlid(sourceId)`**（整体 16 字节 +1、**取模**）；M11 断言覆盖取模 / 单射 / 保序 / 幂等
+- [x] 派生 id 用 **`newDerivedUlid(sourceId)`**（128 位大端 +1、**带进位**）；M11 断言覆盖进位 / 单射 / 保序 / 时间戳不动 / 幂等
 - [ ] 失败注入用 **`_FailingRepo` 覆写 `insertMessageRow`**（不用 `@visibleForTesting` / `@protected`）
 - [ ] **M8 夹具同时显式指定 `updated_at` 与 `id`，且两者递增序一致**（对 §0.3 两种排序键口径都稳健）
 - [ ] **E13 断言「绝不重排」**（乱序传入 → 顺序 == 传入序）；**E17 写「Agent 旧实现参考对照」**（最强护栏，优先级最高）
