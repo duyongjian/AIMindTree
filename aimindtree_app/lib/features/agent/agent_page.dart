@@ -34,6 +34,12 @@ import '../../data/repositories/ai_session_repository.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
 import '../knowledge/kp_dedup.dart';
+import '../shared/session_ui.dart';
+
+// 会话相关的共享工具已搬到 `lib/features/shared/session_ui.dart`；
+// 这里 re-export 以**保持既有 import 路径不变**（调用方与既有测试零改动）。
+export '../shared/session_ui.dart'
+    show deriveSessionTitle, fmtSessionTime, askNameDialog, confirmDialog;
 
 /// 工具协议（**客户端透传**，与 ``_runDetection`` 同款模式）：
 /// 工具目录是 Dart 侧动态生成的，放不进服务端提示词文件；服务端主形态
@@ -172,88 +178,6 @@ Future<DirectAddResult> addDetectedDirectlyToTree({
     addedCount: added,
     failures: failures,
   );
-}
-
-/// 会话标题：优先用户在 title 列里的重命名覆盖；否则**运行时派生**——
-/// 首条 user 消息首行（截 24 字），没有再退「新对话」。
-///
-/// ai_sessions 本就带 title 列（tables.dart），重命名直接写该列即可，
-/// **不需要改表结构**；未重命名时该列为空，退回派生标题。
-String deriveSessionTitle({
-  required String storedTitle,
-  required List<ChatMessage> messages,
-}) {
-  final override = storedTitle.trim();
-  if (override.isNotEmpty) return override;
-  for (final m in messages) {
-    if (m.role != 'user') continue;
-    final first = m.content.trim().split('\n').first.trim();
-    if (first.isEmpty) continue;
-    return first.length <= 24 ? first : '${first.substring(0, 24)}…';
-  }
-  return '新对话';
-}
-
-/// 会话列表时间戳（本地时区，MM-dd HH:mm）。
-String fmtSessionTime(DateTime t) {
-  final l = t.toLocal();
-  String two(int n) => n.toString().padLeft(2, '0');
-  return '${two(l.month)}-${two(l.day)} ${two(l.hour)}:${two(l.minute)}';
-}
-
-/// 弹一个单行输入框（建树命名 / 会话重命名共用）。
-Future<String?> askNameDialog(
-  BuildContext context, {
-  required String title,
-  required String hint,
-  String initial = '',
-}) async {
-  final c = TextEditingController(text: initial);
-  final name = await showDialog<String>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: Text(title),
-      content: TextField(
-        controller: c,
-        autofocus: true,
-        decoration: InputDecoration(hintText: hint, isDense: true),
-        onSubmitted: (_) => Navigator.pop(ctx, c.text.trim()),
-      ),
-      actions: [
-        TextButton(
-            onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-        TextButton(
-          onPressed: () => Navigator.pop(ctx, c.text.trim()),
-          child: const Text('确定'),
-        ),
-      ],
-    ),
-  );
-  return name;
-}
-
-/// 通用确认框（清空 / 删除会话）。
-Future<bool> confirmDialog(
-  BuildContext context, {
-  required String title,
-  required String message,
-}) async {
-  final ok = await showDialog<bool>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: Text(title),
-      content: Text(message),
-      actions: [
-        TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消')),
-        TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('确定')),
-      ],
-    ),
-  );
-  return ok ?? false;
 }
 
 /// 一条对话消息。
