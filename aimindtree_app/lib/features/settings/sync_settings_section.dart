@@ -212,6 +212,11 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   /// 完全一致），测出来的结论才有意义；换一个普通 HttpClient 会得到不一样
   /// 的结果，用户据此判断会走偏。
   Future<void> _testEndpoint() async {
+    final disabled = _backend.disabledReason;
+    if (disabled != null) {
+      _snack('${_backend.label}$disabled', ok: false);
+      return;
+    }
     final urlError = _validateEndpoint(_endpoint.text);
     if (urlError != null) {
       _snack(urlError, ok: false);
@@ -293,6 +298,13 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
 
   /// 登录/注册当前后端的账号（多租户）：成功后保存每用户令牌，普通用户无需填共享 token。
   Future<void> _account({required bool register}) async {
+    // 暂不可用后端双保险：按钮虽已置灰，入口再拦一次（禁用的 chip 选不中，
+    // 但历史选中态可能在禁用名单变更后残留）。
+    final disabled = _backend.disabledReason;
+    if (disabled != null) {
+      _snack('${_backend.label}$disabled', ok: false);
+      return;
+    }
     final url = widget.config.urlOf(_backend).trim();
     if (url.isEmpty) {
       _snack('${_backend.label} 尚未配置地址，无法登录/注册。', ok: false);
@@ -343,6 +355,11 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   /// 指向对应后端。拉取前强制游标归零（dev 期各后端共用游标，避免漏拉）。
   Future<void> _runSync({required bool push}) async {
     final backend = _backend;
+    final disabled = backend.disabledReason;
+    if (disabled != null) {
+      _snack('${backend.label}$disabled', ok: false);
+      return;
+    }
     final url = widget.config.urlOf(backend).trim();
     if (url.isEmpty) {
       _snack('${backend.label} 尚未配置地址，无法同步。', ok: false);
@@ -428,10 +445,17 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
           runSpacing: 8,
           children: [
             for (final b in SyncBackend.values)
-              ChoiceChip(
-                label: Text(_chipLabel(b)),
-                selected: b == _backend,
-                onSelected: (_) => _selectBackend(b),
+              Tooltip(
+                // 禁用后端置灰不可点，原因经 Tooltip 可见（Vercel / CloudBase
+                // 实测有阻塞性问题，见 SyncBackend.disabledReason）。
+                message: b.disabledReason ?? b.label,
+                child: ChoiceChip(
+                  label: Text(_chipLabel(b)),
+                  selected: b == _backend,
+                  onSelected: b.disabledReason != null
+                      ? null
+                      : (_) => _selectBackend(b),
+                ),
               ),
           ],
         ),
@@ -446,8 +470,9 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   }
 
   /// Chip 文案；Vercel / EdgeOne 内置域名还没回填时加「（待配置）」提示，
-  /// 回填后该提示自动消失（域名是编译期常量）。
+  /// 回填后该提示自动消失（域名是编译期常量）；暂不可用的后端加「（暂不可用）」。
   String _chipLabel(SyncBackend b) {
+    if (b.disabledReason != null) return '${b.label}（暂不可用）';
     final builtInEmpty = switch (b) {
       SyncBackend.vercel => SyncConfig.kSyncVercelDefaultBaseUrl.isEmpty,
       SyncBackend.edgeone => SyncConfig.kSyncEoDefaultBaseUrl.isEmpty,
@@ -469,6 +494,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   /// 并显示用户名，状态切换肉眼可辨；失败则该卡片保持「未登录」+ 红条提示。
   Widget _accountCard() {
     final theme = Theme.of(context);
+    final disabledReason = _backend.disabledReason;
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -497,6 +523,33 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
               ),
             ],
           ),
+          // 暂不可用后端：红条说明原因 + 引导切换（用户 2026-10-24 拍板置灰）。
+          if (disabledReason case final reason?) ...[
+            Container(
+              padding: const EdgeInsets.all(8),
+              margin: const EdgeInsets.only(top: 10),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.errorContainer,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.block_outlined,
+                      size: 16, color: theme.colorScheme.onErrorContainer),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      '${_backend.label}$reason，请切换到其他后端',
+                      style: TextStyle(
+                        color: theme.colorScheme.onErrorContainer,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
           const SizedBox(height: 10),
           if (_loggedIn) ...[
             _ReadOnlyField(
@@ -530,14 +583,18 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
               children: [
                 Expanded(
                   child: FilledButton(
-                    onPressed: _busy ? null : () => _account(register: false),
+                    onPressed: _busy || disabledReason != null
+                        ? null
+                        : () => _account(register: false),
                     child: const Text('登录'),
                   ),
                 ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: OutlinedButton(
-                    onPressed: _busy ? null : () => _account(register: true),
+                    onPressed: _busy || disabledReason != null
+                        ? null
+                        : () => _account(register: true),
                     child: const Text('注册'),
                   ),
                 ),
@@ -562,7 +619,9 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   /// 场景，不能静默失败。
   Widget _syncButtons() {
     final theme = Theme.of(context);
+    final disabledReason = _backend.disabledReason;
     final urlReady = widget.config.urlOf(_backend).trim().isNotEmpty;
+    final ready = urlReady && disabledReason == null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -570,7 +629,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
           children: [
             Expanded(
               child: FilledButton.icon(
-                onPressed: urlReady ? () => _runSync(push: true) : null,
+                onPressed: ready ? () => _runSync(push: true) : null,
                 icon: const Icon(Icons.cloud_upload_outlined),
                 label: Text('上传本地到 ${_backend.label}'),
               ),
@@ -578,14 +637,22 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
             const SizedBox(width: 8),
             Expanded(
               child: FilledButton.icon(
-                onPressed: urlReady ? () => _runSync(push: false) : null,
+                onPressed: ready ? () => _runSync(push: false) : null,
                 icon: const Icon(Icons.cloud_download_outlined),
                 label: Text('从 ${_backend.label} 拉取'),
               ),
             ),
           ],
         ),
-        if (!urlReady)
+        if (disabledReason case final reason?)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              '${_backend.label}$reason，请切换到其他后端',
+              style: TextStyle(color: theme.colorScheme.error, fontSize: 11),
+            ),
+          )
+        else if (!urlReady)
           Padding(
             padding: const EdgeInsets.only(top: 6),
             child: Text(

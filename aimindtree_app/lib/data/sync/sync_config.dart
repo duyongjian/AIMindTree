@@ -14,6 +14,11 @@
 /// Netlify 为海外/备份第五链路
 /// （函数跑美/欧单区，国内直连可达性差，非国内首选），预算沿用默认 4MB / 6MB。
 ///
+/// 可用性（2026-10-24 用户实测拍板）：Vercel 注册链路异常、CloudBase 上传
+/// 受网关 ~1MB 请求体硬限所困，两者在设置页**置灰禁选**（原因见
+/// [SyncBackend.disabledReason]，修复后把对应分支改回 null 即恢复，UI 无需动）；
+/// 当前可选 Cloudflare / EdgeOne Pages / Netlify。
+///
 /// 存储口径：
 /// - 每个后端三件套独立存放：地址 / 用户名（明文 prefs）+ 每用户令牌
 ///   （SecretStore，key 均带后端后缀，见 [SyncBackend.keySuffix]）；
@@ -88,6 +93,23 @@ enum SyncBackend {
         SyncBackend.cloudbase => SyncConfig.kSyncCbPushBudgetBytes,
         SyncBackend.edgeone => SyncConfig.kSyncEoPushBudgetBytes,
         _ => SyncConfig.kSyncMaxEnvelopeBytes,
+      };
+
+  /// 暂不可用原因（null = 可用）。
+  ///
+  /// 2026-10-24 用户实测拍板：以下后端存在阻塞性问题，设置页据此**置灰禁选**
+  /// 并在账号卡片给出原因，避免误选后反复踩坑。修复后把对应分支改回 null
+  /// 即恢复，UI / 测试都不用动。
+  String? get disabledReason => switch (this) {
+        // CloudBase：HTTP 访问服务网关 ~1MB 请求体硬限，大图附件 push 413。
+        // App 侧已收紧 850KB 预算（d8927ff），用户实测上传仍失败，整链暂禁；
+        // 大图同步请用 CF / Netlify。
+        SyncBackend.cloudbase => '上传链路受限（网关请求体约 1MB 硬限），暂不可用',
+        // Vercel：注册链路异常（平台层 404）。App 侧已加 /api 地址自动补全
+        // （68c3803）+ 中继 rewrites 双链路（540a656），用户实测仍失败，
+        // 待生产侧定位后恢复。
+        SyncBackend.vercel => '注册链路异常，暂不可用',
+        _ => null,
       };
 }
 

@@ -92,6 +92,15 @@ void main() {
       expect(SyncConfig.kSyncCbPushBudgetBytes, 850 * 1024);
     });
 
+    test('暂不可用后端有明确原因（vercel / cloudbase 置灰禁选，2026-10-24 拍板）', () {
+      // 用户实测两个后端有阻塞性问题，设置页据此置灰；修复后改回 null 即恢复。
+      expect(SyncBackend.vercel.disabledReason, isNotNull);
+      expect(SyncBackend.cloudbase.disabledReason, isNotNull);
+      expect(SyncBackend.cloudflare.disabledReason, isNull);
+      expect(SyncBackend.edgeone.disabledReason, isNull);
+      expect(SyncBackend.netlify.disabledReason, isNull);
+    });
+
     test('每个后端可独立覆盖地址（trim；空串=清除覆盖回落默认）', () async {
       await config.setUrl(
         SyncBackend.cloudbase,

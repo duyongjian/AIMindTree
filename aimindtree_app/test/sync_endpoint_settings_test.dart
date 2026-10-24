@@ -326,6 +326,9 @@ void main() {
       expect(source, contains("'unauthorized'"));
       // 旧的宽判定痕迹不应复活：不再把 404 当连通证据。
       expect(source, isNot(contains('404 即链路通')));
+      // 暂不可用后端置灰禁选（vercel / cloudbase，2026-10-24 用户拍板）：
+      // chip / 按钮 / 操作入口都必须读 disabledReason，防回归成可点。
+      expect(source, contains('disabledReason'));
     });
   });
 }
