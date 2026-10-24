@@ -1,15 +1,18 @@
 /// SettingsPage 中的「同步」分区。
 ///
-/// 多后端 UI（Cloudflare / 腾讯云 CloudBase / Vercel 三选一；原 llm_server
-/// 目标已移除）：顶部后端选择器 → 当前后端的账号卡片（自助注册/登录）→
-/// 上传/拉取按钮 → 「服务器与网络」卡片（自定义地址 + HTTP 代理 + 测试连接）。
+/// 多后端 UI（Cloudflare / 腾讯云 CloudBase / Vercel / EdgeOne Pages 四选一；
+/// 原 llm_server 目标已移除）：顶部后端选择器 → 当前后端的账号卡片
+/// （自助注册/登录）→ 上传/拉取按钮 → 「服务器与网络」卡片（自定义地址 +
+/// HTTP 代理 + 测试连接）。
 ///
 /// 要点：
-/// - 三个中继的 HTTP 契约逐字一致，App 侧只换地址；三个后端的账号体系
+/// - 四个中继的 HTTP 契约逐字一致，App 侧只换地址；四个后端的账号体系
 ///   **互相独立**（同一用户在 CF 与 CloudBase 上是不同账号），用户名/令牌
 ///   按后端隔离存储（见 [SyncConfig]）；
-/// - CF / CloudBase 地址已内置，用户无需填写即可开箱即用；Vercel 域名待
-///   部署回填，选中/使用时会明确提示「待配置」，不会静默失败；
+/// - CF / CloudBase 地址已内置，用户无需填写即可开箱即用；Vercel / EdgeOne
+///   域名待部署回填，选中/使用时会明确提示「待配置」，不会静默失败；
+/// - EdgeOne Pages 是国内永久免费链路，但请求体 1MB 硬限，大图片附件（
+///   note_assets）会被本机切批逻辑标记失败，建议这类数据走 CF / CloudBase；
 /// - 换中继 / 走代理都在「服务器与网络」卡里配，不必重新编译 App。
 library;
 
@@ -310,7 +313,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
       return;
     }
 
-    final api = HttpSyncApi(baseUrl: url, userToken: token);
+    final api = HttpSyncApi(baseUrl: url, userToken: token, backend: backend);
     final engine = widget.scheduler.engine;
     if (!push) {
       engine.updateLastPulledAt(DateTime.fromMillisecondsSinceEpoch(0, isUtc: true));
@@ -400,13 +403,15 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     );
   }
 
-  /// Chip 文案；Vercel 内置域名还没回填时加「（待配置）」提示，
+  /// Chip 文案；Vercel / EdgeOne 内置域名还没回填时加「（待配置）」提示，
   /// 回填后该提示自动消失（域名是编译期常量）。
   String _chipLabel(SyncBackend b) {
-    if (b == SyncBackend.vercel &&
-        SyncConfig.kSyncVercelDefaultBaseUrl.isEmpty) {
-      return '${b.label}（待配置）';
-    }
+    final builtInEmpty = switch (b) {
+      SyncBackend.vercel => SyncConfig.kSyncVercelDefaultBaseUrl.isEmpty,
+      SyncBackend.edgeone => SyncConfig.kSyncEoDefaultBaseUrl.isEmpty,
+      _ => false,
+    };
+    if (builtInEmpty) return '${b.label}（待配置）';
     return b.label;
   }
 
@@ -542,7 +547,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
             padding: const EdgeInsets.only(top: 6),
             child: Text(
               '${_backend.label} 尚未配置地址，暂不能同步'
-              '（Vercel 域名待部署完成后回填，其他后端可在下方自定义地址）。',
+              '（Vercel / EdgeOne 域名待部署完成后回填，其他后端可在下方自定义地址）。',
               style: TextStyle(color: theme.hintColor, fontSize: 11),
             ),
           ),

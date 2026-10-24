@@ -37,7 +37,9 @@
    写入捞回来；App 侧 apply 幂等，重复投递无害。
 4. **请求体上限 1MB**：超过 900KB 直接 413，不缓冲巨包。单条 envelope 超过
    约 900KB（典型是大图片附件 `data_base64`）在任何后端都存不下——App 侧
-   对 EdgeOne 后端需把切批预算从 4MB 收到 ≤900KB（见 App 集成一节）。
+   对 EdgeOne 后端把切批预算从 4MB 收到 **850KB**（见下「App 集成」一节，
+   本机 `kSyncEoPushBudgetBytes` 比 900KB 守卫再留 ~50KB 余量，确保整批
+   body 一定落在守卫以内）。
 5. 运行时仅 JavaScript（ES module）、CPU 200ms/次：密码哈希走 Web Crypto
    原生 `PBKDF2`（10 万次迭代），不占 JS CPU 预算，与另三版哈希互通。
 
@@ -102,6 +104,24 @@ EdgeOne 支持绑定自有域名（DNS / 文件 / 委派验证 + 免费证书）
 - 密码 `PBKDF2` 10 万次迭代 + 随机盐，明文不落库；令牌 64 位 hex，按用户隔离。
 - 多租户数据按 `owner_id` 严格隔离；一个用户看不到另一个用户的数据。
 - 中继只存「每个 (owner, table, entity) 的最新态 + server_time」，不备份历史版本。
+
+## App 集成（已完成）
+
+App 侧已把 EdgeOne 作为**第四同步后端**接好（与 CF / CloudBase / Vercel 平行）：
+
+- `SyncBackend.edgeone`（UI 名 `EdgeOne Pages`，pref/SecretStore key 后缀 `eo`），
+  设置页后端选择器**四选一**，账号体系与其他后端互相独立（各自注册/登录）。
+- 内置默认地址 `SyncConfig.kSyncEoDefaultBaseUrl` 当前为空串（待部署回填）；回填前
+  UI 对该后端显示「（待配置）」并禁用上传/拉取，不会静默失败。
+- `HttpSyncApi` 构造时携带 `backend`，`SyncEngine` 在 push / pushAll 时按
+  `SyncBackend.pushBatchBudgetBytes` / `maxEnvelopeBytes` 读预算——edgeone 取
+  **850KB**（其余后端沿用 4MB / 6MB），大图片附件（note_assets）单条超 850KB 会
+  被本机标记 failed 并提示用户换 CF / CloudBase 同步，而非把整批发到中继吃 413。
+- 自动同步（bootstrap）与设置页手动上传/拉取都已带上 `backend`，预算自动生效。
+
+> 回填域名：把 EdgeOne Pages 分配的项目域名（形如 `https://<project>.pages.dev`）
+> 发给主理人，填入 `aimindtree_app/lib/data/sync/sync_config.dart` 的
+> `kSyncEoDefaultBaseUrl` 后重新编译即可；用户也可在设置页「服务器与网络」卡里手填。
 
 ## 契约速查（与另三版一致）
 

@@ -19,6 +19,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'direct_connect.dart';
+import 'sync_config.dart';
 import 'sync_types.dart';
 
 /// 抽象同步后端。
@@ -34,6 +35,14 @@ abstract class SyncApi {
 
   /// 关闭底层 HTTP 客户端 / 测试占位。
   void close();
+
+  /// 单批 push 字节预算（默认 4MB；[HttpSyncApi] 按后端覆盖，edgeone 收紧
+  /// 到 850KB）。[SyncEngine] 据此贪心切批，避免超出中继请求体上限。
+  int get pushBatchBudgetBytes => SyncConfig.kSyncPushBatchBudgetBytes;
+
+  /// 单条 envelope 硬上限（默认 6MB；[HttpSyncApi] 按后端覆盖，edgeone 收紧
+  /// 到 850KB）。超过它的 envelope 直接标记 failed，不进切批。
+  int get maxEnvelopeBytes => SyncConfig.kSyncMaxEnvelopeBytes;
 }
 
 class SyncPushResult {
@@ -66,11 +75,25 @@ class HttpSyncApi implements SyncApi {
   HttpSyncApi({
     required this.baseUrl,
     required this.userToken,
+    this.backend,
     HttpClient? client,
   }) : _externalClient = client;
 
   final String baseUrl;
   final String userToken;
+
+  /// 目标同步后端（可空）。非空时 [pushBatchBudgetBytes] / [maxEnvelopeBytes]
+  /// 按后端返回——edgeone 收紧到 850KB（平台请求体 1MB 硬限）；其余后端
+  /// 沿用默认 4MB / 6MB。为空（历史/测试）时回落默认，行为与旧版一致。
+  final SyncBackend? backend;
+
+  @override
+  int get pushBatchBudgetBytes =>
+      backend?.pushBatchBudgetBytes ?? SyncConfig.kSyncPushBatchBudgetBytes;
+
+  @override
+  int get maxEnvelopeBytes =>
+      backend?.maxEnvelopeBytes ?? SyncConfig.kSyncMaxEnvelopeBytes;
 
   /// 外部注入的 client（测试桩用）；为空时懒创建「DoH 直连」client。
   final HttpClient? _externalClient;
@@ -177,6 +200,14 @@ class HttpSyncApi implements SyncApi {
 
 /// 测试用 Mock：可预设 push 接受策略 + pull 返回 envelope 序列。
 class MockSyncApi implements SyncApi {
+  /// Mock 不走真实后端，字节预算取默认（4MB / 6MB），与 CF / CloudBase /
+  /// Vercel 非 edgeone 路径一致。
+  @override
+  int get pushBatchBudgetBytes => SyncConfig.kSyncPushBatchBudgetBytes;
+
+  @override
+  int get maxEnvelopeBytes => SyncConfig.kSyncMaxEnvelopeBytes;
+
   MockSyncApi({
     this.deviceIdOfCaller = 'remote-device-1',
     this.pushShouldFail = false,

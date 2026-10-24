@@ -351,7 +351,11 @@ class ExtractionService {
     final syncBaseUrl = syncConfig.urlOf(syncBackend);
     final syncToken = await syncConfig.resolveUserToken(syncBackend);
     if (syncBaseUrl.isNotEmpty && syncToken != null && syncToken.isNotEmpty) {
-      api = HttpSyncApi(baseUrl: syncBaseUrl, userToken: syncToken);
+      api = HttpSyncApi(
+        baseUrl: syncBaseUrl,
+        userToken: syncToken,
+        backend: syncBackend,
+      );
     } else {
       _log.i('sync 后端未就绪（$syncBackend：地址或登录令牌缺失），'
           '使用 MockSyncApi 占位');

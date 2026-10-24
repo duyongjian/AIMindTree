@@ -196,7 +196,7 @@ Map<String, dynamic> kpGroupRowToMap(KpGroupRow r) => {
 /// - `dataBase64` 的列名是 `data_base64`（**不是** `dataBase64`）；
 /// - `bytes` 就是 `bytes`，类型 `int`；
 /// - 一条附件的 `data_base64` 可达数 MB，push 侧有字节预算切批（见
-///   `sync_engine.dart` 的 `_kPushBatchBudgetBytes`）。
+///   [SyncEngine] 与 [SyncBackend.pushBatchBudgetBytes]，默认 4MB、edgeone 850KB）。
 Map<String, dynamic> noteAssetRowToMap(NoteAssetRow r) => {
       'id': r.id,
       'note_id': r.noteId,

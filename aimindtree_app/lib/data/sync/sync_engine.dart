@@ -58,18 +58,18 @@ const Set<String> kSyncTableAllowlist = <String>{
   'note_assets',
 };
 
-/// 单批 push 的**字节预算**（4MB）。
+/// 单批 push 的**字节预算** / 单条 envelope 的**硬上限**——按后端取值。
 ///
-/// 一条图片附件的 `data_base64` 可达 2.7MB，若和别的行挤在同一批里，
-/// 整批会逼近甚至超过 Edge Function 的请求体上限 → 全批失败。
-/// 预算式切批让「大 envelope 单独成批」，小 envelope 则照旧一次带走。
-const int kPushBatchBudgetBytes = 4 * 1024 * 1024;
-
-/// 单条 envelope 的**硬上限**（6MB）。
+/// 默认 4MB / 6MB（与 CF / CloudBase / Vercel 的放宽上限一致）；edgeone
+/// 受平台请求体 1MB 硬限约束，经 [SyncBackend.pushBatchBudgetBytes] /
+/// [SyncBackend.maxEnvelopeBytes] 收紧到 850KB。具体数值见 [SyncConfig]
+/// （`kSyncPushBatchBudgetBytes` / `kSyncMaxEnvelopeBytes` /
+/// `kSyncEoPushBudgetBytes`），[push] / [pushAll] 在运行时从目标 [SyncApi]
+/// 读出对应后端的预算再切批，不再写死常量。
 ///
-/// 超过它的 envelope 不会被切批逻辑无限重试：直接 `markFailed` + 一条
-/// warning 日志，避免一条畸形巨包把整个 outbox 队列永久堵住。
-const int kMaxEnvelopeBytes = 6 * 1024 * 1024;
+/// 背景：一条图片附件的 `data_base64` 可达 2.7MB，若和别的行挤在同一批里，
+/// 整批会逼近甚至超过中继的请求体上限 → 全批失败。预算式切批让「大 envelope
+/// 单独成批」，小 envelope 则照旧一次带走。
 
 /// 全量快照（[SyncEngine.pushAll]）**单批条数上限**（200）。
 ///
@@ -132,16 +132,17 @@ SyncEngine({
 
   /// 推送 outbox pending → 成功 done / 失败 failed。
   ///
-  /// [limit] 单批上限（**条数**上限；真正的成批边界还受
-  /// [kPushBatchBudgetBytes] 字节预算约束）；[includeFailed] 是否同时拉
-  /// failed 重试。
+  /// [limit] 单批上限（**条数**上限；真正的成批边界还受目标后端的
+  /// [SyncBackend.pushBatchBudgetBytes] 字节预算约束）；[includeFailed] 是否
+  /// 同时拉 failed 重试。
   ///
   /// 流程：
   /// 1. 出队 pending + failed → 逐条构造 envelope；
   /// 2. 表名不在 [kSyncTableAllowlist] 里的行**原地跳过**（保持 pending，
   ///    不入队失败）—— 这是远端表名白名单不兼容时的回退通道；
-  /// 3. 单条 > [kMaxEnvelopeBytes] → `markFailed` + warning，不参与切批；
-  /// 4. 其余按 [kPushBatchBudgetBytes] 贪心切批 → 逐批 push。
+  /// 3. 单条 > 目标后端的 [SyncBackend.maxEnvelopeBytes] → `markFailed` +
+  ///    warning，不参与切批；
+  /// 4. 其余按目标后端的 [SyncBackend.pushBatchBudgetBytes] 贪心切批 → 逐批 push。
   ///
   /// [api] 可覆盖默认后端（用于「上传到 llmserver / 上传到 CF」双目标分流）；
   /// 不传则用构造时的 [_api]。
@@ -151,6 +152,9 @@ SyncEngine({
     SyncApi? api,
   }) async {
     final target = api ?? _api;
+    // 字节预算 / 单条硬上限按后端取值（edgeone 收紧到 850KB）。
+    final budget = target.pushBatchBudgetBytes;
+    final maxEnv = target.maxEnvelopeBytes;
     final pending = await _outbox.pending(limit: limit);
     final failed = includeFailed
         ? await _outbox.failedPending(limit: limit - pending.length)
@@ -181,7 +185,7 @@ SyncEngine({
         deletedAt: _extractDeletedAt(r.entityTable, r.payloadJson),
       );
       final bytes = _envelopeBytes(env, r.payloadJson);
-      if (bytes > kMaxEnvelopeBytes) {
+      if (bytes > maxEnv) {
         // 单条就超硬上限：切批也救不了，标记 failed 让它别堵住队列。
         oversized.add(r.id);
         continue;
@@ -197,7 +201,7 @@ SyncEngine({
     }
     if (oversized.isNotEmpty) {
       _log.w(
-        '${oversized.length} 条 envelope 超过 ${kMaxEnvelopeBytes ~/ (1024 * 1024)}MB '
+        '${oversized.length} 条 envelope 超过 ${maxEnv ~/ (1024 * 1024)}MB '
         '硬上限，标记 failed 跳过（否则会永久堵住队列）',
       );
       await _outbox.markFailed(oversized);
@@ -211,9 +215,9 @@ SyncEngine({
     }
 
     // ---- 2. 按字节预算切批 ----
-    final batches = _splitBatches(entries);
+    final batches = _splitBatches(entries, budgetBytes: budget);
     if (batches.length > 1) {
-      _log.i('push 切成 ${batches.length} 批（字节预算 ${kPushBatchBudgetBytes ~/ (1024 * 1024)}MB）');
+      _log.i('push 切成 ${batches.length} 批（字节预算 ${budget ~/ (1024 * 1024)}MB）');
     }
 
     // ---- 3. 逐批 push ----
@@ -270,6 +274,8 @@ SyncEngine({
   ///
   /// 泛型化是为了让「增量 push」与「全量快照 pushAll」共用同一套切批口径。
   /// [maxCount] 是可选的**条数**上限（0 = 不限，保持 `push()` 的原语义）。
+  /// [budgetBytes] 是**字节**预算上限（按后端，edgeone 取 850KB，其余 4MB），
+  /// 由调用方从目标 [SyncApi] 读出后传入。
   ///
   /// 为什么需要条数上限：远端 `handlePush` 把这个数组整个展开成一次
   /// `env.DB.batch(batch)` 提交，而 D1 的 batch 有语句数上限。一行 payload
@@ -279,12 +285,13 @@ SyncEngine({
   static List<List<T>> _splitBatches<T extends _ByteSized>(
     List<T> entries, {
     int maxCount = 0,
+    required int budgetBytes,
   }) {
     final batches = <List<T>>[];
     var current = <T>[];
     var currentBytes = 0;
     for (final e in entries) {
-      final overBudget = currentBytes + e.bytes > kPushBatchBudgetBytes;
+      final overBudget = currentBytes + e.bytes > budgetBytes;
       final overCount = maxCount > 0 && current.length >= maxCount;
       if (current.isNotEmpty && (overBudget || overCount)) {
         batches.add(current);
@@ -320,6 +327,9 @@ SyncEngine({
   /// **不写 outbox**：全量是对齐，不是变更记账（outbox 行由 [push] 负责）。
   Future<PushReport> pushAll({SyncApi? api, int pageSize = 50}) async {
     final target = api ?? _api;
+    // 字节预算 / 单条硬上限按后端取值（edgeone 收紧到 850KB）。
+    final budget = target.pushBatchBudgetBytes;
+    final maxEnv = target.maxEnvelopeBytes;
     var pushed = 0;
     var failed = 0;
     var serverTime = DateTime.now().toUtc();
@@ -334,6 +344,7 @@ SyncEngine({
       final batches = _splitBatches<_SnapshotEntry>(
         buffer,
         maxCount: kSnapshotMaxBatchCount,
+        budgetBytes: budget,
       );
       buffer.clear();
       bufferBytes = 0;
@@ -373,15 +384,15 @@ SyncEngine({
             deletedAt: _dt(payload['deleted_at']),
           );
           final bytes = _envelopeBytes(env);
-          if (bytes > kMaxEnvelopeBytes) {
+          if (bytes > maxEnv) {
             // 单条超硬上限：跳过但不中断整轮（否则一张坏表堵死全部快照）。
             failed++;
             _log.w('pushAll 跳过超大 envelope：$table/${payload['id']} '
-                '(${bytes ~/ 1024}KB > ${kMaxEnvelopeBytes ~/ (1024 * 1024)}MB)');
+                '(${bytes ~/ 1024}KB > ${maxEnv ~/ (1024 * 1024)}MB)');
             continue;
           }
           if (buffer.isNotEmpty &&
-              bufferBytes + bytes > kPushBatchBudgetBytes) {
+              bufferBytes + bytes > budget) {
             await flush();
           }
           buffer.add(_SnapshotEntry(envelope: env, bytes: bytes));

@@ -1,7 +1,13 @@
-/// SyncConfig：多后端同步配置（T03 演进：Cloudflare / CloudBase / Vercel）。
+/// SyncConfig：多后端同步配置（T03 演进：Cloudflare / CloudBase / Vercel /
+/// EdgeOne Pages 四套链路，一人一条）。
 ///
-/// 三个同步中继的 HTTP 契约逐字一致（同样的 5 端点、同样字段、同样 Bearer
+/// 四个同步中继的 HTTP 契约逐字一致（同样的 5 端点、同样字段、同样 Bearer
 /// 鉴权），App 侧换后端只换地址；原 llm_server 同步目标已随「中继化」移除。
+///
+/// EdgeOne Pages 是国内永久免费（官方 FAQ 明示）的边缘托管，1GB KV + 不限流量，
+/// 作国内主力的第三/第四链路；其请求体硬限 1MB，故本机 push 对 edgeone 后端
+/// 把单批字节预算与单条 envelope 硬上限都收紧到 850KB（见 [SyncBackend] 的
+/// 预算 getter），避免大图片附件把整批打 413。
 ///
 /// 存储口径：
 /// - 每个后端三件套独立存放：地址 / 用户名（明文 prefs）+ 每用户令牌
@@ -17,17 +23,19 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/secret_store.dart';
 
-/// 同步后端枚举（设置页三选一）。
+/// 同步后端枚举（设置页四选一）。
 enum SyncBackend {
   cloudflare,
   cloudbase,
-  vercel;
+  vercel,
+  edgeone;
 
   /// UI 展示名（中文）。
   String get label => switch (this) {
         SyncBackend.cloudflare => 'Cloudflare',
         SyncBackend.cloudbase => '腾讯云 CloudBase',
         SyncBackend.vercel => 'Vercel',
+        SyncBackend.edgeone => 'EdgeOne Pages',
       };
 
   /// pref / SecretStore key 的稳定后缀（不随枚举顺序变化）。
@@ -37,6 +45,7 @@ enum SyncBackend {
         SyncBackend.cloudflare => 'cf',
         SyncBackend.cloudbase => 'cb',
         SyncBackend.vercel => 'vc',
+        SyncBackend.edgeone => 'eo',
       };
 
   /// 内置默认地址（用户未覆盖时回落）。
@@ -44,6 +53,28 @@ enum SyncBackend {
         SyncBackend.cloudflare => SyncConfig.kSyncCfDefaultBaseUrl,
         SyncBackend.cloudbase => SyncConfig.kSyncCbDefaultBaseUrl,
         SyncBackend.vercel => SyncConfig.kSyncVercelDefaultBaseUrl,
+        SyncBackend.edgeone => SyncConfig.kSyncEoDefaultBaseUrl,
+      };
+
+  /// 单批 push 字节预算（按后端）。
+  ///
+  /// 默认 4MB 与 CF / CloudBase / Vercel 的放宽上限一致；edgeone 受平台
+  /// 请求体 1MB 硬限约束，收紧到 850KB（留 ~50KB 给 HTTP 头部与 JSON
+  /// 结构开销，远小于中继侧 900KB 的 413 守卫）。[SyncEngine] 据此贪心切批。
+  int get pushBatchBudgetBytes => switch (this) {
+        SyncBackend.edgeone => SyncConfig.kSyncEoPushBudgetBytes,
+        _ => SyncConfig.kSyncPushBatchBudgetBytes,
+      };
+
+  /// 单条 envelope 硬上限（按后端）。
+  ///
+  /// 超过它的 envelope 不会被切批逻辑无限重试：直接 `markFailed` + warning，
+  /// 避免一条畸形巨包把整个 outbox 队列永久堵住。edgeone 同样取 850KB——
+  /// 大图片附件（data_base64）单条就超，标记失败后提示用户换 CF/CloudBase
+  /// 同步，而不是把整批发到中继侧吃 413。
+  int get maxEnvelopeBytes => switch (this) {
+        SyncBackend.edgeone => SyncConfig.kSyncEoPushBudgetBytes,
+        _ => SyncConfig.kSyncMaxEnvelopeBytes,
       };
 }
 
@@ -71,6 +102,34 @@ class SyncConfig {
   /// [urlOf] 对 vercel 返回空串，UI 据此禁用上传/拉取并提示，不会静默失败。
   /// 用户手填的覆盖值不受影响（优先于内置默认）。
   static const String kSyncVercelDefaultBaseUrl = '';
+
+  /// 内置默认地址：EdgeOne Pages 同步中继（sync_relay_eo）。
+  ///
+  /// ⚠️ 域名待 EdgeOne Pages 部署完成后由主理人回填；空串表示「尚未配置」——
+  /// 与 [kSyncVercelDefaultBaseUrl] 同口径：UI 据此禁用上传/拉取并提示，
+  /// 不会静默失败。用户手填的覆盖值（EdgeOne Pages 控制台分配的
+  /// `https://<project>.pages.dev`）不受影响，优先于内置默认。
+  static const String kSyncEoDefaultBaseUrl = '';
+
+  /// 单批 push 字节预算默认值（4MB）。
+  ///
+  /// 与 CF / CloudBase / Vercel 的放宽上限一致；edgeone 另有收紧值
+  /// （见 [kSyncEoPushBudgetBytes]）。[SyncBackend.pushBatchBudgetBytes]
+  /// 据此按后端返回。
+  static const int kSyncPushBatchBudgetBytes = 4 * 1024 * 1024;
+
+  /// 单条 envelope 硬上限默认值（6MB）。
+  ///
+  /// 超过它的 envelope 直接 `markFailed` 跳过（不进切批）。edgeone 收紧到
+  /// [kSyncEoPushBudgetBytes]。见 [SyncBackend.maxEnvelopeBytes]。
+  static const int kSyncMaxEnvelopeBytes = 6 * 1024 * 1024;
+
+  /// edgeone 后端的单批预算 / 单条 envelope 硬上限（850KB）。
+  ///
+  /// 中继侧 413 守卫是 900KB（EdgeOne 平台请求体 1MB 硬限留余量），本机取
+  /// 850KB 给 HTTP 头部与 JSON 结构开销留出安全余量，确保整批 body 一定
+  /// 落在 900KB 守卫以内。
+  static const int kSyncEoPushBudgetBytes = 850 * 1024;
 
   /// 当前选中后端（pref 存枚举 name；读不到 / 脏值 → cloudflare）。
   static const _kBackend = 'aimindtree.sync.backend';

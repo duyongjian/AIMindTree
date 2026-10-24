@@ -1,8 +1,9 @@
-/// SyncConfig 多后端（Cloudflare / 腾讯云 CloudBase / Vercel）单元测试。
+/// SyncConfig 多后端（Cloudflare / 腾讯云 CloudBase / Vercel / EdgeOne Pages）
+/// 单元测试。
 ///
-/// 覆盖：三后端默认/覆盖地址、cloudflare 沿用旧 key（老用户数据零迁移）、
+/// 覆盖：四后端默认/覆盖地址、cloudflare 沿用旧 key（老用户数据零迁移）、
 /// selectedBackend 持久化、每后端账号独立隔离、clear() 清所有后端、
-/// Vercel 内置默认为空串时 urlOf 返回空。
+/// Vercel / EdgeOne 内置默认为空串时 urlOf 返回空、各后端 push 字节预算取值。
 library;
 
 import 'package:aimindtree_app/core/secret_store.dart';
@@ -27,13 +28,14 @@ void main() {
       expect(SyncBackend.cloudflare.label, 'Cloudflare');
       expect(SyncBackend.cloudbase.label, '腾讯云 CloudBase');
       expect(SyncBackend.vercel.label, 'Vercel');
+      expect(SyncBackend.edgeone.label, 'EdgeOne Pages');
       expect(
         SyncBackend.values.map((b) => b.keySuffix).toList(),
-        <String>['cf', 'cb', 'vc'],
+        <String>['cf', 'cb', 'vc', 'eo'],
       );
     });
 
-    test('三个后端各自读内置默认地址', () {
+    test('四个后端各自读内置默认地址', () {
       expect(
         config.urlOf(SyncBackend.cloudflare),
         SyncConfig.kSyncCfDefaultBaseUrl,
@@ -42,9 +44,29 @@ void main() {
         config.urlOf(SyncBackend.cloudbase),
         SyncConfig.kSyncCbDefaultBaseUrl,
       );
-      // Vercel 域名待部署回填：内置默认为空串。
+      // Vercel / EdgeOne 域名待部署回填：内置默认为空串。
       expect(SyncConfig.kSyncVercelDefaultBaseUrl, '');
+      expect(SyncConfig.kSyncEoDefaultBaseUrl, '');
       expect(config.urlOf(SyncBackend.vercel), '');
+      expect(config.urlOf(SyncBackend.edgeone), '');
+    });
+
+    test('push 字节预算 / 单条硬上限按后端取值（edgeone 收紧 850KB）', () {
+      // 默认（CF / CloudBase / Vercel）：4MB / 6MB。
+      for (final b in [
+        SyncBackend.cloudflare,
+        SyncBackend.cloudbase,
+        SyncBackend.vercel,
+      ]) {
+        expect(b.pushBatchBudgetBytes, SyncConfig.kSyncPushBatchBudgetBytes);
+        expect(b.maxEnvelopeBytes, SyncConfig.kSyncMaxEnvelopeBytes);
+      }
+      // edgeone：受平台请求体 1MB 硬限约束，预算与硬上限都取 850KB。
+      expect(SyncBackend.edgeone.pushBatchBudgetBytes,
+          SyncConfig.kSyncEoPushBudgetBytes);
+      expect(SyncBackend.edgeone.maxEnvelopeBytes,
+          SyncConfig.kSyncEoPushBudgetBytes);
+      expect(SyncConfig.kSyncEoPushBudgetBytes, 850 * 1024);
     });
 
     test('每个后端可独立覆盖地址（trim；空串=清除覆盖回落默认）', () async {
