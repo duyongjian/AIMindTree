@@ -6525,6 +6525,1135 @@ class CanvasEdgesCompanion extends UpdateCompanion<CanvasEdgeRow> {
   }
 }
 
+class $CanvasCardsTable extends CanvasCards
+    with TableInfo<$CanvasCardsTable, CanvasCardRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $CanvasCardsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _versionMeta = const VerificationMeta(
+    'version',
+  );
+  @override
+  late final GeneratedColumn<int> version = GeneratedColumn<int>(
+    'version',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(1),
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _deviceIdMeta = const VerificationMeta(
+    'deviceId',
+  );
+  @override
+  late final GeneratedColumn<String> deviceId = GeneratedColumn<String>(
+    'device_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _deletedAtMeta = const VerificationMeta(
+    'deletedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> deletedAt = GeneratedColumn<DateTime>(
+    'deleted_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _noteIdMeta = const VerificationMeta('noteId');
+  @override
+  late final GeneratedColumn<String> noteId = GeneratedColumn<String>(
+    'note_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _titleMeta = const VerificationMeta('title');
+  @override
+  late final GeneratedColumn<String> title = GeneratedColumn<String>(
+    'title',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(''),
+  );
+  static const VerificationMeta _bodyMeta = const VerificationMeta('body');
+  @override
+  late final GeneratedColumn<String> body = GeneratedColumn<String>(
+    'body',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(''),
+  );
+  static const VerificationMeta _styleJsonMeta = const VerificationMeta(
+    'styleJson',
+  );
+  @override
+  late final GeneratedColumn<String> styleJson = GeneratedColumn<String>(
+    'style_json',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('{}'),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    version,
+    updatedAt,
+    deviceId,
+    deletedAt,
+    noteId,
+    title,
+    body,
+    styleJson,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'canvas_cards';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<CanvasCardRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('version')) {
+      context.handle(
+        _versionMeta,
+        version.isAcceptableOrUnknown(data['version']!, _versionMeta),
+      );
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    if (data.containsKey('device_id')) {
+      context.handle(
+        _deviceIdMeta,
+        deviceId.isAcceptableOrUnknown(data['device_id']!, _deviceIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_deviceIdMeta);
+    }
+    if (data.containsKey('deleted_at')) {
+      context.handle(
+        _deletedAtMeta,
+        deletedAt.isAcceptableOrUnknown(data['deleted_at']!, _deletedAtMeta),
+      );
+    }
+    if (data.containsKey('note_id')) {
+      context.handle(
+        _noteIdMeta,
+        noteId.isAcceptableOrUnknown(data['note_id']!, _noteIdMeta),
+      );
+    }
+    if (data.containsKey('title')) {
+      context.handle(
+        _titleMeta,
+        title.isAcceptableOrUnknown(data['title']!, _titleMeta),
+      );
+    }
+    if (data.containsKey('body')) {
+      context.handle(
+        _bodyMeta,
+        body.isAcceptableOrUnknown(data['body']!, _bodyMeta),
+      );
+    }
+    if (data.containsKey('style_json')) {
+      context.handle(
+        _styleJsonMeta,
+        styleJson.isAcceptableOrUnknown(data['style_json']!, _styleJsonMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  CanvasCardRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return CanvasCardRow(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      version: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}version'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at'],
+      )!,
+      deviceId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}device_id'],
+      )!,
+      deletedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}deleted_at'],
+      ),
+      noteId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}note_id'],
+      ),
+      title: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}title'],
+      )!,
+      body: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}body'],
+      )!,
+      styleJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}style_json'],
+      )!,
+    );
+  }
+
+  @override
+  $CanvasCardsTable createAlias(String alias) {
+    return $CanvasCardsTable(attachedDatabase, alias);
+  }
+}
+
+class CanvasCardRow extends DataClass implements Insertable<CanvasCardRow> {
+  /// ULID 主键。
+  final String id;
+
+  /// 本地递增版本号，服务端接管后用于 LWW 冲突判定。
+  final int version;
+  final DateTime updatedAt;
+
+  /// 产生该次变更的设备，用于同步自回声过滤。
+  final String deviceId;
+
+  /// tombstone 软删除：非空即删除，删除靠它传播，不物理删（§11）。
+  final DateTime? deletedAt;
+
+  /// 关联笔记 id（笔记卡片用）：非空时标题+摘要由该笔记自动派生；
+  /// 为空 = 纯自由卡片（标题/正文手填）。
+  final String? noteId;
+
+  /// 卡片标题（自由卡片手填；关联笔记时默认取笔记标题，可覆盖）。
+  final String title;
+
+  /// 卡片正文（自由卡片的备注/摘要；关联笔记时默认取笔记摘要，可覆盖）。
+  final String body;
+
+  /// 样式预设 JSON：`{"kind":"note_card"|"text_box","bg":"#fff","opacity":1.0}`。
+  /// 同步层只搬运不解析（解析归卡片仓储/UI）。
+  final String styleJson;
+  const CanvasCardRow({
+    required this.id,
+    required this.version,
+    required this.updatedAt,
+    required this.deviceId,
+    this.deletedAt,
+    this.noteId,
+    required this.title,
+    required this.body,
+    required this.styleJson,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['version'] = Variable<int>(version);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    map['device_id'] = Variable<String>(deviceId);
+    if (!nullToAbsent || deletedAt != null) {
+      map['deleted_at'] = Variable<DateTime>(deletedAt);
+    }
+    if (!nullToAbsent || noteId != null) {
+      map['note_id'] = Variable<String>(noteId);
+    }
+    map['title'] = Variable<String>(title);
+    map['body'] = Variable<String>(body);
+    map['style_json'] = Variable<String>(styleJson);
+    return map;
+  }
+
+  CanvasCardsCompanion toCompanion(bool nullToAbsent) {
+    return CanvasCardsCompanion(
+      id: Value(id),
+      version: Value(version),
+      updatedAt: Value(updatedAt),
+      deviceId: Value(deviceId),
+      deletedAt: deletedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(deletedAt),
+      noteId: noteId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(noteId),
+      title: Value(title),
+      body: Value(body),
+      styleJson: Value(styleJson),
+    );
+  }
+
+  factory CanvasCardRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return CanvasCardRow(
+      id: serializer.fromJson<String>(json['id']),
+      version: serializer.fromJson<int>(json['version']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+      deviceId: serializer.fromJson<String>(json['deviceId']),
+      deletedAt: serializer.fromJson<DateTime?>(json['deletedAt']),
+      noteId: serializer.fromJson<String?>(json['noteId']),
+      title: serializer.fromJson<String>(json['title']),
+      body: serializer.fromJson<String>(json['body']),
+      styleJson: serializer.fromJson<String>(json['styleJson']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'version': serializer.toJson<int>(version),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+      'deviceId': serializer.toJson<String>(deviceId),
+      'deletedAt': serializer.toJson<DateTime?>(deletedAt),
+      'noteId': serializer.toJson<String?>(noteId),
+      'title': serializer.toJson<String>(title),
+      'body': serializer.toJson<String>(body),
+      'styleJson': serializer.toJson<String>(styleJson),
+    };
+  }
+
+  CanvasCardRow copyWith({
+    String? id,
+    int? version,
+    DateTime? updatedAt,
+    String? deviceId,
+    Value<DateTime?> deletedAt = const Value.absent(),
+    Value<String?> noteId = const Value.absent(),
+    String? title,
+    String? body,
+    String? styleJson,
+  }) => CanvasCardRow(
+    id: id ?? this.id,
+    version: version ?? this.version,
+    updatedAt: updatedAt ?? this.updatedAt,
+    deviceId: deviceId ?? this.deviceId,
+    deletedAt: deletedAt.present ? deletedAt.value : this.deletedAt,
+    noteId: noteId.present ? noteId.value : this.noteId,
+    title: title ?? this.title,
+    body: body ?? this.body,
+    styleJson: styleJson ?? this.styleJson,
+  );
+  CanvasCardRow copyWithCompanion(CanvasCardsCompanion data) {
+    return CanvasCardRow(
+      id: data.id.present ? data.id.value : this.id,
+      version: data.version.present ? data.version.value : this.version,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      deviceId: data.deviceId.present ? data.deviceId.value : this.deviceId,
+      deletedAt: data.deletedAt.present ? data.deletedAt.value : this.deletedAt,
+      noteId: data.noteId.present ? data.noteId.value : this.noteId,
+      title: data.title.present ? data.title.value : this.title,
+      body: data.body.present ? data.body.value : this.body,
+      styleJson: data.styleJson.present ? data.styleJson.value : this.styleJson,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CanvasCardRow(')
+          ..write('id: $id, ')
+          ..write('version: $version, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('deviceId: $deviceId, ')
+          ..write('deletedAt: $deletedAt, ')
+          ..write('noteId: $noteId, ')
+          ..write('title: $title, ')
+          ..write('body: $body, ')
+          ..write('styleJson: $styleJson')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    version,
+    updatedAt,
+    deviceId,
+    deletedAt,
+    noteId,
+    title,
+    body,
+    styleJson,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is CanvasCardRow &&
+          other.id == this.id &&
+          other.version == this.version &&
+          other.updatedAt == this.updatedAt &&
+          other.deviceId == this.deviceId &&
+          other.deletedAt == this.deletedAt &&
+          other.noteId == this.noteId &&
+          other.title == this.title &&
+          other.body == this.body &&
+          other.styleJson == this.styleJson);
+}
+
+class CanvasCardsCompanion extends UpdateCompanion<CanvasCardRow> {
+  final Value<String> id;
+  final Value<int> version;
+  final Value<DateTime> updatedAt;
+  final Value<String> deviceId;
+  final Value<DateTime?> deletedAt;
+  final Value<String?> noteId;
+  final Value<String> title;
+  final Value<String> body;
+  final Value<String> styleJson;
+  final Value<int> rowid;
+  const CanvasCardsCompanion({
+    this.id = const Value.absent(),
+    this.version = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.deviceId = const Value.absent(),
+    this.deletedAt = const Value.absent(),
+    this.noteId = const Value.absent(),
+    this.title = const Value.absent(),
+    this.body = const Value.absent(),
+    this.styleJson = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  CanvasCardsCompanion.insert({
+    required String id,
+    this.version = const Value.absent(),
+    required DateTime updatedAt,
+    required String deviceId,
+    this.deletedAt = const Value.absent(),
+    this.noteId = const Value.absent(),
+    this.title = const Value.absent(),
+    this.body = const Value.absent(),
+    this.styleJson = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       updatedAt = Value(updatedAt),
+       deviceId = Value(deviceId);
+  static Insertable<CanvasCardRow> custom({
+    Expression<String>? id,
+    Expression<int>? version,
+    Expression<DateTime>? updatedAt,
+    Expression<String>? deviceId,
+    Expression<DateTime>? deletedAt,
+    Expression<String>? noteId,
+    Expression<String>? title,
+    Expression<String>? body,
+    Expression<String>? styleJson,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (version != null) 'version': version,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (deviceId != null) 'device_id': deviceId,
+      if (deletedAt != null) 'deleted_at': deletedAt,
+      if (noteId != null) 'note_id': noteId,
+      if (title != null) 'title': title,
+      if (body != null) 'body': body,
+      if (styleJson != null) 'style_json': styleJson,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  CanvasCardsCompanion copyWith({
+    Value<String>? id,
+    Value<int>? version,
+    Value<DateTime>? updatedAt,
+    Value<String>? deviceId,
+    Value<DateTime?>? deletedAt,
+    Value<String?>? noteId,
+    Value<String>? title,
+    Value<String>? body,
+    Value<String>? styleJson,
+    Value<int>? rowid,
+  }) {
+    return CanvasCardsCompanion(
+      id: id ?? this.id,
+      version: version ?? this.version,
+      updatedAt: updatedAt ?? this.updatedAt,
+      deviceId: deviceId ?? this.deviceId,
+      deletedAt: deletedAt ?? this.deletedAt,
+      noteId: noteId ?? this.noteId,
+      title: title ?? this.title,
+      body: body ?? this.body,
+      styleJson: styleJson ?? this.styleJson,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (version.present) {
+      map['version'] = Variable<int>(version.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (deviceId.present) {
+      map['device_id'] = Variable<String>(deviceId.value);
+    }
+    if (deletedAt.present) {
+      map['deleted_at'] = Variable<DateTime>(deletedAt.value);
+    }
+    if (noteId.present) {
+      map['note_id'] = Variable<String>(noteId.value);
+    }
+    if (title.present) {
+      map['title'] = Variable<String>(title.value);
+    }
+    if (body.present) {
+      map['body'] = Variable<String>(body.value);
+    }
+    if (styleJson.present) {
+      map['style_json'] = Variable<String>(styleJson.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CanvasCardsCompanion(')
+          ..write('id: $id, ')
+          ..write('version: $version, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('deviceId: $deviceId, ')
+          ..write('deletedAt: $deletedAt, ')
+          ..write('noteId: $noteId, ')
+          ..write('title: $title, ')
+          ..write('body: $body, ')
+          ..write('styleJson: $styleJson, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $CanvasStrokesTable extends CanvasStrokes
+    with TableInfo<$CanvasStrokesTable, CanvasStrokeRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $CanvasStrokesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _versionMeta = const VerificationMeta(
+    'version',
+  );
+  @override
+  late final GeneratedColumn<int> version = GeneratedColumn<int>(
+    'version',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(1),
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _deviceIdMeta = const VerificationMeta(
+    'deviceId',
+  );
+  @override
+  late final GeneratedColumn<String> deviceId = GeneratedColumn<String>(
+    'device_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _deletedAtMeta = const VerificationMeta(
+    'deletedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> deletedAt = GeneratedColumn<DateTime>(
+    'deleted_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _canvasIdMeta = const VerificationMeta(
+    'canvasId',
+  );
+  @override
+  late final GeneratedColumn<String> canvasId = GeneratedColumn<String>(
+    'canvas_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _pointsJsonMeta = const VerificationMeta(
+    'pointsJson',
+  );
+  @override
+  late final GeneratedColumn<String> pointsJson = GeneratedColumn<String>(
+    'points_json',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('[]'),
+  );
+  static const VerificationMeta _colorMeta = const VerificationMeta('color');
+  @override
+  late final GeneratedColumn<String> color = GeneratedColumn<String>(
+    'color',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('#1a1a1a'),
+  );
+  static const VerificationMeta _widthMeta = const VerificationMeta('width');
+  @override
+  late final GeneratedColumn<double> width = GeneratedColumn<double>(
+    'width',
+    aliasedName,
+    false,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(3.0),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    version,
+    updatedAt,
+    deviceId,
+    deletedAt,
+    canvasId,
+    pointsJson,
+    color,
+    width,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'canvas_strokes';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<CanvasStrokeRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('version')) {
+      context.handle(
+        _versionMeta,
+        version.isAcceptableOrUnknown(data['version']!, _versionMeta),
+      );
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    if (data.containsKey('device_id')) {
+      context.handle(
+        _deviceIdMeta,
+        deviceId.isAcceptableOrUnknown(data['device_id']!, _deviceIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_deviceIdMeta);
+    }
+    if (data.containsKey('deleted_at')) {
+      context.handle(
+        _deletedAtMeta,
+        deletedAt.isAcceptableOrUnknown(data['deleted_at']!, _deletedAtMeta),
+      );
+    }
+    if (data.containsKey('canvas_id')) {
+      context.handle(
+        _canvasIdMeta,
+        canvasId.isAcceptableOrUnknown(data['canvas_id']!, _canvasIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_canvasIdMeta);
+    }
+    if (data.containsKey('points_json')) {
+      context.handle(
+        _pointsJsonMeta,
+        pointsJson.isAcceptableOrUnknown(data['points_json']!, _pointsJsonMeta),
+      );
+    }
+    if (data.containsKey('color')) {
+      context.handle(
+        _colorMeta,
+        color.isAcceptableOrUnknown(data['color']!, _colorMeta),
+      );
+    }
+    if (data.containsKey('width')) {
+      context.handle(
+        _widthMeta,
+        width.isAcceptableOrUnknown(data['width']!, _widthMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  CanvasStrokeRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return CanvasStrokeRow(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      version: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}version'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at'],
+      )!,
+      deviceId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}device_id'],
+      )!,
+      deletedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}deleted_at'],
+      ),
+      canvasId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}canvas_id'],
+      )!,
+      pointsJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}points_json'],
+      )!,
+      color: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}color'],
+      )!,
+      width: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}width'],
+      )!,
+    );
+  }
+
+  @override
+  $CanvasStrokesTable createAlias(String alias) {
+    return $CanvasStrokesTable(attachedDatabase, alias);
+  }
+}
+
+class CanvasStrokeRow extends DataClass implements Insertable<CanvasStrokeRow> {
+  /// ULID 主键。
+  final String id;
+
+  /// 本地递增版本号，服务端接管后用于 LWW 冲突判定。
+  final int version;
+  final DateTime updatedAt;
+
+  /// 产生该次变更的设备，用于同步自回声过滤。
+  final String deviceId;
+
+  /// tombstone 软删除：非空即删除，删除靠它传播，不物理删（§11）。
+  final DateTime? deletedAt;
+  final String canvasId;
+
+  /// 点序列 JSON：`[{"x":12.3,"y":45.6}, ...]`（画布坐标系）。
+  final String pointsJson;
+
+  /// 墨色（hex 字符串）。
+  final String color;
+
+  /// 笔宽（像素，画布坐标系）。
+  final double width;
+  const CanvasStrokeRow({
+    required this.id,
+    required this.version,
+    required this.updatedAt,
+    required this.deviceId,
+    this.deletedAt,
+    required this.canvasId,
+    required this.pointsJson,
+    required this.color,
+    required this.width,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['version'] = Variable<int>(version);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    map['device_id'] = Variable<String>(deviceId);
+    if (!nullToAbsent || deletedAt != null) {
+      map['deleted_at'] = Variable<DateTime>(deletedAt);
+    }
+    map['canvas_id'] = Variable<String>(canvasId);
+    map['points_json'] = Variable<String>(pointsJson);
+    map['color'] = Variable<String>(color);
+    map['width'] = Variable<double>(width);
+    return map;
+  }
+
+  CanvasStrokesCompanion toCompanion(bool nullToAbsent) {
+    return CanvasStrokesCompanion(
+      id: Value(id),
+      version: Value(version),
+      updatedAt: Value(updatedAt),
+      deviceId: Value(deviceId),
+      deletedAt: deletedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(deletedAt),
+      canvasId: Value(canvasId),
+      pointsJson: Value(pointsJson),
+      color: Value(color),
+      width: Value(width),
+    );
+  }
+
+  factory CanvasStrokeRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return CanvasStrokeRow(
+      id: serializer.fromJson<String>(json['id']),
+      version: serializer.fromJson<int>(json['version']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+      deviceId: serializer.fromJson<String>(json['deviceId']),
+      deletedAt: serializer.fromJson<DateTime?>(json['deletedAt']),
+      canvasId: serializer.fromJson<String>(json['canvasId']),
+      pointsJson: serializer.fromJson<String>(json['pointsJson']),
+      color: serializer.fromJson<String>(json['color']),
+      width: serializer.fromJson<double>(json['width']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'version': serializer.toJson<int>(version),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+      'deviceId': serializer.toJson<String>(deviceId),
+      'deletedAt': serializer.toJson<DateTime?>(deletedAt),
+      'canvasId': serializer.toJson<String>(canvasId),
+      'pointsJson': serializer.toJson<String>(pointsJson),
+      'color': serializer.toJson<String>(color),
+      'width': serializer.toJson<double>(width),
+    };
+  }
+
+  CanvasStrokeRow copyWith({
+    String? id,
+    int? version,
+    DateTime? updatedAt,
+    String? deviceId,
+    Value<DateTime?> deletedAt = const Value.absent(),
+    String? canvasId,
+    String? pointsJson,
+    String? color,
+    double? width,
+  }) => CanvasStrokeRow(
+    id: id ?? this.id,
+    version: version ?? this.version,
+    updatedAt: updatedAt ?? this.updatedAt,
+    deviceId: deviceId ?? this.deviceId,
+    deletedAt: deletedAt.present ? deletedAt.value : this.deletedAt,
+    canvasId: canvasId ?? this.canvasId,
+    pointsJson: pointsJson ?? this.pointsJson,
+    color: color ?? this.color,
+    width: width ?? this.width,
+  );
+  CanvasStrokeRow copyWithCompanion(CanvasStrokesCompanion data) {
+    return CanvasStrokeRow(
+      id: data.id.present ? data.id.value : this.id,
+      version: data.version.present ? data.version.value : this.version,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      deviceId: data.deviceId.present ? data.deviceId.value : this.deviceId,
+      deletedAt: data.deletedAt.present ? data.deletedAt.value : this.deletedAt,
+      canvasId: data.canvasId.present ? data.canvasId.value : this.canvasId,
+      pointsJson: data.pointsJson.present
+          ? data.pointsJson.value
+          : this.pointsJson,
+      color: data.color.present ? data.color.value : this.color,
+      width: data.width.present ? data.width.value : this.width,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CanvasStrokeRow(')
+          ..write('id: $id, ')
+          ..write('version: $version, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('deviceId: $deviceId, ')
+          ..write('deletedAt: $deletedAt, ')
+          ..write('canvasId: $canvasId, ')
+          ..write('pointsJson: $pointsJson, ')
+          ..write('color: $color, ')
+          ..write('width: $width')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    version,
+    updatedAt,
+    deviceId,
+    deletedAt,
+    canvasId,
+    pointsJson,
+    color,
+    width,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is CanvasStrokeRow &&
+          other.id == this.id &&
+          other.version == this.version &&
+          other.updatedAt == this.updatedAt &&
+          other.deviceId == this.deviceId &&
+          other.deletedAt == this.deletedAt &&
+          other.canvasId == this.canvasId &&
+          other.pointsJson == this.pointsJson &&
+          other.color == this.color &&
+          other.width == this.width);
+}
+
+class CanvasStrokesCompanion extends UpdateCompanion<CanvasStrokeRow> {
+  final Value<String> id;
+  final Value<int> version;
+  final Value<DateTime> updatedAt;
+  final Value<String> deviceId;
+  final Value<DateTime?> deletedAt;
+  final Value<String> canvasId;
+  final Value<String> pointsJson;
+  final Value<String> color;
+  final Value<double> width;
+  final Value<int> rowid;
+  const CanvasStrokesCompanion({
+    this.id = const Value.absent(),
+    this.version = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.deviceId = const Value.absent(),
+    this.deletedAt = const Value.absent(),
+    this.canvasId = const Value.absent(),
+    this.pointsJson = const Value.absent(),
+    this.color = const Value.absent(),
+    this.width = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  CanvasStrokesCompanion.insert({
+    required String id,
+    this.version = const Value.absent(),
+    required DateTime updatedAt,
+    required String deviceId,
+    this.deletedAt = const Value.absent(),
+    required String canvasId,
+    this.pointsJson = const Value.absent(),
+    this.color = const Value.absent(),
+    this.width = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       updatedAt = Value(updatedAt),
+       deviceId = Value(deviceId),
+       canvasId = Value(canvasId);
+  static Insertable<CanvasStrokeRow> custom({
+    Expression<String>? id,
+    Expression<int>? version,
+    Expression<DateTime>? updatedAt,
+    Expression<String>? deviceId,
+    Expression<DateTime>? deletedAt,
+    Expression<String>? canvasId,
+    Expression<String>? pointsJson,
+    Expression<String>? color,
+    Expression<double>? width,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (version != null) 'version': version,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (deviceId != null) 'device_id': deviceId,
+      if (deletedAt != null) 'deleted_at': deletedAt,
+      if (canvasId != null) 'canvas_id': canvasId,
+      if (pointsJson != null) 'points_json': pointsJson,
+      if (color != null) 'color': color,
+      if (width != null) 'width': width,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  CanvasStrokesCompanion copyWith({
+    Value<String>? id,
+    Value<int>? version,
+    Value<DateTime>? updatedAt,
+    Value<String>? deviceId,
+    Value<DateTime?>? deletedAt,
+    Value<String>? canvasId,
+    Value<String>? pointsJson,
+    Value<String>? color,
+    Value<double>? width,
+    Value<int>? rowid,
+  }) {
+    return CanvasStrokesCompanion(
+      id: id ?? this.id,
+      version: version ?? this.version,
+      updatedAt: updatedAt ?? this.updatedAt,
+      deviceId: deviceId ?? this.deviceId,
+      deletedAt: deletedAt ?? this.deletedAt,
+      canvasId: canvasId ?? this.canvasId,
+      pointsJson: pointsJson ?? this.pointsJson,
+      color: color ?? this.color,
+      width: width ?? this.width,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (version.present) {
+      map['version'] = Variable<int>(version.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (deviceId.present) {
+      map['device_id'] = Variable<String>(deviceId.value);
+    }
+    if (deletedAt.present) {
+      map['deleted_at'] = Variable<DateTime>(deletedAt.value);
+    }
+    if (canvasId.present) {
+      map['canvas_id'] = Variable<String>(canvasId.value);
+    }
+    if (pointsJson.present) {
+      map['points_json'] = Variable<String>(pointsJson.value);
+    }
+    if (color.present) {
+      map['color'] = Variable<String>(color.value);
+    }
+    if (width.present) {
+      map['width'] = Variable<double>(width.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CanvasStrokesCompanion(')
+          ..write('id: $id, ')
+          ..write('version: $version, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('deviceId: $deviceId, ')
+          ..write('deletedAt: $deletedAt, ')
+          ..write('canvasId: $canvasId, ')
+          ..write('pointsJson: $pointsJson, ')
+          ..write('color: $color, ')
+          ..write('width: $width, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 class $KpGroupsTable extends KpGroups
     with TableInfo<$KpGroupsTable, KpGroupRow> {
   @override
@@ -10653,6 +11782,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $CanvasesTable canvases = $CanvasesTable(this);
   late final $CanvasNodesTable canvasNodes = $CanvasNodesTable(this);
   late final $CanvasEdgesTable canvasEdges = $CanvasEdgesTable(this);
+  late final $CanvasCardsTable canvasCards = $CanvasCardsTable(this);
+  late final $CanvasStrokesTable canvasStrokes = $CanvasStrokesTable(this);
   late final $KpGroupsTable kpGroups = $KpGroupsTable(this);
   late final $HomeworksTable homeworks = $HomeworksTable(this);
   late final $AiSessionsTable aiSessions = $AiSessionsTable(this);
@@ -10678,6 +11809,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     canvases,
     canvasNodes,
     canvasEdges,
+    canvasCards,
+    canvasStrokes,
     kpGroups,
     homeworks,
     aiSessions,
@@ -13909,6 +15042,578 @@ typedef $$CanvasEdgesTableProcessedTableManager =
       CanvasEdgeRow,
       PrefetchHooks Function()
     >;
+typedef $$CanvasCardsTableCreateCompanionBuilder =
+    CanvasCardsCompanion Function({
+      required String id,
+      Value<int> version,
+      required DateTime updatedAt,
+      required String deviceId,
+      Value<DateTime?> deletedAt,
+      Value<String?> noteId,
+      Value<String> title,
+      Value<String> body,
+      Value<String> styleJson,
+      Value<int> rowid,
+    });
+typedef $$CanvasCardsTableUpdateCompanionBuilder =
+    CanvasCardsCompanion Function({
+      Value<String> id,
+      Value<int> version,
+      Value<DateTime> updatedAt,
+      Value<String> deviceId,
+      Value<DateTime?> deletedAt,
+      Value<String?> noteId,
+      Value<String> title,
+      Value<String> body,
+      Value<String> styleJson,
+      Value<int> rowid,
+    });
+
+class $$CanvasCardsTableFilterComposer
+    extends Composer<_$AppDatabase, $CanvasCardsTable> {
+  $$CanvasCardsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get version => $composableBuilder(
+    column: $table.version,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get deviceId => $composableBuilder(
+    column: $table.deviceId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get deletedAt => $composableBuilder(
+    column: $table.deletedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get noteId => $composableBuilder(
+    column: $table.noteId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get title => $composableBuilder(
+    column: $table.title,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get body => $composableBuilder(
+    column: $table.body,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get styleJson => $composableBuilder(
+    column: $table.styleJson,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$CanvasCardsTableOrderingComposer
+    extends Composer<_$AppDatabase, $CanvasCardsTable> {
+  $$CanvasCardsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get version => $composableBuilder(
+    column: $table.version,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get deviceId => $composableBuilder(
+    column: $table.deviceId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get deletedAt => $composableBuilder(
+    column: $table.deletedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get noteId => $composableBuilder(
+    column: $table.noteId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get title => $composableBuilder(
+    column: $table.title,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get body => $composableBuilder(
+    column: $table.body,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get styleJson => $composableBuilder(
+    column: $table.styleJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$CanvasCardsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $CanvasCardsTable> {
+  $$CanvasCardsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<int> get version =>
+      $composableBuilder(column: $table.version, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get deviceId =>
+      $composableBuilder(column: $table.deviceId, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get deletedAt =>
+      $composableBuilder(column: $table.deletedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get noteId =>
+      $composableBuilder(column: $table.noteId, builder: (column) => column);
+
+  GeneratedColumn<String> get title =>
+      $composableBuilder(column: $table.title, builder: (column) => column);
+
+  GeneratedColumn<String> get body =>
+      $composableBuilder(column: $table.body, builder: (column) => column);
+
+  GeneratedColumn<String> get styleJson =>
+      $composableBuilder(column: $table.styleJson, builder: (column) => column);
+}
+
+class $$CanvasCardsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $CanvasCardsTable,
+          CanvasCardRow,
+          $$CanvasCardsTableFilterComposer,
+          $$CanvasCardsTableOrderingComposer,
+          $$CanvasCardsTableAnnotationComposer,
+          $$CanvasCardsTableCreateCompanionBuilder,
+          $$CanvasCardsTableUpdateCompanionBuilder,
+          (
+            CanvasCardRow,
+            BaseReferences<_$AppDatabase, $CanvasCardsTable, CanvasCardRow>,
+          ),
+          CanvasCardRow,
+          PrefetchHooks Function()
+        > {
+  $$CanvasCardsTableTableManager(_$AppDatabase db, $CanvasCardsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$CanvasCardsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$CanvasCardsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$CanvasCardsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<int> version = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<String> deviceId = const Value.absent(),
+                Value<DateTime?> deletedAt = const Value.absent(),
+                Value<String?> noteId = const Value.absent(),
+                Value<String> title = const Value.absent(),
+                Value<String> body = const Value.absent(),
+                Value<String> styleJson = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => CanvasCardsCompanion(
+                id: id,
+                version: version,
+                updatedAt: updatedAt,
+                deviceId: deviceId,
+                deletedAt: deletedAt,
+                noteId: noteId,
+                title: title,
+                body: body,
+                styleJson: styleJson,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                Value<int> version = const Value.absent(),
+                required DateTime updatedAt,
+                required String deviceId,
+                Value<DateTime?> deletedAt = const Value.absent(),
+                Value<String?> noteId = const Value.absent(),
+                Value<String> title = const Value.absent(),
+                Value<String> body = const Value.absent(),
+                Value<String> styleJson = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => CanvasCardsCompanion.insert(
+                id: id,
+                version: version,
+                updatedAt: updatedAt,
+                deviceId: deviceId,
+                deletedAt: deletedAt,
+                noteId: noteId,
+                title: title,
+                body: body,
+                styleJson: styleJson,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$CanvasCardsTable, CanvasCardRow>(table),
+                  BaseReferences<
+                    _$AppDatabase,
+                    $CanvasCardsTable,
+                    CanvasCardRow
+                  >(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$CanvasCardsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $CanvasCardsTable,
+      CanvasCardRow,
+      $$CanvasCardsTableFilterComposer,
+      $$CanvasCardsTableOrderingComposer,
+      $$CanvasCardsTableAnnotationComposer,
+      $$CanvasCardsTableCreateCompanionBuilder,
+      $$CanvasCardsTableUpdateCompanionBuilder,
+      (
+        CanvasCardRow,
+        BaseReferences<_$AppDatabase, $CanvasCardsTable, CanvasCardRow>,
+      ),
+      CanvasCardRow,
+      PrefetchHooks Function()
+    >;
+typedef $$CanvasStrokesTableCreateCompanionBuilder =
+    CanvasStrokesCompanion Function({
+      required String id,
+      Value<int> version,
+      required DateTime updatedAt,
+      required String deviceId,
+      Value<DateTime?> deletedAt,
+      required String canvasId,
+      Value<String> pointsJson,
+      Value<String> color,
+      Value<double> width,
+      Value<int> rowid,
+    });
+typedef $$CanvasStrokesTableUpdateCompanionBuilder =
+    CanvasStrokesCompanion Function({
+      Value<String> id,
+      Value<int> version,
+      Value<DateTime> updatedAt,
+      Value<String> deviceId,
+      Value<DateTime?> deletedAt,
+      Value<String> canvasId,
+      Value<String> pointsJson,
+      Value<String> color,
+      Value<double> width,
+      Value<int> rowid,
+    });
+
+class $$CanvasStrokesTableFilterComposer
+    extends Composer<_$AppDatabase, $CanvasStrokesTable> {
+  $$CanvasStrokesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get version => $composableBuilder(
+    column: $table.version,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get deviceId => $composableBuilder(
+    column: $table.deviceId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get deletedAt => $composableBuilder(
+    column: $table.deletedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get canvasId => $composableBuilder(
+    column: $table.canvasId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get pointsJson => $composableBuilder(
+    column: $table.pointsJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get color => $composableBuilder(
+    column: $table.color,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get width => $composableBuilder(
+    column: $table.width,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$CanvasStrokesTableOrderingComposer
+    extends Composer<_$AppDatabase, $CanvasStrokesTable> {
+  $$CanvasStrokesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get version => $composableBuilder(
+    column: $table.version,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get deviceId => $composableBuilder(
+    column: $table.deviceId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get deletedAt => $composableBuilder(
+    column: $table.deletedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get canvasId => $composableBuilder(
+    column: $table.canvasId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get pointsJson => $composableBuilder(
+    column: $table.pointsJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get color => $composableBuilder(
+    column: $table.color,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get width => $composableBuilder(
+    column: $table.width,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$CanvasStrokesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $CanvasStrokesTable> {
+  $$CanvasStrokesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<int> get version =>
+      $composableBuilder(column: $table.version, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get deviceId =>
+      $composableBuilder(column: $table.deviceId, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get deletedAt =>
+      $composableBuilder(column: $table.deletedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get canvasId =>
+      $composableBuilder(column: $table.canvasId, builder: (column) => column);
+
+  GeneratedColumn<String> get pointsJson => $composableBuilder(
+    column: $table.pointsJson,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get color =>
+      $composableBuilder(column: $table.color, builder: (column) => column);
+
+  GeneratedColumn<double> get width =>
+      $composableBuilder(column: $table.width, builder: (column) => column);
+}
+
+class $$CanvasStrokesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $CanvasStrokesTable,
+          CanvasStrokeRow,
+          $$CanvasStrokesTableFilterComposer,
+          $$CanvasStrokesTableOrderingComposer,
+          $$CanvasStrokesTableAnnotationComposer,
+          $$CanvasStrokesTableCreateCompanionBuilder,
+          $$CanvasStrokesTableUpdateCompanionBuilder,
+          (
+            CanvasStrokeRow,
+            BaseReferences<_$AppDatabase, $CanvasStrokesTable, CanvasStrokeRow>,
+          ),
+          CanvasStrokeRow,
+          PrefetchHooks Function()
+        > {
+  $$CanvasStrokesTableTableManager(_$AppDatabase db, $CanvasStrokesTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$CanvasStrokesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$CanvasStrokesTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$CanvasStrokesTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<int> version = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<String> deviceId = const Value.absent(),
+                Value<DateTime?> deletedAt = const Value.absent(),
+                Value<String> canvasId = const Value.absent(),
+                Value<String> pointsJson = const Value.absent(),
+                Value<String> color = const Value.absent(),
+                Value<double> width = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => CanvasStrokesCompanion(
+                id: id,
+                version: version,
+                updatedAt: updatedAt,
+                deviceId: deviceId,
+                deletedAt: deletedAt,
+                canvasId: canvasId,
+                pointsJson: pointsJson,
+                color: color,
+                width: width,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                Value<int> version = const Value.absent(),
+                required DateTime updatedAt,
+                required String deviceId,
+                Value<DateTime?> deletedAt = const Value.absent(),
+                required String canvasId,
+                Value<String> pointsJson = const Value.absent(),
+                Value<String> color = const Value.absent(),
+                Value<double> width = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => CanvasStrokesCompanion.insert(
+                id: id,
+                version: version,
+                updatedAt: updatedAt,
+                deviceId: deviceId,
+                deletedAt: deletedAt,
+                canvasId: canvasId,
+                pointsJson: pointsJson,
+                color: color,
+                width: width,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$CanvasStrokesTable, CanvasStrokeRow>(table),
+                  BaseReferences<
+                    _$AppDatabase,
+                    $CanvasStrokesTable,
+                    CanvasStrokeRow
+                  >(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$CanvasStrokesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $CanvasStrokesTable,
+      CanvasStrokeRow,
+      $$CanvasStrokesTableFilterComposer,
+      $$CanvasStrokesTableOrderingComposer,
+      $$CanvasStrokesTableAnnotationComposer,
+      $$CanvasStrokesTableCreateCompanionBuilder,
+      $$CanvasStrokesTableUpdateCompanionBuilder,
+      (
+        CanvasStrokeRow,
+        BaseReferences<_$AppDatabase, $CanvasStrokesTable, CanvasStrokeRow>,
+      ),
+      CanvasStrokeRow,
+      PrefetchHooks Function()
+    >;
 typedef $$KpGroupsTableCreateCompanionBuilder = KpGroupsCompanion Function({
   required String id,
   Value<int> version,
@@ -15990,6 +17695,10 @@ class $AppDatabaseManager {
       $$CanvasNodesTableTableManager(_db, _db.canvasNodes);
   $$CanvasEdgesTableTableManager get canvasEdges =>
       $$CanvasEdgesTableTableManager(_db, _db.canvasEdges);
+  $$CanvasCardsTableTableManager get canvasCards =>
+      $$CanvasCardsTableTableManager(_db, _db.canvasCards);
+  $$CanvasStrokesTableTableManager get canvasStrokes =>
+      $$CanvasStrokesTableTableManager(_db, _db.canvasStrokes);
   $$KpGroupsTableTableManager get kpGroups =>
       $$KpGroupsTableTableManager(_db, _db.kpGroups);
   $$HomeworksTableTableManager get homeworks =>

@@ -24,6 +24,8 @@ part 'drift_database.g.dart';
     Canvases,
     CanvasNodes,
     CanvasEdges,
+    CanvasCards,
+    CanvasStrokes,
     KpGroups,
     Homeworks,
     AiSessions,
@@ -38,7 +40,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase([QueryExecutor? executor]) : super(executor ?? _openConnection());
 
   @override
-  int get schemaVersion => 5;
+  int get schemaVersion => 6;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -68,6 +70,12 @@ class AppDatabase extends _$AppDatabase {
               'UPDATE knowledge_points SET created_at = updated_at WHERE created_at IS NULL',
             );
             await m.createTable(noteAssets);
+          }
+          // v5 → v6（★2.0.0）：新增「画布自由文本卡片」与「画布手写笔迹」
+          // 两张带 SyncMeta 的表，支撑无限画布放置更多组件。
+          if (from < 6) {
+            await m.createTable(canvasCards);
+            await m.createTable(canvasStrokes);
           }
         },
       );

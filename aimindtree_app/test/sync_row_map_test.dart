@@ -1,4 +1,4 @@
-/// 同步 payload **键集对齐护栏**（13 张表）。
+/// 同步 payload **键集对齐护栏**（15 张表）。
 ///
 /// 为什么需要这个护栏：同步 payload 是**按键名**存的 JSON。
 /// `sync_row_map.dart` 少写一个键（或 `sync_engine.dart` 的 `*FromMap`
@@ -6,7 +6,7 @@
 /// 上无声丢失，且不报错**。这是最难发现的一类 bug，只能靠断言挡住。
 ///
 /// 本文件四道防线：
-/// 1. **契约层**：[kSyncTableKeys] 是 13 张表 payload 键集的唯一真相源，
+/// 1. **契约层**：[kSyncTableKeys] 是 15 张表 payload 键集的唯一真相源，
 ///    任何一处增删键都必须同步改这里（否则测试红）。
 /// 2. **drift 真值层**（第四腿）：用 `PRAGMA table_info` 从**真实数据库**读出
 ///    每张表的列集，断言「真实列集 − 显式排除集 == 契约键集」。
@@ -214,6 +214,31 @@ const Map<String, Set<String>> kSyncTableKeys = <String, Set<String>>{
     'device_id',
     'deleted_at',
   },
+  // ★2.0.0 新增表 3：画布自由文本卡片（笔记卡片 / 透明文本框共用）。
+  'canvas_cards': <String>{
+    'id',
+    'note_id',
+    'title',
+    'body',
+    // 样式预设 JSON（kind=note_card|text_box 等），同步层原样搬运。
+    'style_json',
+    'updated_at',
+    'version',
+    'device_id',
+    'deleted_at',
+  },
+  // ★2.0.0 新增表 4：画布手写笔迹（圆珠笔 + 橡皮）。
+  'canvas_strokes': <String>{
+    'id',
+    'canvas_id',
+    'points_json',
+    'color',
+    'width',
+    'updated_at',
+    'version',
+    'device_id',
+    'deleted_at',
+  },
 };
 
 /// 表名 → (写侧 `*RowToMap` 函数名, 读侧 `*FromMap` 函数名)。
@@ -232,6 +257,8 @@ const Map<String, (String, String)> kSyncTableAdapters =
   'ai_messages': ('aiMessageRowToMap', '_aiMessageFromMap'),
   'kp_groups': ('kpGroupRowToMap', '_kpGroupFromMap'),
   'note_assets': ('noteAssetRowToMap', '_noteAssetFromMap'),
+  'canvas_cards': ('canvasCardRowToMap', '_canvasCardFromMap'),
+  'canvas_strokes': ('canvasStrokeRowToMap', '_canvasStrokeFromMap'),
 };
 
 /// **显式排除**的列：存在于 drift，但**有意不上行**（不写进 payload）。
@@ -876,12 +903,71 @@ final List<_KeyProbe> _probes = <_KeyProbe>[
       };
     },
   ),
+  _KeyProbe(
+    table: 'canvas_cards',
+    id: 'probe-card',
+    payload: <String, Object?>{
+      'id': 'probe-card',
+      // 关联笔记 id：故意填非空、且与默认 '' 异值，验证该键不被漏读。
+      'note_id': 'probe-note',
+      'title': 'probe-卡片标题',
+      'body': 'probe-卡片正文',
+      // 样式 JSON 字符串：默认 '{}'，探测值必须异值。
+      'style_json': '{"kind":"text_box"}',
+      'deleted_at': _probeDeletedAt,
+    },
+    read: (db, id) async {
+      final r = await (db.select(db.canvasCards)..where((t) => t.id.equals(id)))
+          .getSingle();
+      return <String, Object?>{
+        'id': r.id,
+        'note_id': r.noteId,
+        'title': r.title,
+        'body': r.body,
+        'style_json': r.styleJson,
+        'updated_at': r.updatedAt,
+        'version': r.version,
+        'device_id': r.deviceId,
+        'deleted_at': r.deletedAt,
+      };
+    },
+  ),
+  _KeyProbe(
+    table: 'canvas_strokes',
+    id: 'probe-stroke',
+    payload: <String, Object?>{
+      'id': 'probe-stroke',
+      'canvas_id': 'probe-canvas',
+      // 点序列 JSON：默认 '[]'，探测值必须异值。
+      'points_json': '[{"x":1.0,"y":2.0},{"x":3.0,"y":4.0}]',
+      // 墨色默认 '#1a1a1a'，探测值异值。
+      'color': '#ff0000',
+      // 笔宽默认 3.0，探测值异值（且验证 num→double 映射）。
+      'width': 5.5,
+      'deleted_at': _probeDeletedAt,
+    },
+    read: (db, id) async {
+      final r = await (db.select(db.canvasStrokes)..where((t) => t.id.equals(id)))
+          .getSingle();
+      return <String, Object?>{
+        'id': r.id,
+        'canvas_id': r.canvasId,
+        'points_json': r.pointsJson,
+        'color': r.color,
+        'width': r.width,
+        'updated_at': r.updatedAt,
+        'version': r.version,
+        'device_id': r.deviceId,
+        'deleted_at': r.deletedAt,
+      };
+    },
+  ),
 ];
 
 void main() {
   group('契约：kSyncTableKeys', () {
-    test('覆盖 13 张同步表，且与 kSyncTableAllowlist 一致', () {
-      expect(kSyncTableKeys.length, 13);
+    test('覆盖 15 张同步表，且与 kSyncTableAllowlist 一致', () {
+      expect(kSyncTableKeys.length, 15);
       expect(
         kSyncTableKeys.keys.toSet(),
         kSyncTableAllowlist,
@@ -1055,7 +1141,7 @@ void main() {
           _locate('lib/data/sync/sync_engine.dart').readAsStringSync());
     });
 
-    test('扫描器确实抽到了 13 对 adapter（防止正则悄悄失效）', () {
+    test('扫描器确实抽到了 15 对 adapter（防止正则悄悄失效）', () {
       for (final entry in kSyncTableAdapters.entries) {
         expect(writeKeys.containsKey(entry.value.$1), isTrue,
             reason: 'sync_row_map.dart 里找不到 ${entry.value.$1}');

@@ -3,10 +3,11 @@
 /// 推送：读 outbox pending → 批量走 SyncApi → markPushed / markFailed
 /// 拉取：走 SyncApi.pullSince → 自回声过滤 → 逐行 LWW merge → 更新 last_pulled_at
 ///
-/// 表覆盖范围（13 张带 SyncMeta 的表，见 [kSyncTableAllowlist]）：
+/// 表覆盖范围（15 张带 SyncMeta 的表，见 [kSyncTableAllowlist]）：
 /// notebooks / notes / knowledge_points / prerequisite_edges / mastery_records /
 /// cards / canvases / canvas_nodes / canvas_edges / ai_sessions / ai_messages /
-/// kp_groups / note_assets（后两张为 v5 新增）。
+/// kp_groups / note_assets（后两张为 v5 新增）/
+/// canvas_cards / canvas_strokes（后两张为 ★2.0.0 新增）。
 ///
 /// 故意不同步 4 张：`ai_providers`（密钥引用本地化，跨设备命名空间不一致）、
 /// `ai_task_routes`（依赖 ai_providers，单独同步无意义）、
@@ -56,6 +57,8 @@ const Set<String> kSyncTableAllowlist = <String>{
   'ai_messages',
   'kp_groups',
   'note_assets',
+  'canvas_cards',
+  'canvas_strokes',
 };
 
 /// 单批 push 的**字节预算** / 单条 envelope 的**硬上限**——按后端取值。
@@ -308,7 +311,7 @@ SyncEngine({
 
   // ============ Push：全量快照 ============
 
-  /// 全量快照推送：把 [kSyncTableAllowlist] 里 13 张表的**所有现存行**当作
+  /// 全量快照推送：把 [kSyncTableAllowlist] 里 15 张表的**所有现存行**当作
   /// upsert 推上去，与 outbox 是否为空无关。
   ///
   /// 为什么必须要有它：outbox 是**增量发件箱**，只记录「接线之后经仓储写入」
@@ -497,6 +500,18 @@ SyncEngine({
               ..limit(limit, offset: offset))
             .get();
         return rows.map(noteAssetRowToMap).toList();
+      case 'canvas_cards':
+        final rows = await (_db.select(_db.canvasCards)
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(limit, offset: offset))
+            .get();
+        return rows.map(canvasCardRowToMap).toList();
+      case 'canvas_strokes':
+        final rows = await (_db.select(_db.canvasStrokes)
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(limit, offset: offset))
+            .get();
+        return rows.map(canvasStrokeRowToMap).toList();
       default:
         _log.w('pushAll 遇到未知表 $table，跳过');
         return const <Map<String, dynamic>>[];
@@ -713,6 +728,12 @@ SyncEngine({
                 'version': r.read(_db.noteAssets.version),
                 'updated_at': r.read(_db.noteAssets.updatedAt),
               };
+      case 'canvas_cards':
+        final r = await (_db.select(_db.canvasCards)..where((t) => t.id.equals(id))).getSingleOrNull();
+        return r == null ? null : canvasCardRowToMap(r);
+      case 'canvas_strokes':
+        final r = await (_db.select(_db.canvasStrokes)..where((t) => t.id.equals(id))).getSingleOrNull();
+        return r == null ? null : canvasStrokeRowToMap(r);
       default:
         _log.w('未知表 $table，跳过读 local');
         return null;
@@ -791,6 +812,12 @@ SyncEngine({
       case 'note_assets':
         await _db.into(_db.noteAssets).insert(_noteAssetFromMap(p), mode: InsertMode.insertOrReplace);
         break;
+      case 'canvas_cards':
+        await _db.into(_db.canvasCards).insert(_canvasCardFromMap(p), mode: InsertMode.insertOrReplace);
+        break;
+      case 'canvas_strokes':
+        await _db.into(_db.canvasStrokes).insert(_canvasStrokeFromMap(p), mode: InsertMode.insertOrReplace);
+        break;
       default:
         _log.w('未知表 $table，跳过 insert');
     }
@@ -836,6 +863,12 @@ SyncEngine({
         break;
       case 'note_assets':
         await (_db.delete(_db.noteAssets)..where((t) => t.id.equals(id))).go();
+        break;
+      case 'canvas_cards':
+        await (_db.delete(_db.canvasCards)..where((t) => t.id.equals(id))).go();
+        break;
+      case 'canvas_strokes':
+        await (_db.delete(_db.canvasStrokes)..where((t) => t.id.equals(id))).go();
         break;
       default:
         _log.w('未知表 $table，跳过 delete');
@@ -1090,6 +1123,38 @@ SyncEngine({
         sha1: Value((p['sha1'] as String?) ?? ''),
         bytes: Value((p['bytes'] as num?)?.toInt() ?? 0),
         dataBase64: Value((p['data_base64'] as String?) ?? ''),
+        updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
+        version: Value((p['version'] as num?)?.toInt() ?? 1),
+        deviceId: Value((p['device_id'] as String?) ?? deviceId),
+        deletedAt: Value(_dt(p['deleted_at'])),
+      );
+
+  // ============ CanvasCards（★2.0.0）============
+  //
+  // ⚠️ 位置/尺寸经 [CanvasNodes]（`target_type='card'`）同步，本表只存内容。
+
+  CanvasCardsCompanion _canvasCardFromMap(Map<String, dynamic> p) =>
+      CanvasCardsCompanion(
+        id: Value(p['id'] as String),
+        noteId: Value(p['note_id'] as String?),
+        title: Value((p['title'] as String?) ?? ''),
+        body: Value((p['body'] as String?) ?? ''),
+        styleJson: Value((p['style_json'] as String?) ?? '{}'),
+        updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
+        version: Value((p['version'] as num?)?.toInt() ?? 1),
+        deviceId: Value((p['device_id'] as String?) ?? deviceId),
+        deletedAt: Value(_dt(p['deleted_at'])),
+      );
+
+  // ============ CanvasStrokes（★2.0.0）============
+
+  CanvasStrokesCompanion _canvasStrokeFromMap(Map<String, dynamic> p) =>
+      CanvasStrokesCompanion(
+        id: Value(p['id'] as String),
+        canvasId: Value((p['canvas_id'] as String?) ?? ''),
+        pointsJson: Value((p['points_json'] as String?) ?? '[]'),
+        color: Value((p['color'] as String?) ?? '#1a1a1a'),
+        width: Value((p['width'] as num?)?.toDouble() ?? 3.0),
         updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),

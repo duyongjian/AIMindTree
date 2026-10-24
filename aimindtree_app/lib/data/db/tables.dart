@@ -184,6 +184,59 @@ class CanvasEdges extends Table with SyncMeta {
   TextColumn get prereqEdgeId => text().named('prereq_edge_id').nullable()();
 }
 
+/// 画布自由文本卡片（★2.0.0 新增：丰富知识树无限画布）。
+///
+/// 同时承载两种 UI：
+/// - 「笔记卡片」——关联某条笔记，标题+摘要由该笔记自动派生（可覆盖）；
+/// - 「透明文本框」——纯自由文本，可随意移动、手填标题/备注。
+///
+/// 二者共用同一张内容表，靠 [styleJson] 里的 `kind` 区分
+/// （`note_card` / `text_box`）。**位置/尺寸/层级不在这里**——
+/// 由 [CanvasNodes]（`target_type='card'` + `targetId` 回指本表 id）统一管理，
+/// 与该表已有的 `kp` 节点走同一套渲染/拖动/网格吸附逻辑。
+@DataClassName('CanvasCardRow')
+class CanvasCards extends Table with SyncMeta {
+  /// 关联笔记 id（笔记卡片用）：非空时标题+摘要由该笔记自动派生；
+  /// 为空 = 纯自由卡片（标题/正文手填）。
+  TextColumn get noteId => text().named('note_id').nullable()();
+
+  /// 卡片标题（自由卡片手填；关联笔记时默认取笔记标题，可覆盖）。
+  TextColumn get title => text().named('title').withDefault(const Constant(''))();
+
+  /// 卡片正文（自由卡片的备注/摘要；关联笔记时默认取笔记摘要，可覆盖）。
+  TextColumn get body => text().named('body').withDefault(const Constant(''))();
+
+  /// 样式预设 JSON：`{"kind":"note_card"|"text_box","bg":"#fff","opacity":1.0}`。
+  /// 同步层只搬运不解析（解析归卡片仓储/UI）。
+  TextColumn get styleJson =>
+      text().named('style_json').withDefault(const Constant('{}'))();
+}
+
+/// 画布手写笔迹（★2.0.0 新增：圆珠笔手写 + 橡皮擦除）。
+///
+/// 一条记录 = 一笔（从落笔到抬笔采到的所有点）。橡皮为「整笔擦除」：
+/// 命中哪条笔迹就整条删除（不像素级局部擦）。
+///
+/// 笔迹坐标存**画布坐标系**（与节点 x/y 同一套），渲染时随 pan/zoom 变换。
+/// 属于画布层级内容，直接挂 [canvasId]（不走 [CanvasNodes]，因为笔迹
+/// 不是可拖拽节点，而是连续墨迹）。
+@DataClassName('CanvasStrokeRow')
+class CanvasStrokes extends Table with SyncMeta {
+  TextColumn get canvasId => text().named('canvas_id')();
+
+  /// 点序列 JSON：`[{"x":12.3,"y":45.6}, ...]`（画布坐标系）。
+  TextColumn get pointsJson =>
+      text().named('points_json').withDefault(const Constant('[]'))();
+
+  /// 墨色（hex 字符串）。
+  TextColumn get color =>
+      text().named('color').withDefault(const Constant('#1a1a1a'))();
+
+  /// 笔宽（像素，画布坐标系）。
+  RealColumn get width =>
+      real().named('width').withDefault(const Constant(3.0))();
+}
+
 /// 知识点分组（「分组」UI：框选知识点成一组成员，可命名 + 标基础度）。
 ///
 /// 组序 [orderIndex] 越小越基础；[foundationalLevel] 是**组级**基础度，

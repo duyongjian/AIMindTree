@@ -215,3 +215,32 @@ Map<String, dynamic> noteAssetRowToMap(NoteAssetRow r) => {
       'device_id': r.deviceId,
       'deleted_at': r.deletedAt,
     };
+
+/// canvas_cards 行 → payload（★2.0.0 新增）。
+///
+/// 位置/尺寸不在这里，由 `canvasNodeRowToMap` 经 `target_type='card'`
+/// 一并同步；本函数只搬内容字段。
+Map<String, dynamic> canvasCardRowToMap(CanvasCardRow r) => {
+      'id': r.id,
+      'note_id': r.noteId,
+      'title': r.title,
+      'body': r.body,
+      'style_json': r.styleJson,
+      'updated_at': r.updatedAt,
+      'version': r.version,
+      'device_id': r.deviceId,
+      'deleted_at': r.deletedAt,
+    };
+
+/// canvas_strokes 行 → payload（★2.0.0 新增：手写笔迹）。
+Map<String, dynamic> canvasStrokeRowToMap(CanvasStrokeRow r) => {
+      'id': r.id,
+      'canvas_id': r.canvasId,
+      'points_json': r.pointsJson,
+      'color': r.color,
+      'width': r.width,
+      'updated_at': r.updatedAt,
+      'version': r.version,
+      'device_id': r.deviceId,
+      'deleted_at': r.deletedAt,
+    };
