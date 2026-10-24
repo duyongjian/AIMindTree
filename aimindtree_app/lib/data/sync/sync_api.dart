@@ -21,6 +21,7 @@ import 'dart:io';
 import 'direct_connect.dart';
 import 'sync_config.dart';
 import 'sync_types.dart';
+import 'sync_url.dart';
 
 /// 抽象同步后端。
 abstract class SyncApi {
@@ -73,12 +74,15 @@ class SyncApiException implements Exception {
 /// - 单批上限 100（P0 简化由 SyncEngine 控制）。
 class HttpSyncApi implements SyncApi {
   HttpSyncApi({
-    required this.baseUrl,
+    required String baseUrl,
     required this.userToken,
     this.backend,
     HttpClient? client,
-  }) : _externalClient = client;
+  })  : baseUrl = normalizeSyncBaseUrl(baseUrl),
+        _externalClient = client;
 
+  /// 中继基地址；构造时经 [normalizeSyncBaseUrl] 规范化（Vercel 缺 /api
+  /// 前缀自动补全，见 sync_url.dart 的实测背景）。
   final String baseUrl;
   final String userToken;
 

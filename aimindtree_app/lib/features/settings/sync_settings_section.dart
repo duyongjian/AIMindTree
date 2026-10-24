@@ -34,6 +34,7 @@ import '../../data/sync/sync_config.dart';
 import '../../data/sync/sync_outbox.dart';
 import '../../data/sync/sync_scheduler.dart';
 import '../../data/sync/sync_status.dart';
+import '../../data/sync/sync_url.dart';
 
 /// 「测试连接」的单次请求预算：够绕过一次 DNS + TLS 握手，又不让用户干等。
 const Duration _kTestTimeout = Duration(seconds: 15);
@@ -178,7 +179,17 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
       setUserProxy(proxy.isEmpty ? null : proxy);
       if (!mounted) return;
       setState(() {});
-      _snack('已保存，需重启应用后完全生效');
+      // Vercel 防呆：手填 *.vercel.app 裸域名时 normalizeSyncBaseUrl 会自动补
+      // /api（Vercel 平台把 api/ 函数挂在 /api/* 下，缺前缀在平台层 404，
+      // 实测「注册失败：auth auth/register 返回 404」即此）。明确告知补过，
+      // 避免「填的 A、实际请求 B」的困惑。
+      final typedUrl = _endpoint.text.trim();
+      final normalized = normalizeSyncBaseUrl(typedUrl);
+      if (normalized.isNotEmpty && normalized != typedUrl) {
+        _snack('已自动为 Vercel 地址补充 /api 前缀：$normalized');
+      } else {
+        _snack('已保存，需重启应用后完全生效');
+      }
     } on Object catch (e) {
       _snack('保存失败：$e', ok: false);
     } finally {

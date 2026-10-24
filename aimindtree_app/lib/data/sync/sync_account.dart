@@ -12,6 +12,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'direct_connect.dart';
+import 'sync_url.dart';
 
 /// 登录/注册返回的会话（user_id + 每用户令牌）。
 class SyncAccountSession {
@@ -29,9 +30,12 @@ class SyncAccountApiException implements Exception {
 }
 
 class SyncAccountApi {
-  SyncAccountApi({required this.baseUrl, HttpClient? client})
-      : _externalClient = client;
+  SyncAccountApi({required String baseUrl, HttpClient? client})
+      : baseUrl = normalizeSyncBaseUrl(baseUrl),
+        _externalClient = client;
 
+  /// 中继基地址；构造时经 [normalizeSyncBaseUrl] 规范化（Vercel 缺 /api
+  /// 前缀自动补全——用户手填裸域名实测会在平台层 404，见 sync_url.dart）。
   final String baseUrl;
 
   /// 外部注入的 client（测试桩用）；为空时懒创建「DoH 直连」client。
