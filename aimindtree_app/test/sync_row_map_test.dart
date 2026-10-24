@@ -978,6 +978,31 @@ void main() {
         ),
       );
     });
+
+    test('端到端：真实库里真加一列 → 真实链路必须报出它（护栏真会红）', () async {
+      // 上面几条是**元测试**：用构造出来的集合验证 _compareColumns 本身正确。
+      // 但它们不证明「真实断言路径」会红——所以这一条**真在库里加一列**，
+      // 再走真实的 PRAGMA 链路，把「护栏会红」这件事永久钉住：
+      // 将来若有人把第四腿改成恒真断言（例如把 missing 断言删掉、或改成
+      // 只断言 extra），这一条会跟着红。
+      final db = AppDatabase(NativeDatabase.memory());
+      addTearDown(db.close);
+      await db.customStatement(
+          'ALTER TABLE mastery_records ADD COLUMN probe_e2e_col TEXT');
+
+      // ① PRAGMA 真的看得到新列（前提：PRAGMA 链路有效）。
+      final real = await _realColumns(db, 'mastery_records');
+      expect(real, contains('probe_e2e_col'));
+
+      // ② 真实契约 vs 真实列集 → 必须报出这一列漏上行。
+      final diff = _compareColumns(
+        realColumns: real,
+        excluded: const <String>{},
+        contract: kSyncTableKeys['mastery_records']!,
+      );
+      expect(diff.missing, <String>{'probe_e2e_col'});
+      expect(diff.extra, isEmpty);
+    });
   });
 
   group('源码扫描：写键集 ↔ 读键集严格对齐', () {
