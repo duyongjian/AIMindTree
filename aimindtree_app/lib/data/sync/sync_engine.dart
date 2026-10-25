@@ -238,6 +238,11 @@ SyncEngine({
         await _outbox.markPushed(ids);
         pushed += result.accepted;
         serverTime = result.serverTime;
+        // 把服务端权威版本回写本地，使本地 version 与服务器对齐
+        // （pull 侧不调版本，这是本地 version 的唯一权威来源）。
+        if (result.versions.isNotEmpty) {
+          await _adoptServerVersions(result.versions);
+        }
         _log.i('push 成功 ${result.accepted} 条；server_time=${result.serverTime}');
       } on Object catch (e) {
         _log.w('push 失败：$e；${ids.length} 条回到 failed');
@@ -359,6 +364,10 @@ SyncEngine({
           );
           pushed += result.accepted;
           serverTime = result.serverTime;
+          // 把服务端权威版本回写本地（pull 侧不调版本）。
+          if (result.versions.isNotEmpty) {
+            await _adoptServerVersions(result.versions);
+          }
           _log.i('pushAll 批成功 ${result.accepted} 条；'
               'server_time=${result.serverTime}');
         } on Object catch (e) {
@@ -737,6 +746,98 @@ SyncEngine({
       default:
         _log.w('未知表 $table，跳过读 local');
         return null;
+    }
+  }
+
+  /// 把服务端 push 返回的权威 `versions` 映射回写本地行，使本地 `version`
+  /// 列与服务器对齐。
+  ///
+  /// 服务端在 push 时计算 `newVer = max(服务器现有版本, 客户端声明 baseVersion) + 1`
+  /// 并落库，返回 `versions{ "<table>:<id>": newVer }`。这里逐键解析
+  /// （键格式 `<entity_table>:<entity_id>`，首个冒号分隔表名与 id），把本地
+  /// 对应行的 `version` 抬到同一值。
+  ///
+  /// 为什么需要它：pull 侧**不**调整版本（按用户决策——拉取直接覆盖、不做
+  /// 冲突检测），于是本地 `version` 的唯一权威来源就是这里的 adoption。若
+  /// 不做，本地 version 停留在「上次写库时的值」，后续 [pull] 的 LWW 比较
+  /// （`remote.baseVersion` vs `local.version`）会因本地版本落后而误判。
+  ///
+  /// 只写 `version` 一列，不触发整行 upsert（避免触碰其它字段）；本地行已
+  /// 被硬删（tombstone 场景）时 `where id` 命中 0 行，静默 no-op。
+  Future<void> _adoptServerVersions(Map<String, int> versions) async {
+    for (final entry in versions.entries) {
+      final sep = entry.key.indexOf(':');
+      if (sep <= 0) continue;
+      final table = entry.key.substring(0, sep);
+      final id = entry.key.substring(sep + 1);
+      await _updateLocalVersion(table, id, entry.value);
+    }
+  }
+
+  Future<void> _updateLocalVersion(String table, String id, int version) async {
+    switch (table) {
+      case 'notebooks':
+        await (_db.update(_db.notebooks)..where((t) => t.id.equals(id)))
+            .write(NotebooksCompanion(version: Value(version)));
+        break;
+      case 'notes':
+        await (_db.update(_db.notes)..where((t) => t.id.equals(id)))
+            .write(NotesCompanion(version: Value(version)));
+        break;
+      case 'knowledge_points':
+        await (_db.update(_db.knowledgePoints)..where((t) => t.id.equals(id)))
+            .write(KnowledgePointsCompanion(version: Value(version)));
+        break;
+      case 'prerequisite_edges':
+        await (_db.update(_db.prerequisiteEdges)..where((t) => t.id.equals(id)))
+            .write(PrerequisiteEdgesCompanion(version: Value(version)));
+        break;
+      case 'mastery_records':
+        await (_db.update(_db.masteryRecords)..where((t) => t.id.equals(id)))
+            .write(MasteryRecordsCompanion(version: Value(version)));
+        break;
+      case 'cards':
+        await (_db.update(_db.cards)..where((t) => t.id.equals(id)))
+            .write(CardsCompanion(version: Value(version)));
+        break;
+      case 'canvases':
+        await (_db.update(_db.canvases)..where((t) => t.id.equals(id)))
+            .write(CanvasesCompanion(version: Value(version)));
+        break;
+      case 'canvas_nodes':
+        await (_db.update(_db.canvasNodes)..where((t) => t.id.equals(id)))
+            .write(CanvasNodesCompanion(version: Value(version)));
+        break;
+      case 'canvas_edges':
+        await (_db.update(_db.canvasEdges)..where((t) => t.id.equals(id)))
+            .write(CanvasEdgesCompanion(version: Value(version)));
+        break;
+      case 'ai_sessions':
+        await (_db.update(_db.aiSessions)..where((t) => t.id.equals(id)))
+            .write(AiSessionsCompanion(version: Value(version)));
+        break;
+      case 'ai_messages':
+        await (_db.update(_db.aiMessages)..where((t) => t.id.equals(id)))
+            .write(AiMessagesCompanion(version: Value(version)));
+        break;
+      case 'kp_groups':
+        await (_db.update(_db.kpGroups)..where((t) => t.id.equals(id)))
+            .write(KpGroupsCompanion(version: Value(version)));
+        break;
+      case 'note_assets':
+        await (_db.update(_db.noteAssets)..where((t) => t.id.equals(id)))
+            .write(NoteAssetsCompanion(version: Value(version)));
+        break;
+      case 'canvas_cards':
+        await (_db.update(_db.canvasCards)..where((t) => t.id.equals(id)))
+            .write(CanvasCardsCompanion(version: Value(version)));
+        break;
+      case 'canvas_strokes':
+        await (_db.update(_db.canvasStrokes)..where((t) => t.id.equals(id)))
+            .write(CanvasStrokesCompanion(version: Value(version)));
+        break;
+      default:
+        _log.w('adoptServerVersions 遇到未知表 $table，跳过');
     }
   }
 

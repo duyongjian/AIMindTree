@@ -46,9 +46,22 @@ abstract class SyncApi {
 }
 
 class SyncPushResult {
-  const SyncPushResult({required this.accepted, required this.serverTime});
+  const SyncPushResult({
+    required this.accepted,
+    required this.serverTime,
+    this.versions = const {},
+  });
   final int accepted;
   final DateTime serverTime;
+
+  /// 服务端权威版本映射：`<entity_table>:<entity_id>` → 该实体被服务端分配的
+  /// 新版本号（`newVer = max(服务器现有版本, 客户端声明 baseVersion) + 1`）。
+  ///
+  /// App 用它把本地 `version` 列对齐服务器（见 [SyncEngine._adoptServerVersions]），
+  /// 使后续 [SyncEngine.pull] 的 LWW 比较不被「本地版本落后」误导。pull 侧
+  /// 不调整版本（按用户决策：拉取直接覆盖、不做冲突检测），所以本地 version
+  /// 的唯一权威来源就是这里的 adoption。
+  final Map<String, int> versions;
 }
 
 class SyncPullResult {
@@ -167,7 +180,23 @@ class HttpSyncApi implements SyncApi {
       // 用户看到「上传成功但 0 条」。优先 `received`，回退 `accepted`。
       accepted: ((m['received'] ?? m['accepted']) as num?)?.toInt() ?? 0,
       serverTime: DateTime.parse(m['server_time'] as String),
+      versions: _parseVersions(m['versions']),
     );
+  }
+
+  /// 把服务端 push 响应里的 `versions` 对象安全解析成 `<String,int>`。
+  ///
+  /// 旧后端 / 测试桩可能不返回该字段（返回 null 或非 Map），统一回落为
+  /// 空 Map —— adoption 退化为 no-op，不影响既有同步行为。值 ≤ 0 的条目
+  /// 直接丢弃（服务端不会分配 ≤ 0 的版本，出现只可能是坏数据）。
+  static Map<String, int> _parseVersions(dynamic raw) {
+    final out = <String, int>{};
+    if (raw is! Map) return out;
+    for (final e in raw.entries) {
+      final v = (e.value as num?)?.toInt() ?? 0;
+      if (v > 0) out[e.key.toString()] = v;
+    }
+    return out;
   }
 
   @override
@@ -247,6 +276,9 @@ class MockSyncApi implements SyncApi {
     return SyncPushResult(
       accepted: envelopes.length,
       serverTime: DateTime.now().toUtc(),
+      // Mock 后端没有持久化存储，不计算 server-authoritative 版本，回退空 Map；
+      // 需要验证 adoption 的测试请改用自定义 SyncApi 返回非空 versions。
+      versions: const {},
     );
   }
 
