@@ -160,13 +160,9 @@ class CanvasPageState extends State<CanvasPage> {
             ))
         .toList();
 
-    // 为每篇已提取知识点的笔记补建「笔记树」并归集成员（幂等，兼容历史数据）。
-    for (final n in notes) {
-      final kps = await _repo.pointsForNote(n.id);
-      if (kps.isEmpty) continue;
-      await _treesRepo.ensureNoteTree(noteId: n.id, noteTitle: _titleOf(n));
-      await _treesRepo.addPoints(n.id, kps.map((p) => p.id).toList());
-    }
+    // 注意：不再为「已提取知识点的笔记」自动补建「笔记树」并归集成员。
+    // 用户需求（2026-10-25）：提取只产出知识点，不自动建知识树；知识树由用户
+    // 在画布页显式创建 / 并入。保留 ensureNoteTree 以备显式建树路径复用。
 
     final trees = await _treesRepo.listTrees();
     if (!mounted) return;
