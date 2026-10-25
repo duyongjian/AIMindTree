@@ -332,17 +332,35 @@ async function handlePush(request, store, ownerId) {
   if (error) return error;
   const envelopes = Array.isArray(body && body.envelopes) ? body.envelopes : [];
   const serverTime = nowIso();
+  // 服务端权威版本号映射：`<entity_table>:<entity_id>` → 新分配的版本。
+  const versions = {};
 
   for (const e of envelopes) {
+    const key = envelopeKey(ownerId, String(e.entity_table), String(e.entity_id));
+    // 服务端权威版本：max(既有服务端版本, 客户端声明基准版本) + 1，
+    // 保证服务端存储的版本恒为最大，消除 pull 时的版本歧义。
+    let existing = 0;
+    const raw = await store.get(key);
+    if (raw) {
+      try {
+        const rec = JSON.parse(raw);
+        if (rec && rec.base_version != null) existing = Number(rec.base_version) || 0;
+      } catch {
+        // 坏记录：按 0 处理。
+      }
+    }
+    const newVer = Math.max(existing, parseInt(e.base_version, 10) || 0) + 1;
+    versions[`${e.entity_table}:${e.entity_id}`] = newVer;
+
     await store.set(
-      envelopeKey(ownerId, String(e.entity_table), String(e.entity_id)),
+      key,
       JSON.stringify({
         device_id: e.device_id,
         entity_table: e.entity_table,
         entity_id: e.entity_id,
         op: e.op,
         payload: e.payload == null ? null : JSON.stringify(e.payload),
-        base_version: parseInt(e.base_version, 10) || 0,
+        base_version: newVer,
         updated_at: e.updated_at,
         deleted_at: e.deleted_at,
         server_time: serverTime,
@@ -354,6 +372,7 @@ async function handlePush(request, store, ownerId) {
     received: envelopes.length,
     accepted: envelopes.length,
     server_time: serverTime,
+    versions,
   });
 }
 

@@ -275,6 +275,10 @@ async function run() {
     ];
     const r = await json(await post('/sync/push', { device_id: 'd1', envelopes }, env, aliceToken));
     assert(r.status === 200 && r.body.received === 2, 'Alice push 接收 2 条');
+    // 服务端权威版本：响应必须带 versions 对象，且非空（本次推了 2 个实体）。
+    assert(typeof r.body.versions === 'object' && r.body.versions !== null, 'push 返回 versions 对象');
+    assert(Object.keys(r.body.versions).length === 2, 'push versions 含 2 个实体');
+    assert(r.body.versions['notes:n1'] === 2 && r.body.versions['notes:n2'] === 2, 'versions 为 max(既有, 声明)+1 = 2');
   }
 
   // 8) Alice manifest

@@ -288,6 +288,10 @@ async function run() {
       typeof r.body.server_time === 'string' && r.body.server_time.endsWith('Z'),
       'server_time 为 ISO 8601 UTC'
     );
+    // 服务端权威版本：响应必须带 versions 对象，且非空（本次推了 2 个实体）。
+    assert(typeof r.body.versions === 'object' && r.body.versions !== null, 'push 返回 versions 对象');
+    assert(Object.keys(r.body.versions).length === 2, 'push versions 含 2 个实体');
+    assert(r.body.versions['notes:n1'] === 2 && r.body.versions['notes:n2'] === 2, 'versions 为 max(既有, 声明)+1 = 2');
     pushTime1 = r.body.server_time;
   }
 

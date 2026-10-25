@@ -223,6 +223,8 @@ async function handlePush(request, env, ownerId) {
   }
   const envelopes = Array.isArray(body && body.envelopes) ? body.envelopes : [];
   const serverTime = nowIso();
+  // 服务端权威版本号映射：`<entity_table>:<entity_id>` → 新分配的版本。
+  const versions = {};
 
   if (envelopes.length > 0) {
     const stmt = env.DB.prepare(
@@ -231,20 +233,36 @@ async function handlePush(request, env, ownerId) {
         base_version, updated_at, deleted_at, server_time)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
-    const batch = envelopes.map((e) =>
-      stmt.bind(
-        ownerId,
-        e.entity_table,
-        e.entity_id,
-        e.device_id,
-        e.op,
-        e.payload == null ? null : JSON.stringify(e.payload),
-        parseInt(e.base_version, 10) || 0,
-        e.updated_at,
-        e.deleted_at,
-        serverTime
+    const batch = [];
+    for (const e of envelopes) {
+      // 服务端权威版本：max(既有服务端版本, 客户端声明基准版本) + 1，
+      // 保证服务端存储的版本恒为最大，消除 pull 时的版本歧义。
+      let existing = 0;
+      const row = await env.DB.prepare(
+        'SELECT base_version FROM sync_envelopes ' +
+          'WHERE owner_id = ? AND entity_table = ? AND entity_id = ?'
       )
-    );
+        .bind(ownerId, e.entity_table, e.entity_id)
+        .first();
+      if (row && row.base_version != null) existing = Number(row.base_version) || 0;
+      const newVer = Math.max(existing, parseInt(e.base_version, 10) || 0) + 1;
+      versions[`${e.entity_table}:${e.entity_id}`] = newVer;
+
+      batch.push(
+        stmt.bind(
+          ownerId,
+          e.entity_table,
+          e.entity_id,
+          e.device_id,
+          e.op,
+          e.payload == null ? null : JSON.stringify(e.payload),
+          newVer,
+          e.updated_at,
+          e.deleted_at,
+          serverTime
+        )
+      );
+    }
     await env.DB.batch(batch);
   }
 
@@ -254,6 +272,7 @@ async function handlePush(request, env, ownerId) {
     received: envelopes.length,
     accepted: envelopes.length,
     server_time: serverTime,
+    versions,
   });
 }
 

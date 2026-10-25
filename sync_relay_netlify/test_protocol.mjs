@@ -129,6 +129,10 @@ async function main() {
     check('push received=2', data && data.received === 2);
     check('push accepted=2', data && data.accepted === 2);
     check('push server_time present', data && typeof data.server_time === 'string');
+    // 服务端权威版本：响应必须带 versions 对象，且非空（本次推了 2 个实体）。
+    check('push versions is object', data && typeof data.versions === 'object' && data.versions !== null);
+    check('push versions non-empty', data && Object.keys(data.versions).length === 2);
+    check('push versions = max(既有, 声明)+1 (=1 since base_version=0)', data && data.versions['notes:n1'] === 1 && data.versions['notes:n2'] === 1);
     serverTime = data && data.server_time;
   }
 
