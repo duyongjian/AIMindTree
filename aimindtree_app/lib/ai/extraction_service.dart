@@ -32,6 +32,7 @@ import '../data/sync/sync_status.dart';
 import 'ai_provider.dart';
 import 'ai_job_service.dart';
 import 'ai_service.dart';
+import 'extraction_batching.dart';
 import 'ai_task.dart';
 import 'ai_task_router.dart';
 import 'app_config_service.dart';
@@ -131,26 +132,93 @@ class ExtractionService {
       note = (saved as Success<Note>).value;
     }
 
-    // 2) 调提取任务（AiService → 路由 → LLM Server /v1/task/T1）。
+    // 2) 分块提取（AiService → 路由 → LLM Server /v1/task/T1）。
     //    [variant] 由调用方按用户勾选的模式传（'' / 'keypoints' / 'both'）。
     //    空串 = 不带变体（客户端只在 variant 非空时写进 body，保旧行为）。
-    final aiRes = await ai.run(
-      AiTask.t1Extract,
-      {'note_text': content},
-      variant: variant,
-    );
-    if (aiRes is Failure<AiTaskResult>) {
-      return Failure(aiRes.error, aiRes.stackTrace);
+    //    长文按边界分块、携带「前文摘要」防重复，避免单次调用被 token 上限
+    //    截断而遗漏知识点（遗漏/omission）；短文本退化为单次调用，等价旧行为。
+    final t1Raw = await _runT1Batched(content, variant: variant);
+    if (t1Raw is Failure<List<RawKnowledgePoint>>) {
+      return Failure(t1Raw.error, t1Raw.stackTrace);
     }
+    final t1Result = AiTaskResult(
+      content: '',
+      parsed: (t1Raw as Success<List<RawKnowledgePoint>>)
+          .value
+          .map(_rawToMap)
+          .toList(),
+    );
 
     // 3) 锚点校验 + 落库
     return stagePersist(
       note: note,
       noteContent: content,
-      t1: (aiRes as Success<AiTaskResult>).value,
+      t1: t1Result,
       notebookId: notebookId,
     );
   }
+
+  /// T1 分块提取：短文本单次调用（与旧行为完全一致）；长文本按边界分块，
+  /// 逐块携带「前文摘要」防止重复提取，最后按归一化名称去重合并。
+  ///
+  /// 返回 [Result]<[List]<[RawKnowledgePoint]>>：失败透传 [AiService] 的 [Failure]。
+  Future<Result<List<RawKnowledgePoint>>> _runT1Batched(
+    String content, {
+    String variant = '',
+  }) async {
+    const maxChars = 3000;
+
+    // 短文本：单次调用，等价于改造前的 extract。
+    if (content.length <= maxChars) {
+      final res = await ai.run(
+        AiTask.t1Extract,
+        {'note_text': content},
+        variant: variant,
+      );
+      if (res is Failure<AiTaskResult>) {
+        return Failure(res.error, res.stackTrace);
+      }
+      final parsed = (res as Success<AiTaskResult>).value;
+      return Success(_mapToRaw(parsed.parsed) ?? const <RawKnowledgePoint>[]);
+    }
+
+    // 长文本：分块 + 运行摘要 + 去重。
+    final chunks = splitForBatching(content, maxChars: maxChars);
+    final merged = <RawKnowledgePoint>[];
+    String? summary;
+    for (final chunk in chunks) {
+      // 若已有前文摘要，则在正文前插入明确标识的「防重复」提示块。
+      final noteText = summary == null
+          ? chunk
+          : '\n【前文摘要（仅供参考，不要重复提取，只提取下方正文中的新知识点）】\n'
+              '$summary\n【待提取正文】\n$chunk';
+      final res = await ai.run(
+        AiTask.t1Extract,
+        {'note_text': noteText},
+        variant: variant,
+      );
+      if (res is Failure<AiTaskResult>) {
+        return Failure(res.error, res.stackTrace);
+      }
+      final parsed = (res as Success<AiTaskResult>).value;
+      final pts = _mapToRaw(parsed.parsed) ?? const <RawKnowledgePoint>[];
+      merged.addAll(pts);
+      // 更新运行摘要（基于已合并的全部点），喂给下一块防重复。
+      summary = summarizePoints(merged, maxChars: 600);
+    }
+    return Success(dedupePoints(merged));
+  }
+
+  /// 把 [RawKnowledgePoint] 还原为 T1 契约的 Map（裸数组形态），供 [stagePersist]
+  /// 的 [_mapToRaw] 再次解析（与 LLM 返回结构口径一致，保持落库链路不变）。
+  Map<String, dynamic> _rawToMap(RawKnowledgePoint p) => <String, dynamic>{
+        'name': p.name,
+        'type': p.type,
+        'definition': p.definition,
+        'source_quote': p.sourceQuote,
+        'prerequisites': p.prerequisites,
+        'confidence': p.confidence,
+      };
 
   /// 划词提取（T15）：把正文中选中文字提炼成一个完整知识点，归属 [note]。
   ///
