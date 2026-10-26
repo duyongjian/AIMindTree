@@ -32,7 +32,7 @@ class UnavailableAiProvider implements AiProvider {
     AiTask task,
     Map<String, dynamic> inputs, {
     String? user,
-    Duration timeout = const Duration(seconds: 120),
+    Duration timeout = const Duration(seconds: 900),
     String? variant,
   }) async {
     throw StateError(_message);
@@ -43,7 +43,7 @@ class UnavailableAiProvider implements AiProvider {
     String query, {
     String? conversationId,
     String? user,
-    Duration timeout = const Duration(seconds: 120),
+    Duration timeout = const Duration(seconds: 900),
     AiTask? task,
     String? variant,
   }) async* {

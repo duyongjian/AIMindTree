@@ -77,7 +77,7 @@ abstract class AiProvider {
     AiTask task,
     Map<String, dynamic> inputs, {
     String? user,
-    Duration timeout = const Duration(seconds: 120),
+    Duration timeout = const Duration(seconds: 900),
     String? variant,
   });
 
@@ -93,7 +93,7 @@ abstract class AiProvider {
     String query, {
     String? conversationId,
     String? user,
-    Duration timeout = const Duration(seconds: 120),
+    Duration timeout = const Duration(seconds: 900),
     AiTask? task,
     String? variant,
   });

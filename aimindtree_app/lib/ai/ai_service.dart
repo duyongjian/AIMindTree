@@ -30,7 +30,7 @@ class AiService {
     AiTask task,
     Map<String, dynamic> inputs, {
     String? user,
-    Duration timeout = const Duration(seconds: 120),
+    Duration timeout = const Duration(seconds: 900),
     String? variant,
   }) async {
     if (task.isLocalOnly) {
@@ -76,7 +76,7 @@ class AiService {
     String query, {
     String? conversationId,
     String? user,
-    Duration timeout = const Duration(seconds: 120),
+    Duration timeout = const Duration(seconds: 900),
     String? variant,
   }) async* {
     final provider = await router.resolve(task) ?? fallback;
