@@ -137,6 +137,38 @@ void main() {
       expect(c.markdown, '> 第一行\n\n## 第二行');
       c.dispose();
     });
+
+    test('段落 → 列表后 active 必须指向新块的第一行（不许掉出编辑态）', () {
+      // 回归：T4 接线时用探针发现的真缺陷 —— 换类型后行引用形状变了
+      // （段落 → 列表多出 itemId），沿用旧 ref 会让该块「点完按钮输入框消失」。
+      final c = NoteEditorController(markdown: 'abc');
+      final blockId = c.doc.blocks.first.id;
+      c.focusBlock(_firstRef(c), caret: 2);
+      c.convertActiveTo(BlockType.bulletList);
+
+      final list = c.doc.blocks.single as BulletListBlock;
+      expect(c.isEditing, isTrue, reason: '换类型后必须仍在编辑态');
+      expect(c.active!.blockId, blockId);
+      expect(c.active!.itemId, list.items.single.id);
+      expect(c.textOf(c.active!), 'abc');
+      expect(c.caretOf(c.active!), 2, reason: '换类型不改文本 → 光标仍严格不变');
+      c.dispose();
+    });
+
+    test('多行块不接受「块级 ref」（幽灵行防护）', () {
+      for (final md in <String>['- a', '> b', '| c |\n| --- |\n| d |']) {
+        final c = NoteEditorController(markdown: md);
+        final id = c.doc.blocks.first.id;
+        c.focusBlock(BlockRef(id));
+        expect(c.isEditing, isFalse, reason: '块级 ref 不能开启幽灵编辑态：$md');
+        c.dispose();
+      }
+      // 单行块仍接受块级 ref（它们的行引用就是 BlockRef(blockId)）。
+      final c = NoteEditorController(markdown: '段落');
+      c.focusBlock(_firstRef(c), caret: 1);
+      expect(c.isEditing, isTrue);
+      c.dispose();
+    });
   });
 
   group('Enter 分裂', () {

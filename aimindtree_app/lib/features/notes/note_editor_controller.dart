@@ -1566,12 +1566,22 @@ class NoteEditorController extends ChangeNotifier {
     return -1;
   }
 
+  /// [ref] 是否指向**真实存在的可编辑行**。
+  ///
+  /// 多行块（列表 / 引用 / 表格）必须带 [BlockRef.itemId]，否则就是「幽灵行」：
+  /// `focusBlock` 会让 `active` 指向一个不存在的行 —— 该块在 UI 上仍是只读态
+  /// （`active` 不等于任何真实行引用），用户看到的却是「点进去没反应 / 输入框消失」。
+  /// T4 的换类型缺陷（段落→列表后沿用旧 ref）就是这一条的实例，这里从源头堵住。
   bool _isValidRef(BlockRef ref) {
     final b = _blockById(ref.blockId);
     if (b == null) return false;
     final itemId = ref.itemId;
-    if (itemId == null) return true;
     switch (b) {
+      case ParagraphBlock():
+      case HeadingBlock():
+      case CodeBlock():
+      case RawBlock():
+        return itemId == null;
       case QuoteBlock(:final lines):
         final i = quoteLineIndexOf(ref);
         return i != null && i >= 0 && i < lines.length;
@@ -1585,12 +1595,8 @@ class NoteEditorController extends ChangeNotifier {
         final rc = tableCellOf(ref);
         if (rc == null) return false;
         return rc.$1 >= 0 && rc.$1 < rows.length && rc.$2 >= 0 && rc.$2 < rows[rc.$1].length;
-      case ParagraphBlock():
-      case HeadingBlock():
-      case CodeBlock():
       case DividerBlock():
       case ImageBlock():
-      case RawBlock():
         return false;
     }
   }
