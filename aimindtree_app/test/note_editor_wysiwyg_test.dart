@@ -326,4 +326,42 @@ void main() {
         reason: 'AI 链路的正文入口必须仍是 Markdown 纯文本');
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('⑧ 目录跳转：点标题就地进入编辑态（块引用而不是字符偏移）',
+      (WidgetTester tester) async {
+    const md = '# 第一节\n\n正文一行\n\n## 第二节';
+    await db.into(db.notes).insert(NotesCompanion(
+          id: const Value<String>('n2'),
+          title: const Value<String>('目录'),
+          contentMd: const Value<String>(md),
+          updatedAt: Value<DateTime>(DateTime.utc(2026, 1, 1)),
+          deviceId: const Value<String>('local-dev'),
+        ));
+    await tester.pumpWidget(MaterialApp(
+      home: NoteEditorPage(service: makeService(), db: db, noteId: 'n2'),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('目录 / 大纲'));
+    await tester.pumpAndSettle();
+    // 正文里也渲染着「第二节」，所以只在抽屉内找（否则会命中两个）。
+    final tocItem = find.descendant(
+      of: find.byType(Drawer),
+      matching: find.text('第二节'),
+    );
+    expect(tocItem, findsOneWidget);
+
+    await tester.tap(tocItem);
+    await tester.pumpAndSettle();
+
+    // 跳转 = 把该标题块变成输入框；`_isValidRef` 收紧后这条路径必须仍然成立
+    // （标题是单行块，接受块级 ref），且编辑态文本不含 `##`。
+    final field = find.descendant(
+      of: find.byKey(const ValueKey<String>('note-body')),
+      matching: find.byType(TextField),
+    );
+    expect(field, findsOneWidget, reason: '目录跳转必须真的把光标落到标题块上');
+    expect(tester.widget<TextField>(field).controller!.text, '第二节');
+    expect(tester.takeException(), isNull);
+  });
 }
