@@ -84,82 +84,108 @@ llm_server/
     └── t*.md               14 个提示词（含 t5_ask__detect.md 变体）
 ```
 
-## 3.5 使用本地 Ollama（当前默认后端）
+## 3.5 使用本地 llama.cpp（llama-server，**当前默认后端**）
+
+> 2026-10-27 起项目不再使用 Ollama，推理后端改为本地 **llama.cpp 的 llama-server**
+> （监听 `127.0.0.1:8085`）。Ollama 配置段保留但已弃用，仅作回退。
 
 ```bat
-REM ① 起服务（默认监听 http://127.0.0.1:11434，这个窗口别关）
-ollama serve
+REM ① 只起推理服务（这个窗口别关）
+scripts\run_llama_server.bat
 
-REM ② 确认模型（没拉过就 pull）
-ollama list
+REM ② 或者：起「llama-server + Python 服务端」一条龙（日常推荐这个）
+REM    它会自动探测 8085，没跑就拉起，并轮询等 /health 就绪
+scripts\run_llm_server.bat
+
+REM ③ 也可以直接双击 llama.cpp 目录下的 启动.bat
+D:/Local_Llama/llama-b9993-bin-win-cuda-13.3-x64/启动.bat
 ```
 
-然后把 `llm_server/config.yaml` 的模型位对齐你 `ollama list` 看到的名字：
+固定用的两个文件（**不要换**）：
 
-```yaml
-backends:
-  ollama:
-    default_model: qwen3:8b-8k                 # ← 必须是 ollama list 里的完整 NAME（含 tag）
-    models: [qwen3:8b-8k, qwen3:8b, qwen2.5:0.5b]
-```
+| 用途 | 文件 |
+|---|---|
+| 主模型（自带 MTP 投机解码 draft） | `models\Qwen3.8-27B-GSQ-RCO-IQ2_XS-mtp.gguf`（8.77 GB） |
+| 多模态投影 | `models\mmproj-Qwen3.8-27B-BF16.gguf`（931 MB，`--mmproj` 挂载） |
 
 自检：
 
 ```bat
-curl --noproxy '*' http://127.0.0.1:11434/api/tags     REM Ollama 自己活着 + 有模型
-curl --noproxy '*' http://127.0.0.1:8787/health        REM ollama: reachable=true
+curl --noproxy '*' http://127.0.0.1:8085/health      REM {"status":"ok"}
+curl --noproxy '*' http://127.0.0.1:8085/v1/models   REM id = Qwen3.8-27B-Uncensored
+curl --noproxy '*' http://127.0.0.1:8787/health      REM llama_cpp: reachable=true
 ```
 
-### ⚠️ 关键坑：`num_ctx` 撑爆显存 → 慢 150 倍
+### ⚠️ 关键坑一：`--alias` 必须与 config.yaml 逐字一致
 
-Ollama 的 OpenAI 兼容端点（`/v1/chat/completions`）**不接受 `num_ctx` 参数**，
-上下文只能吃模型自带默认值。`qwen3:8b` 出厂默认 `num_ctx=40960`，加载后占 11 GB，
-超出显存 → Ollama 退化成 CPU/GPU 混合推理。
+`/v1/models` 返回的 id 就是启动参数 `--alias`（`-a`）的值。
+`llm_server/config.yaml` 里 `backends.llama_cpp` 的 `default_model` / `models`
+必须和它**逐字相同**，否则报「模型不存在」。
 
-本机实测（i7-13650HX + 独显，`ollama ps` 核对）：
-
-| 模型 | 上下文 | 设备 | 实测速度 |
-|---|---|---|---|
-| `qwen3:8b`（原厂） | 40960 | 46% CPU / 54% GPU | **0.3 tok/s**（51 token 花 176 s，不可用） |
-| `qwen3:8b-8k`（派生） | 8192 | **100% GPU** | **≈ 46 tok/s** |
-| `qwen2.5:0.5b` | 32768 | 100% GPU | ≈ 111 tok/s（能力太弱，见下） |
-
-解决办法 = 用派生模型把上下文固定住（不改一行代码）：
-
-```bat
-ollama create qwen3:8b-8k -f llm_server/ollama/Modelfile.qwen3-8k
-ollama rm qwen3:8b-8k        REM 还原
+```yaml
+backends:
+  llama_cpp:
+    default_model: Qwen3.8-27B-Uncensored    # ← 必须与 --alias 一致
+    models: [Qwen3.8-27B-Uncensored]
 ```
 
-### 模型选型实测（T1 知识点抽取，同一段「梯度下降」笔记）
+### ⚠️ 关键坑二：显存 8GB 装不下 27B，别让 `--fit` 自动挑层数
 
-| 模型 | 耗时 | 结果 | 可用性 |
-|---|---|---|---|
-| `qwen3:8b-8k` | 18–22 s | 3 条；`type` 合法、`source_quote` **100% 命中原文** | ✅ 默认 |
-| `qwen2.5:0.5b` | 0.5–1.7 s | 1 条；`type` 原样回抄 `概念\|公式\|…`、`source_quote` 恒空 | ❌ 只适合冒烟 |
+本机 RTX 4060 Laptop **8 GB** 显存，模型 8.77 GB + mmproj 0.93 GB，本来就装不下。
+实测（i7-13650HX + 4060 Laptop，llama.cpp b9993）：
 
-> 0.5B 会把 JSON schema 当模板抄回来，**过不了 PRD 锚点铁律**
-> （`source_quote` 空 = 幻觉，客户端直接丢弃），别拿它做真实抽取。
+| 配置 | 每 slot 上下文 | 实测 tg |
+|---|---|---|
+| `-ngl 99`（全量上显卡，装不下的溢出到 CPU） | 32768 | **≈ 8 tok/s** |
+| 不写 `-ngl`、让 `--fit on` 自动挑层数 | 16384 | 1.5–2.3 tok/s（慢 3–5 倍） |
 
-> ⚠️ **只 `serve` 不 `pull`**：`/health` 仍然 200（`reachable=true`），
-> 但首次真实请求会报「模型不存在」。**先 pull 再调**。
->
-> 不想用 Ollama 也完全没问题：把 `default_backend` 改成 `minimax` 或 `openai_compat`
-> 即可（见下一节），Ollama 只是三个可切换后端之一。
+所以脚本里**显式写死 `-ngl 99`**：宁可让少量层溢出到 CPU，也别让 `--fit` 保守退层。
+（副作用：显式给了 `-ngl` 后 `--fit on` 会失效，llama.cpp 会打一条 warning 并跳过。）
+
+另两个实测有效的提速项：
+
+- `--no-mmproj-offload`：视觉投影留 CPU，给主模型腾约 950 MB 显存 → 快 20%–30%；
+- `-ctk q8_0 -ctv q8_0`：KV 缓存量化到 8bit，占用减半。
+
+### ⚠️ 关键坑三：27B 很慢，超时必须放宽
+
+本机实测 **tg ≈ 8 tok/s、pp ≈ 11 tok/s**。T1 一次抽几十个知识点的大 JSON
+很容易超过原来的 120 s，所以 `config.yaml` 的 `timeouts` 已放宽：
+
+```yaml
+timeouts:
+  structured_s: 900     # 结构化任务（T1/T3/T4/T13/T14）
+  chat_s: 900           # 对话（T6 老师模式等长文本）
+```
+
+> App 侧 `AiProvider.runTask.timeout` 也要跟着放宽，否则 App 先超时、
+> 服务端宽限多少都没用。
+
+### 为什么默认关闭思考（`--reasoning off`）
+
+Qwen3 默认输出思考。实测开启时「60 字回答要配 400+ 字思考」——
+思考会吃掉大半 `max_tokens`，长 JSON 任务基本跑不完；关掉后**有效内容吞吐约高 5 倍**。
+
+App 侧 `structured_parse.dart` 本身有 `<think>` 容错解析，所以开着也安全；
+要开就把 `--reasoning off` 改成 `auto`（或 `on`），并配 `--reasoning-budget N` 限制思考长度。
 
 ## 4. 切换后端
 
 改 `llm_server/config.yaml` 一行即可（**不用重启进程**，改完 `POST /v1/admin/reload`）：
 
 ```yaml
-default_backend: ollama      # ← 改成 minimax / openai_compat
+default_backend: llama_cpp   # ← 改成 minimax / ollama / openai_compat
 ```
 
 | backend | 默认 protocol | 端点 | 前置条件 |
 | --- | --- | --- | --- |
-| `ollama` | `openai_compat` | `http://127.0.0.1:11434/v1/chat/completions` | `ollama serve` + `ollama pull llama3`（见 §3.5） |
+| `llama_cpp` | `openai_compat` | `http://127.0.0.1:8085/v1/chat/completions` | llama-server 在跑（见 §3.5） |
+| `ollama`（已弃用，仅回退） | `openai_compat` | `http://127.0.0.1:11434/v1/chat/completions` | `ollama serve` + `ollama pull llama3` |
 | `minimax` | `anthropic_compat` | `https://api.minimaxi.com/anthropic/v1/messages` | `.env` 里填 `MINIMAX_API_KEY` |
 | `openai_compat` | `openai_compat` | 你填的 `base_url` + `/v1/chat/completions` | `.env` 里填 `OPENAI_API_KEY` |
+
+> `llama_cpp` 只是**逻辑后端名**，底层复用现成的 `type: openai_compat`
+> （llama-server 原生暴露 `/v1`），没有新增 Python 后端类。
 
 **MiniMax 切到 OpenAI 形态**：把 `backends.minimax.protocol` 改成 `openai_compat`。
 **按任务单独指定后端**（可选）：
@@ -170,9 +196,8 @@ task_backends:
   T5: minimax
 ```
 
-**Ollama 是可选的**：没起 Ollama 服务也能正常启动，`/health` 里该项
+**本地后端是可选的**：没起 llama-server 也能正常启动，`/health` 里该项
 `reachable=false`，只要把 `default_backend` 指向一个可用端点即可。
-
 ## 5. 密钥
 
 ```bat
@@ -199,8 +224,11 @@ curl -X POST http://127.0.0.1:8787/v1/prompts/reload
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | 启动报 `FastAPIError: Invalid args for response field` | 路由返回值注解被当成响应模型 | 已在 `/v1/chat` 加 `response_model=None`，勿删 |
-| `/health` 里 ollama `reachable=false` | Ollama 没起 / 没拉模型 | `ollama serve` + `ollama pull qwen2.5:7b`；或换 `default_backend` |
-| 明明本机有 Ollama 却报 `backend_unreachable` | 本机 `HTTP_PROXY` 把 127.0.0.1 请求发给代理了 | 服务端已默认 `trust_env_proxy: false`；`curl` 要加 `--noproxy '*'` |
+| `/health` 里 llama_cpp `reachable=false` | llama-server 没起 | 跑 `scripts\run_llama_server.bat`，或双击 llama.cpp 目录下的 `启动.bat`；确认 `curl http://127.0.0.1:8085/health` 返回 `{"status":"ok"}` |
+| 报 `backend_unreachable` 但 8085 明明通 | 本机 `HTTP_PROXY` 把 127.0.0.1 请求发给代理了 | 服务端已默认 `trust_env_proxy: false`；`curl` 要加 `--noproxy '*'` |
+| 真实调用报「模型不存在」 | `--alias` 与 config.yaml 的 `default_model` 不一致 | 两边对齐为同一个字符串（见 §3.5 坑一） |
+| `backend_timeout`（504） | 27B 本地推理慢（约 8 tok/s），120 s 不够 | 已把 `timeouts.structured_s/chat_s` 放宽到 900；App 侧超时也要同步放宽 |
+| `/health` 里 ollama `reachable=false` | Ollama 没起 / 没拉模型（**Ollama 已弃用，仅回退**） | 换 `default_backend`；真要回退就 `ollama serve` + `ollama pull qwen3:8b-8k` |
 | `bad_json`（502） | 模型输出不是合法 JSON | 换更强模型 / 在 config 把该任务切到 `minimax`；调大 `max_tokens` |
 | `auth_failed`（401） | `.env` 里没填对应 Key | 填 `MINIMAX_API_KEY` / `OPENAI_API_KEY` 后 `POST /v1/admin/reload` |
 | 端口占用 | 8787 被占 | `run_llm_server.bat --port 8788`（同时改 App 默认 Base URL） |

@@ -347,6 +347,14 @@ backends:
     base_url: http://127.0.0.1:11434
     default_model: llama3
     models: [llama3]
+  llama_cpp:
+    type: openai_compat
+    protocol: openai_compat
+    base_url: http://127.0.0.1:8085
+    api_key_env: ""
+    default_model: Qwen3.8-27B-Uncensored
+    models: [Qwen3.8-27B-Uncensored]
+    health_path: /v1/models
   openai_compat:
     type: openai_compat
     protocol: openai_compat
@@ -355,9 +363,33 @@ backends:
     default_model: gpt-4o-mini
 """
 
+#: llama_cpp 后端专用夹具：**默认后端故意先写成 ollama**，用来演练
+#:「把默认后端切成 llama_cpp」这一步（2026-10-27 起项目改用 llama.cpp）。
+_LLAMA_CPP_CONFIG_YAML = """
+server:
+  host: 127.0.0.1
+  port: 8787
+default_backend: ollama
+backends:
+  ollama:
+    type: ollama
+    protocol: openai_compat
+    base_url: http://127.0.0.1:11434
+    default_model: llama3
+    models: [llama3]
+  llama_cpp:
+    type: openai_compat
+    protocol: openai_compat
+    base_url: http://127.0.0.1:8085
+    api_key_env: ""
+    default_model: Qwen3.8-27B-Uncensored
+    models: [Qwen3.8-27B-Uncensored]
+    health_path: /v1/models
+"""
+
 
 #: 管理后台自检的断言点数（全部通过时 admin_failures=0）。
-_ADMIN_TOTAL = 7
+_ADMIN_TOTAL = 13
 
 
 def run_admin_checks() -> int:
@@ -373,6 +405,86 @@ def run_admin_checks() -> int:
     failures = 0
     failures += _check_settings_roundtrip()
     failures += asyncio.run(_check_balance_structured())
+    failures += _check_llama_cpp_backend()
+    return failures
+
+
+def _check_llama_cpp_backend() -> int:
+    """本地 llama.cpp 后端（``llama_cpp``）自检。
+
+    2026-10-27 起项目不再使用 Ollama，默认后端改为 llama.cpp 的 llama-server
+    （127.0.0.1:8085）。它**不新增 Python 后端类**，而是复用现成的
+    ``type: openai_compat`` + ``protocol: openai_compat``，所以这里只验证
+    「配置解析 + 空密钥可实例化 + 请求路径正确 + 默认后端可切换」。
+
+    全程离线（不发任何网络请求）、临时目录（不污染仓库）。
+    """
+    import tempfile
+
+    from backends import create_backend
+    from core.config import Config
+
+    failures = 0
+    d = tempfile.mkdtemp(prefix='aimindtree_llama_cpp_')
+    cfg_path = Path(d) / 'config.yaml'
+    cfg_path.write_text(_LLAMA_CPP_CONFIG_YAML, encoding='utf-8')
+
+    config = Config(cfg_path)
+
+    # ① 默认后端可被切成 llama_cpp（settings.json 覆盖层优先于 config.yaml）
+    config.save_settings({'default_backend': 'llama_cpp'})
+    switched = Config(cfg_path)
+    if switched.default_backend != 'llama_cpp':
+        print('  ❌ 默认后端切换失败，实际 %r' % switched.default_backend)
+        failures += 1
+    else:
+        print('  ✅ 默认后端可切换为 llama_cpp（settings 覆盖层生效）')
+
+    try:
+        conf = switched.backend('llama_cpp')
+    except Exception as exc:  # noqa: BLE001
+        print('  ❌ backends 里取不到 llama_cpp：%r' % exc)
+        return failures + 4
+    if conf.model() != 'Qwen3.8-27B-Uncensored':
+        print('  ❌ llama_cpp 默认模型应为 --alias 的值，实际 %r' % conf.model())
+        failures += 1
+    else:
+        print('  ✅ llama_cpp 默认模型 = Qwen3.8-27B-Uncensored（与 --alias 一致）')
+
+    # ② 空密钥可创建后端（本地 llama-server 无鉴权，api_key_env 为空串）
+    try:
+        backend = create_backend(conf, switched.resolve_api_key(conf))
+    except Exception as exc:  # noqa: BLE001 - 这是要抓的违规
+        print('  ❌ 空密钥创建 llama_cpp 后端失败：%r' % exc)
+        return failures + 3
+    print('  ✅ 空密钥可创建 llama_cpp 后端（type=openai_compat，复用现成协议层）')
+
+    # ③ 空密钥 → 不带 Authorization 头
+    proto = getattr(backend, '_protocol', None)
+    if proto is None or not hasattr(proto, 'headers') or not hasattr(proto, 'url'):
+        print('  ❌ OpenAICompatBackend 未挂上协议对象，无法继续断言')
+        return failures + 3
+    headers = proto.headers()
+    if 'Authorization' in headers:
+        print('  ❌ 空密钥仍带了 Authorization 头：%r' % headers)
+        failures += 1
+    else:
+        print('  ✅ 空密钥不带 Authorization 头')
+
+    # ④ chat 路径：base_url 不带 /v1，由默认 openai_path 补上
+    url = proto.url()
+    if url != 'http://127.0.0.1:8085/v1/chat/completions':
+        print('  ❌ chat URL 应为 http://127.0.0.1:8085/v1/chat/completions，实际 %r' % url)
+        failures += 1
+    else:
+        print('  ✅ chat URL = http://127.0.0.1:8085/v1/chat/completions')
+
+    if conf.health_path != '/v1/models':
+        print('  ❌ health_path 应为 /v1/models，实际 %r' % conf.health_path)
+        failures += 1
+    else:
+        print('  ✅ health_path = /v1/models')
+
     return failures
 
 

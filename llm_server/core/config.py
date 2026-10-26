@@ -37,11 +37,14 @@ DEFAULTS: dict[str, Any] = {
         'verbose': False,
         'cors_origins': ['http://127.0.0.1', 'http://localhost'],
     },
-    'default_backend': 'ollama',
+    # 2026-10-27：默认后端由 ollama 改为 llama_cpp（本地 llama-server，
+    # 127.0.0.1:8085，复用 openai_compat 协议）。Ollama 已弃用，仅作回退。
+    'default_backend': 'llama_cpp',
     'task_backends': {},
     'timeouts': {
-        'structured_s': 120,
-        'chat_s': 120,
+        # 本地 27B @ 8GB 笔记本显卡只有约 8 tok/s，长 JSON 任务远不止 120s。
+        'structured_s': 900,
+        'chat_s': 900,
         'connect_s': 10,
         'health_s': 5,
     },
@@ -49,8 +52,8 @@ DEFAULTS: dict[str, Any] = {
         'structured_on_bad_json': 1,
     },
     #: 任务队列（``/v1/jobs``）段。运维参数：只落 config.yaml，不走 settings.json
-    #: 后台热改（P1 再收进 M2）。concurrency=1：本地 Ollama 单模型串行最稳，
-    #: 并发请求只会在 Ollama 内部排队、互相拖慢。
+    #: 后台热改（P1 再收进 M2）。concurrency=1：本地 llama-server 只有 2 个 slot
+    #: 且 27B 很慢，串行最稳；并发请求只会在 llama-server 内部排队、互相拖慢。
     'jobs': {
         'concurrency': 1,
         'retain': 200,
@@ -121,8 +124,10 @@ class BackendConf:
     """一个后端（backend）的连接参数。
 
     注意 **backend ≠ protocol**：backend 是用户在 config 里看到的可切换名字
-    （ollama / minimax / openai_compat），protocol 是 HTTP 形态
+    （llama_cpp / ollama / minimax / openai_compat），protocol 是 HTTP 形态
     （openai_compat / anthropic_compat）。二者解耦，见设计 §2.4。
+    例：``llama_cpp`` 这个 backend 用的就是 ``openai_compat`` 协议
+    （llama-server 原生暴露 /v1），不需要单独的协议实现。
     """
 
     name: str = ''
@@ -302,7 +307,7 @@ class Config:
 
         merged = _deep_merge(DEFAULTS, raw)
         self.server = dict(merged.get('server') or DEFAULTS['server'])
-        self.default_backend = str(merged.get('default_backend') or 'ollama')
+        self.default_backend = str(merged.get('default_backend') or 'llama_cpp')
         self.task_backends, self.task_models = _split_task_backends(
             merged.get('task_backends') or {}
         )
@@ -666,7 +671,7 @@ class Config:
         """解析后端密钥：settings.json 的 per-backend 覆盖 > 进程环境变量 > ``.env``。
 
         查找顺序：settings.json 覆盖 → 进程环境变量 → ``.env`` 文件。都没有返回空串
-        （本地后端如 Ollama 不需要密钥，不报错）。
+        （本地后端如 llama_cpp / Ollama 不需要密钥，不报错）。
         """
         override = self._settings_api_keys.get(conf.name)
         if override:

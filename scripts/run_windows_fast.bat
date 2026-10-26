@@ -13,8 +13,10 @@ REM      次也不退，App 其实已经起来了）。只设 NO_PROXY 无效，必须清空。
 REM   2) 显式 set PROGRAMFILES(X86) —— 某些精简环境没有这个变量。
 REM
 REM 前置条件（不在本脚本职责内）：
-REM   - ollama serve 正在跑（本地推理）
+REM   - llama-server 正在跑（本地推理，llama.cpp，127.0.0.1:8085）
+REM     单独起：scripts\run_llama_server.bat
 REM   - scripts\run_llm_server.bat 已启动（App 的 AI 服务端，127.0.0.1:8787）
+REM     它自己会探测 8085，没跑就拉起，一般跑它一个就够了。
 REM   App 冷启动会自己拉 /v1/app/config，无需手工配 provider。
 REM
 REM 退出：在 flutter run 窗口按 q 或 Ctrl+C。

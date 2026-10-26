@@ -39,8 +39,14 @@ const String kLlmServerDefaultBaseUrl = 'http://127.0.0.1:8787';
 const bool kLlmServerBlockingChat = false;
 
 /// 后端取值：`auto` = 跟随服务端 `config.yaml` 的 `default_backend`。
+///
+/// `llama_cpp` 是本地 llama-server（127.0.0.1:8085）的逻辑后端名，
+/// 2026-10-27 起取代 ollama 成为服务端默认。名字必须与
+/// `llm_server/config.yaml` 的 `backends.<name>` 一致，否则
+/// `settings_repository.dart` 会把它降级成 `auto`。
 const List<String> kLlmServerBackends = <String>[
   'auto',
+  'llama_cpp',
   'ollama',
   'minimax',
   'openai_compat',
@@ -86,8 +92,9 @@ class LlmServerClient implements AiProvider {
   /// 形如 `http://127.0.0.1:8787`。
   final String baseUrl;
 
-  /// 后端名（落 `ai_providers.type` 列）：`auto` / `ollama` / `minimax` /
-  /// `openai_compat`。`auto` 表示「不覆盖，跟随服务端配置」。
+  /// 后端名（落 `ai_providers.type` 列）：`auto` / `llama_cpp` / `ollama` /
+  /// `minimax` / `openai_compat`（即 [kLlmServerBackends]）。
+  /// `auto` 表示「不覆盖，跟随服务端配置」。
   final String backend;
 
   /// 模型覆盖（空 = 用后端默认模型）。

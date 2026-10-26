@@ -118,7 +118,14 @@ def backend_unknown(name: str, available: list[str]) -> LlmError:
 def backend_unreachable(name: str, base_url: str, detail: str = '') -> LlmError:
     """连不上后端（ConnectError / DNS 失败）。"""
     msg = f'无法连接后端 {name}（{base_url}）。'
-    if name == 'ollama':
+    if name == 'llama_cpp':
+        msg += (
+            '本机模式请先启动 llama-server：双击 D:\\Local_Llama\\llama-b9993-bin-win-cuda-13.3-x64\\启动.bat，'
+            '或运行仓库里的 scripts\\run_llama_server.bat（监听 127.0.0.1:8085）；'
+            '也可以直接跑 scripts\\run_llm_server.bat，它会自己拉起 llama-server。'
+            '若已启动仍报此错：确认端口是 8085、且 config.yaml 的 backends.llama_cpp.base_url 一致。'
+        )
+    elif name == 'ollama':
         msg += '本机模式请先启动 Ollama（ollama serve），或把 config.yaml 的 default_backend 换成其它后端。'
     if detail:
         msg += f' 底层错误：{detail}'

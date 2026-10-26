@@ -8,8 +8,8 @@ server:
   log_level: info          # debug|info|warning|error
   verbose: false           # true = 打印完整 prompt/response（S-15）
   # httpx 是否跟随环境变量里的 HTTP_PROXY / HTTPS_PROXY。
-  # 默认 false：本机若有开发代理（如 127.0.0.1:xxxxx），true 会把 127.0.0.1:11434
-  # 的本地 Ollama 请求也发给代理，表现为「本机后端连不上」的假故障。
+  # 默认 false：本机若有开发代理（如 127.0.0.1:xxxxx），true 会把 127.0.0.1:8085
+  # 的本地 llama-server 请求也发给代理，表现为「本机后端连不上」的假故障。
   # 只有在**必须**走公司代理才能访问云端后端时才改成 true。
   trust_env_proxy: false
   cors_origins:
@@ -17,9 +17,11 @@ server:
     - http://localhost
 
 # 默认后端（D11：不做按任务强制，统一走这里；task_backends 留空）
-# 2026-10-21：切回本地 Ollama（零成本、无限额）。MiniMax 云端保留为可选后端，
-# 其账户当前无有效 Token 套餐（/v1/admin/balance 会报 available:false），需要时再切。
-default_backend: ollama
+# 2026-10-27：切换为本地 **llama.cpp（llama-server，127.0.0.1:8085）**，项目不再使用 Ollama。
+# 推理进程由 scripts\run_llama_server.bat 拉起（或直接双击 llama.cpp 目录下的 启动.bat）。
+# Ollama 段保留但已弃用，仅作回退；MiniMax 云端保留为可选后端，其账户当前无有效
+# Token 套餐（/v1/admin/balance 会报 available:false），需要时再切。
+default_backend: llama_cpp
 
 # 按任务覆盖（可选；未列出的任务走 default_backend）
 # 例：把 T1 单独切到云端：
@@ -28,8 +30,14 @@ default_backend: ollama
 task_backends: {}
 
 timeouts:
-  structured_s: 120        # 与 App 侧 AiProvider.runTask.timeout 对齐（N-8）
-  chat_s: 120
+  # ⚠️ 2026-10-27：本地 llama.cpp 跑的是 27B IQ2_XXS（本机实测 tg ≈ 8 tok/s、
+  # pp ≈ 11 tok/s @ RTX 4060 Laptop 8GB），比原先的 Ollama qwen3:8b 慢一个量级。
+  # 原来给 Ollama 的 120s 对「整篇笔记 → 几十个知识点」的长 JSON 输出根本不够
+  # （8192 输出 token @ 8 tok/s ≈ 17 分钟）。这里放宽到 900s，避免大面积
+  # backend_timeout。**同时请把 App 侧 AiProvider.runTask.timeout 一并放宽**，
+  # 否则 App 先超时、服务端宽限也无效。
+  structured_s: 900        # 结构化任务（T1/T3/T4/T13/T14）
+  chat_s: 900              # 对话（T6 老师模式等长文本）
   connect_s: 10
   health_s: 5              # /health 里各后端探测（并发，不阻塞响应）
 
@@ -41,15 +49,51 @@ retry:
 # 运维参数，只改这个文件 + POST /v1/admin/reload（不进管理后台热改）。
 jobs:
   concurrency: 1    # worker 协程数，**进程启动时固定**（改后需重启 llm_server）。
-                    # 本地 Ollama 单模型：1 最稳（并发只在 Ollama 内部排队）；
+                    # 本地 llama-server 只给了 2 个 slot（--parallel 2），且 27B 很慢：
+                    # 1 最稳（并发只在 llama-server 内部排队）；
                     # 切 MiniMax 云端可改 2-3。
   retain: 200       # 终态 job 内存环形保留条数（托盘 / 管理后台 M10 都读这里）
 
 backends:
-  # ---- 后端一：Ollama（本地，当前默认）----
+  # ---- 后端零：llama.cpp / llama-server（本地，**当前默认**）----
+  # 逻辑后端名 llama_cpp，**复用现成的 openai_compat 实现**（llama-server 原生
+  # 暴露 /v1/chat/completions、/v1/models、流式 SSE），不需要新写 Python 后端类。
+  #
+  # 前置：llama-server 已在 127.0.0.1:8085 监听。
+  #   启动方式 A（仓库内）：scripts\run_llama_server.bat
+  #   启动方式 B（直接）：  D:\Local_Llama\llama-b9993-bin-win-cuda-13.3-x64\启动.bat
+  #   启动方式 C（跟随服务端一起起）：scripts\run_llm_server.bat（会自己探测 8085）
+  # 没起不影响 llm_server 启动，只是 /health 里 reachable=false（Q-I）。
+  #
+  # ⚠️ default_model / models 必须与 llama-server 启动参数的 `--alias` **逐字一致**。
+  #    本机 --alias = Qwen3.8-27B-Uncensored（/v1/models 返回的 id 就是它）。
+  #    改了启动参数里的 alias，这里必须同步改，否则请求报「模型不存在」。
+  #
+  # 本机实测（2026-10-27，RTX 4060 Laptop 8GB / i7-13650HX / 64GB RAM，
+  # llama.cpp b9993 CUDA 13.3，模型 Qwen3.8-27B-GSQ-RCO-IQ2_XS-mtp.gguf）：
+  #   tg ≈ 8 tok/s，pp ≈ 11 tok/s，MTP 投机解码接受率 ≈ 55%~70%
+  #   关闭思考（--reasoning off）后，有效内容吞吐比开启时高约 5 倍
+  #   （开启时 60 字回答要配 400+ 字思考，max_tokens 会被思考吃掉大半）。
+  #   —— 所以 T1/T3/T4 这类长 JSON 任务务必保持「关闭思考」。
+  #
+  # base_url **不要带 /v1**：openai_path 默认已是 /v1/chat/completions。
+  llama_cpp:
+    type: openai_compat
+    protocol: openai_compat
+    base_url: http://127.0.0.1:8085
+    api_key_env: ""                       # 本地无密钥；空串 = 不读环境变量、不发 Authorization 头
+    default_model: Qwen3.8-27B-Uncensored # ← 必须与 --alias 逐字一致
+    models: [Qwen3.8-27B-Uncensored]
+    health_path: /v1/models               # 显式指定，省掉协议层猜测
+    # 不写 extra：llama-server 的 OpenAI 端点只吃标准字段（model/messages/
+    # temperature/max_tokens/stream），输出上限由启动参数 -n 8192 兜底。
+
+  # ---- 后端一：Ollama（本地，**已弃用，仅作回退**）----
+  # ⚠️ 2026-10-27 起项目改用 llama.cpp（见上面的 llama_cpp），Ollama **不再是默认后端**。
+  # 这一段只保留给「临时回退」用：把 default_backend 改回 ollama 即可（同时要起 ollama serve）。
   # 前置：ollama serve 已在跑，且 pull 过下面列出的模型。
   # 本机实测（2026-10-21，i7-13650HX + 独显，`ollama ps` 确认 100% GPU）：
-  #   qwen3:8b-8k     5.2 GB   ≈ 46 tok/s  ← 默认：由 ollama/Modelfile.qwen3-8k 派生
+  #   qwen3:8b-8k     5.2 GB   ≈ 46 tok/s  ← 由 ollama/Modelfile.qwen3-8k 派生
   #   qwen3:8b        5.2 GB   ≈ 0.3 tok/s ← 原厂默认 num_ctx=40960 → 撑爆显存 → 46%/54% CPU/GPU
   #   qwen2.5:0.5b    397 MB   ≈ 111 tok/s ← 极快，但能力太弱（只回抄 schema，T1 抽不出可用锚点）
   # 经验：Ollama 的 /v1/chat/completions 不接受 num_ctx，只能靠派生模型固定上下文。
@@ -66,7 +110,7 @@ backends:
       num_ctx: 8192
       json_mode_field: format   # P0 可选：Ollama 的 format=json
 
-  # ---- 后端二：MiniMax（云端，当前默认后端）----
+  # ---- 后端二：MiniMax（云端，可选；不是默认）----
   # 2026-10-21 起默认走 openai_compat（/v1/chat/completions，MiniMax OpenAI 兼容形态）；
   # 若你的 Key 是 Anthropic 形态，把 protocol 改成 anthropic_compat 即可（一行切换）。
   # 端点统一收口到 api.minimax.cn（旧域 api.minimaxi.com 已废弃）。

@@ -114,11 +114,13 @@ cd llm_server && python selftest.py
 
 ## 7. 遗留 / 用户侧待办（非代码缺陷，需真机动作）
 
-1. **Ollama 本机未起 + 零模型**：默认后端是 ollama，但本机 `ollama serve` 未启动、未 `pull` 模型。用前需：
+1. **本地推理后端未起**：2026-10-27 起默认后端是 `llama_cpp`（llama.cpp 的 llama-server，
+   `127.0.0.1:8085`），本机需要先把它拉起来。用前需：
    ```
-   ollama serve
-   ollama pull llama3
+   scripts\run_llama_server.bat      :: 只起推理服务
+   scripts\run_llm_server.bat        :: 推理服务 + Python 服务端一条龙
    ```
+   （Ollama 已弃用，仅作回退：真要回退就 `ollama serve` + `ollama pull qwen3:8b-8k`。）
 2. **启动 LLM Server**：App 调用 `127.0.0.1:8787`，用前需先拉起服务：
    ```
    cd llm_server && scripts/run_llm_server.bat

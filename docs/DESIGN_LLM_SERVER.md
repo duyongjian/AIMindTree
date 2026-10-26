@@ -53,7 +53,7 @@ cd aimindtree_app && D:/DevTools/flutter/bin/cache/dart-sdk/bin/dart.exe tool/an
 | --- | --- | --- |
 | D1 | 服务端 Python + FastAPI，`127.0.0.1:8787` | §2 |
 | D2 | 依赖只允许 `fastapi` / `uvicorn` / `httpx` / `pyyaml` | §6.1；LangChain 只留占位注释文件 |
-| D3 | 后端 `ollama` / `minimax` / `openai_compat`，**默认 `ollama`** | §2.4 / §2.9 |
+| D3 | 后端 `llama_cpp` / `ollama` / `minimax` / `openai_compat`，**默认 `llama_cpp`**（2026-10-27 起；Ollama 已弃用仅回退） | §2.4 / §2.9 |
 | D4 | 抽象**两类协议**实现：`openai_compat`（`/v1/chat/completions`）与 `anthropic_compat`（`/v1/messages`） | §2.5 |
 | D5 | Dify 保留文件、整段注释；设置页 UI 隐藏 dify | §3.6 |
 | D6 | 服务端持 Key（`.env` + `.gitignore`）；App 不传密钥、`api_key_ref` 留空、设置页无 Key 框 | §3.5 |
@@ -109,7 +109,8 @@ flowchart TB
     end
 
     subgraph BE["LLM 后端（config.yaml 三选一，运行时可切）"]
-        OLL["Ollama<br/>127.0.0.1:11434<br/>（默认）"]
+        LL["llama.cpp llama-server<br/>127.0.0.1:8085<br/>（默认）"]
+        OLL["Ollama<br/>127.0.0.1:11434<br/>（已弃用，仅回退）"]
         MM["MiniMax<br/>api.minimaxi.com"]
         OAI["OpenAI 兼容端点<br/>用户自定义"]
     end
@@ -650,7 +651,7 @@ server:
     - http://localhost
 
 # 默认后端（D11：不做按任务强制，统一走这里；task_backends 留空）
-default_backend: ollama
+default_backend: llama_cpp   # 2026-10-27 起：本地 llama.cpp；ollama 仅回退
 
 # 按任务覆盖（可选；未列出的任务走 default_backend）
 task_backends: {}
@@ -994,7 +995,7 @@ class LocalAiConfig {
 | --- | --- | --- | --- | --- |
 | 1 | 显示名称 | TextField | `本地 LLM 服务` | 非空 |
 | 2 | Base URL | TextField | `http://127.0.0.1:8787` | 必须以 `http://` 或 `https://` 开头 |
-| 3 | 后端 Backend | DropdownButton | `跟随服务端默认`(auto) / `ollama` / `minimax` / `openai_compat` | 选 auto 则不传 `backend` |
+| 3 | 后端 Backend | DropdownButton | `跟随服务端默认`(auto) / `llama_cpp` / `ollama` / `minimax` / `openai_compat` | 选 auto 则不传 `backend` |
 | 4 | 模型 Model | TextField（可空） | 空 | 留空 = 后端默认；示例 `qwen2.5:7b` / `MiniMax-Text-01` |
 | 5 | 设为默认 | Switch | 新增时 `true` | 对应 `is_default` |
 | — | ~~API Key~~ | **不渲染** | — | 见 §3.5 |

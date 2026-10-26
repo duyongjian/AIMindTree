@@ -144,7 +144,7 @@ Stream<AiChunk> streamChat(
 
 | 列 | 复用语义 | 取值 |
 | --- | --- | --- |
-| `type` | **Backend** | `auto`（跟随服务端默认）/ `ollama` / `minimax` / `openai_compat` |
+| `type` | **Backend** | `auto`（跟随服务端默认）/ `llama_cpp` / `ollama` / `minimax` / `openai_compat` |
 | `models` | **Model 覆盖**（JSON 数组） | `[]` = 用后端默认模型；`["qwen2.5:7b"]` = 覆盖（最多 1 个元素） |
 | `api_key_ref` | 恒空字符串 | 见 C4（密钥由服务端持有） |
 | `protocol` | `llm_server` | 新增取值，不改列 |
@@ -277,7 +277,7 @@ Stream<AiChunk> streamChat(
 | --- | --- | --- | --- | --- |
 | 1 | 显示名称 | TextField | `本地 LLM 服务` | 仅展示用 |
 | 2 | Base URL | TextField | `http://127.0.0.1:8787` | 校验：必须 `http://` 或 `https://` 开头 |
-| 3 | 后端 Backend | DropdownButton | `跟随服务端默认` / `ollama` / `minimax` / `openai_compat` | 选「跟随服务端默认」则不传 `backend`，由服务端 `config.yaml` 决定 |
+| 3 | 后端 Backend | DropdownButton | `跟随服务端默认` / `llama_cpp` / `ollama` / `minimax` / `openai_compat` | 选「跟随服务端默认」则不传 `backend`，由服务端 `config.yaml` 决定（2026-10-27 起默认 `llama_cpp`） |
 | 4 | 模型 Model | TextField（可空） | 空 | 留空 = 用后端默认模型；填了则覆盖（如 `qwen2.5:7b` / `MiniMax-Text-01`） |
 | 5 | 设为默认 | Switch | 新增时 true | 对应 `is_default`，决定通用任务回落 |
 | — | ~~API Key~~ | **不显示** | — | 见 §C4：P0 密钥由服务端持有，App 不传 |

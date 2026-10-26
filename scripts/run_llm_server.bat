@@ -1,28 +1,32 @@
 @echo off
 REM ============================================================
-REM  AIMindTree 服务端一键启动 —— Ollama + LLM Server
+REM  AIMindTree 服务端一键启动 —— llama.cpp(llama-server) + LLM Server
 REM
 REM  用法：
 REM     scripts\run_llm_server.bat              默认 8787 端口
 REM     scripts\run_llm_server.bat --port 8788  端口被占时换一个
 REM
-REM  它做三件事（缺一步都起不来）：
-REM    1) 确认 Ollama 在跑        —— 没起就自动 `ollama serve`（最小化窗口）
-REM    2) 确认模型 qwen3:8b-8k 在  —— 不在就自动 create（读 llm_server\ollama\Modelfile.qwen3-8k）
-REM    3) 启动 LLM Server          —— http://127.0.0.1:8787
+REM  它做两件事（缺一步都起不来）：
+REM    1) 确认 llama-server 在 127.0.0.1:8085 跑着 —— 没起就自动拉起并等 /health 就绪
+REM    2) 启动 LLM Server（Python）—— http://127.0.0.1:8787
+REM
+REM  推理后端是本地 llama.cpp（llama-server），**不再使用 Ollama**。
+REM  想单独起 llama-server（不启 Python 服务端）用 scripts\run_llama_server.bat。
 REM
 REM  启动后：
 REM    管理后台   http://127.0.0.1:8787/admin
 REM    健康检查   http://127.0.0.1:8787/health
-REM  退出：在本窗口按 Ctrl+C（Ollama 那个最小化窗口要单独关）
+REM    推理后端   http://127.0.0.1:8085/health
+REM  退出：在本窗口按 Ctrl+C（llama-server 那个最小化窗口要单独关）
 REM ============================================================
 setlocal EnableDelayedExpansion
 
 set "REPO=%~dp0.."
 set "VENV=C:\Users\ASUS\.workbuddy\binaries\python\envs\aimindtree-llm\Scripts\python.exe"
 set "BASE=C:\Users\ASUS\.workbuddy\binaries\python\versions\3.13.12\python.exe"
-set "MODEL=qwen3:8b-8k"
-set "MODELFILE=%REPO%\llm_server\ollama\Modelfile.qwen3-8k"
+set "LLAMA_HOST=127.0.0.1"
+set "LLAMA_PORT=8085"
+set "LAUNCH=%REPO%\scripts\run_llama_server.bat"
 
 REM 清空代理：本机系统代理 127.0.0.1:44166 会把 127.0.0.1 的请求送给代理，
 REM 表现为「本地后端连不上」的假故障（服务端默认 trust_env=False，这里双保险）。
@@ -44,59 +48,44 @@ if exist "%VENV%" (
     echo     "%BASE%" -m pip install -r "%REPO%\llm_server\requirements.txt"
 )
 
-REM ---------- [1/3] Ollama 服务 ----------
-echo [llm_server] [1/3] checking Ollama ...
-where ollama >nul 2>&1
-if errorlevel 1 (
-    echo [llm_server] 找不到 ollama 命令。请先安装 Ollama: https://ollama.com/download
+REM ---------- [1/2] llama-server（本地推理后端） ----------
+echo [llm_server] [1/2] checking llama-server on %LLAMA_HOST%:%LLAMA_PORT% ...
+
+curl -s -m 3 http://%LLAMA_HOST%:%LLAMA_PORT%/health >nul 2>&1
+if not errorlevel 1 goto :llama_ready
+
+echo [llm_server] llama-server 未运行，正在启动（最小化窗口）...
+if not exist "%LAUNCH%" (
+    echo [llm_server] 找不到启动器: %LAUNCH%
     pause
-    exit /b 1
+    endlocal & exit /b 1
 )
+start "" /min "%LAUNCH%"
 
-ollama list >nul 2>&1
-if errorlevel 1 (
-    echo [llm_server] Ollama 未运行，正在启动 ollama serve ...
-    start "" /min ollama serve
-    set /a _tries=0
-    :wait_ollama
-    set /a _tries+=1
-    ollama list >nul 2>&1
-    if not errorlevel 1 goto :ollama_ready
-    if !_tries! geq 20 (
-        echo [llm_server] 等待 Ollama 就绪超时（20s）。请手动运行 ollama serve 后重试。
-        pause
-        exit /b 1
-    )
-    timeout /t 1 /nobreak >nul
-    goto :wait_ollama
+REM 轮询等待 /health 就绪。27B 模型加载 + 首次 CUDA 初始化需要几十秒，
+REM 这里给 60 次 * 3 秒 = 180 秒；磁盘慢时可以调大 _max。
+set /a _tries=0
+set /a _max=60
+:wait_llama
+set /a _tries+=1
+curl -s -m 3 http://%LLAMA_HOST%:%LLAMA_PORT%/health >nul 2>&1
+if not errorlevel 1 goto :llama_ready
+if !_tries! geq !_max! (
+    echo [llm_server] 等待 llama-server 就绪超时（180s）。
+    echo [llm_server] 请手动运行 scripts\run_llama_server.bat 看报错，或检查：
+    echo     1) %LAUNCH% 里的 LLAMA_DIR / 模型文件名是否正确
+    echo     2) 显存是否被别的程序占满（nvidia-smi）
+    pause
+    endlocal & exit /b 1
 )
-:ollama_ready
-echo [llm_server] Ollama OK
+timeout /t 3 /nobreak >nul
+goto :wait_llama
 
-REM ---------- [2/3] 模型 ----------
-echo [llm_server] [2/3] checking model %MODEL% ...
-ollama list | findstr /c:"%MODEL%" >nul
-if errorlevel 1 (
-    echo [llm_server] 模型 %MODEL% 不存在，正在创建（约 1-2 分钟）...
-    if not exist "%MODELFILE%" (
-        echo [llm_server] 找不到 Modelfile: %MODELFILE%
-        pause
-        exit /b 1
-    )
-    ollama create %MODEL% -f "%MODELFILE%"
-    if errorlevel 1 (
-        echo [llm_server] 模型创建失败。请确认基础模型 qwen3:8b 已 pull：
-        echo     ollama pull qwen3:8b
-        pause
-        exit /b 1
-    )
-    echo [llm_server] 模型 %MODEL% 创建完成
-) else (
-    echo [llm_server] 模型 %MODEL% 已存在
-)
+:llama_ready
+echo [llm_server] llama-server OK（http://%LLAMA_HOST%:%LLAMA_PORT%/health）
 
-REM ---------- [3/3] LLM Server ----------
-echo [llm_server] [3/3] starting LLM Server ...
+REM ---------- [2/2] LLM Server ----------
+echo [llm_server] [2/2] starting LLM Server ...
 echo [llm_server] repo: %REPO%
 echo.
 
@@ -105,9 +94,10 @@ echo.
 if errorlevel 1 (
     echo.
     echo [llm_server] exited with error. Common causes:
-    echo   1) dependencies missing  -^> pip install -r llm_server\requirements.txt
-    echo   2) port 8787 occupied    -^> run_llm_server.bat --port 8788
-    echo   3) config.yaml broken    -^> check llm_server\config.yaml
+    echo   1) dependencies missing  -> pip install -r llm_server\requirements.txt
+    echo   2) port 8787 occupied    -> run_llm_server.bat --port 8788
+    echo   3) config.yaml broken    -> check llm_server\config.yaml
+    echo   4) llama-server 掉了     -> 看那个最小化窗口的报错（显存不足最常见）
     pause
 )
 

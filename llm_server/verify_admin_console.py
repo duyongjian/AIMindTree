@@ -31,7 +31,8 @@
     **不可达代理 → 502（证明代理真的被用上）** / 清空后恢复 200 + **还原**；
 9. 静态资源挂载（``/admin``、``/static/*``）；
 10. 可选：真实链路 ``POST /v1/task/T1`` + ``POST /v1/chat``（blocking 与 SSE
-    两条路径都要进埋点）（``--live``，需要本机 Ollama 在跑，约 60s）。
+    两条路径都要进埋点）（``--live``，需要本机 llama.cpp 的 llama-server 在
+    127.0.0.1:8085 跑着；27B 本地推理很慢，实测约 3-10 分钟，请耐心等）。
 
 用法::
 
@@ -195,6 +196,19 @@ def check_health(c: TestClient) -> None:
     backends = body.get('backends') or []
     shape_ok = all(set(b) == _HEALTH_BACKEND_KEYS for b in backends)
     check(shape_ok, f'backends[{len(backends)}] 每项键集合不变', str(_HEALTH_BACKEND_KEYS))
+    # 2026-10-27：本地推理后端由 Ollama 换成 llama.cpp（llama-server 127.0.0.1:8085）。
+    # 这里钉死默认后端，防止有人把 config.yaml 的 default_backend 改回去而没人发现。
+    check(
+        body.get('default_backend') == 'llama_cpp',
+        "default_backend == 'llama_cpp'（本地 llama.cpp 为默认）",
+        str(body.get('default_backend')),
+    )
+    names = {b.get('name') for b in backends if isinstance(b, dict)}
+    check(
+        'llama_cpp' in names,
+        'backends[] 含 llama_cpp',
+        f'实际 {sorted(n for n in names if isinstance(n, str))}',
+    )
 
 
 def check_app_config(c: TestClient, secrets: dict[str, str]) -> dict:
@@ -1388,7 +1402,7 @@ def check_static(c: TestClient) -> None:
 
 
 def check_live_t1(c: TestClient) -> None:
-    print('\n[10] 真实链路 POST /v1/task/T1（--live，需要本机 Ollama 在跑）')
+    print('\n[10] 真实链路 POST /v1/task/T1（--live，需要本机 llama-server 在 127.0.0.1:8085 跑着）')
     note = ('牛顿第二定律：物体加速度的大小跟作用力成正比，跟物体的质量成反比，'
             '加速度的方向跟作用力的方向相同。公式 F=ma。')
     r = c.post('/v1/task/T1', json={'inputs': {'note_text': note}})
