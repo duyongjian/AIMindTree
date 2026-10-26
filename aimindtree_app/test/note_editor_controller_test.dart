@@ -138,6 +138,35 @@ void main() {
       c.dispose();
     });
 
+    test('引用首行 → 标题：主块在前、残余引用在后（块顺序 + 行引用形状迁移）', () {
+      // 与上一条互补：那条守 `li == 1`「只抬一行（残余在前）」；这条守 `li == 0`
+      // 时**残余块的插入位置**（主块在前）。顺序反了会在 `as HeadingBlock` 处直接抛
+      // TypeError，不是软断言 —— 将来若有人「顺手统一」成残余在前，这里必红。
+      final c = NoteEditorController(markdown: '> 一\n> 二');
+      final q = c.doc.blocks.single as QuoteBlock;
+      c.focusBlock(quoteLineRef(q.id, 0));
+      c.convertActiveTo(BlockType.heading, level: 1);
+
+      expect(c.doc.blocks, hasLength(2));
+      final h = c.doc.blocks[0] as HeadingBlock;
+      final rest = c.doc.blocks[1] as QuoteBlock;
+      expect(plainTextOf(h.runs), '一');
+      expect(h.level, 1);
+      expect(rest.lines, hasLength(1));
+      expect(plainTextOf(rest.lines.single), '二');
+      expect(h.id, q.id, reason: '主块占用原 id，残余引用才用新 id');
+      expect(c.markdown, '# 一\n\n> 二');
+
+      // 行引用形状迁移：`'q:0'`（引用行）→ `null`（块级）。标题不接受带 itemId 的
+      // 行引用（`_isValidRef` 要求 null），所以控制器必须重新锚定到主块第一行 ——
+      // 这正是「换类型后输入框消失」那个缺陷的根因形态，缺了这条断言看不出来。
+      expect(c.active, isNotNull);
+      expect(c.active!.blockId, h.id);
+      expect(c.active!.itemId, isNull);
+      expect(c.caretOf(c.active!), 0);
+      c.dispose();
+    });
+
     test('段落 → 列表后 active 必须指向新块的第一行（不许掉出编辑态）', () {
       // 回归：T4 接线时用探针发现的真缺陷 —— 换类型后行引用形状变了
       // （段落 → 列表多出 itemId），沿用旧 ref 会让该块「点完按钮输入框消失」。
