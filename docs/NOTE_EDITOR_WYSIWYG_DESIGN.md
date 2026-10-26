@@ -409,6 +409,7 @@ class RichLineController extends TextEditingController {
 | 列表 / 任务列表中的**非首项** | 删除本项，光标落到**前一项末尾**（不跨块合并） |
 | 列表 / 任务列表的**首项** | **降级**：该 item 从列表里脱离，成为独立段落（内容保留），不合并 |
 | 标题 / 引用第一行 / 代码块 / RawBlock | **降级为段落**（保留文本）。第二次退格才走合并 |
+| 引用的**非首行** | **并入上一行**（与「列表非首项并进前一项」同款：块结构、行数、marks 全不变，拼接 == 原文）。这是设计 §5.4 的原意，落地由 `block_actions.mergeBackward`（`itemIndex`）承担 |
 | 段落，上一个是段落 / 列表 / 引用 / 标题 | **合并**进上一个块末尾（列表→成为其新末项；引用→成为其新末行；标题/段落→文本拼接） |
 | 段落，上一个是代码块 / 表格 / 分割线 / 图片 / RawBlock | **删除上一个块**（等价于选中删除），光标留在当前段落头 |
 | 段落且没有上一个块 | 无操作（不触发 `Navigator.pop`） |
@@ -442,7 +443,8 @@ class RichLineController extends TextEditingController {
         caret' = caret.clamp(0, plainTextOf(newRuns).length)   // 内容不变 → 通常完全一致
 ```
 - 标题→列表→引用这类互转**只改类型不改文本**，所以 `caret' == caret` 严格成立。
-- 一个 `QuoteBlock` 多行 → 转段落时，只有光标所在行变成段落，其余行仍留在原 quote 块里（与 §5.4 列表降级同款规则）。
+- 一个 `QuoteBlock` 多行 → 转段落时，只有光标所在行变成段落，其余行仍留在原 quote 块里（主块占用原 id → 光标不丢）。落地签名：`setBlockType(doc, at, type, {headingLevel, itemIndex})`，`itemIndex` 即光标所在行号。
+  - **块顺序（as-built，`_liftFromQuote`）**：`itemIndex == 0` → **主块在前、残余引用在后**；`itemIndex > 0` → **残余引用在前、主块在后**。两种排法都由「最后一块接管原块的 `trailingGap`、中间那块用 `_gapOf`」保证分隔不串味。参考实现期控制器曾**一律**把残余排前面，导致「首行转标题」顺序是反的；`8230f54` 改走纯函数后与本节描述一致。
 
 ### 5.7 非纯文本块的编辑入口
 
@@ -739,6 +741,42 @@ _openToc() {
   - 表格增删行列后列数对齐（短行补空串），`serializeDoc` 输出仍是合法 GFM
   - 反向验证：把 `splitBlock` 的裁剪下标改坏一处，测试必须红
 
+**落地后实际公开签名（`924c76a`，T3/T4/T5 一律照此调用）**
+
+```dart
+// 定位：块用 BlockRef(blockId, itemId: 列表项 id)；引用行没有 id，靠 itemIndex 传行号。
+({NoteDoc doc, BlockRef caret}) splitBlock(NoteDoc doc, BlockRef at,
+    {int? caretOffset, int? itemIndex});
+({NoteDoc doc, BlockRef caret}) mergeBackward(NoteDoc doc, BlockRef at,
+    {int? itemIndex});
+NoteDoc setBlockType(NoteDoc doc, BlockRef at, BlockType type,
+    {int? headingLevel, int? itemIndex});
+NoteDoc toggleTaskItem(NoteDoc doc, BlockRef at, String itemId, bool done);
+InlineRuns applyInlineMark(InlineRuns runs, int start, int end, InlineMarks mark,
+    {required bool on});                      // 纯转发 inline_projection.applyMark
+NoteDoc insertTableRow(NoteDoc doc, BlockRef table, int afterRow);
+NoteDoc removeTableRow(NoteDoc doc, BlockRef table, int row);
+NoteDoc insertTableColumn(NoteDoc doc, BlockRef table, int afterCol);
+NoteDoc removeTableColumn(NoteDoc doc, BlockRef table, int col);
+```
+
+> 与原设计的命名差异（以代码为准）：`convertBlockType` → **`setBlockType`**、`updateTaskChecked` → **`toggleTaskItem`**、`toggleMark/applyMarkRange` → **`applyInlineMark`**；表格是 4 个函数（行/列 × 增/删），**没有**独立的 `setTableCell`。
+>
+> **为什么表格没有 `setTableCell`（分层理由，不是漏写）**：表格四函数只做**结构**（增删行列、补齐 `aligns`、保证「每行列数 == 最大列数」，纯 `List` 操作），不碰单元格里的行内片段；而单元格**文本写入**属于内容编辑，必须与段落/列表项走**同一条 L1 管线**（`projectRuns` 投影 → 重造 `TableBlock` 且 `source = null` → 走规范化序列化）。两类职责混在一个文件里，会出现第二套 `source` 处理逻辑，所以单元格写入留在控制器（`setTextOfBlock` + `tableCellRef(blockId,row,col)`）。
+>
+> 收敛口子（**暂不实现**，避免死代码）：将来若控制器那条路径开始重复 L1 逻辑（重造 `TableBlock` / 置 `source = null` / 失败回退），再补纯函数 `setTableCellRuns(NoteDoc doc, BlockRef table, int row, int col, InlineRuns runs)`，签名与表格四函数同族、不破坏现有调用。
+>
+> `setBlockType` **不含**「同一类型再点一次回落段落」的开关语义（那是工具栏/T3 的事，否则函数不再幂等）；`splitBlock` / `mergeBackward` 返回 `({doc, caret})` 记录，caret 只给块级锚点，块内偏移由调用方按语义推导（`BlockRef` 装不下偏移）。
+
+**实际交付（commit `31ac7f3` + `924c76a`，`block_actions_test.dart` 71 条）**
+
+| 提交 | 内容 | 测试 |
+| --- | --- | --- |
+| `31ac7f3` | T2 主体：`splitBlock` / `mergeBackward` / `setBlockType` / 表格四函数 / 任务勾选 / 行内标记 | 67 |
+| `924c76a` | T2b：**引用非首行退格**（`mergeBackward` 改两级：非首行并入上一行，块结构/行数/marks 不变，拼接 == 原文）+ **`setBlockType` 新增 `itemIndex`**（只抬光标所在行，残余引用按阅读顺序排在主块前/后，主块占原 id 故光标不丢） | 71 |
+
+**反向验红记录（两次，均已改回）**：①把段落分裂裁剪改成 `_slice(runs, off + 1, len)`（丢 1 字）→ 4 条红；②把引用非首行分支的 `_concat(lines[li-1], lines[li])` 改成 `lines[li]`（丢上一行）→ 2 条红。
+
 ### T3 — 渲染与控制层：NoteEditorController + BlockView + markdown_render 瘦身 【P0】
 
 - **涉及文件**
@@ -751,6 +789,7 @@ _openToc() {
   - `test/markdown_render_test.dart`（**改写**：保留原 10 条语义 + `find.byType(Table)` → `find.byType(MarkdownTableView)` + 新增删除线/任务列表/图片 Blob 三条）
 - **依赖**：T1 + T2（T2 只需签名冻结即可并行）
 - **实现顺序**：迁移渲染代码到 `block_view.dart`（保留全部现有 style 常量）→ `NoteEditorController` → `note_editor_body.dart` → 瘦身 `markdown_render.dart` → 补齐删除线/任务列表 → 表格改 `Row/Column` + `MarkdownTableView` → 测试
+  - ⚠️ **as-built 与原设计不一致**：最终**保留 Flutter `Table` widget**（换取既有 `find.byType(Table)` 断言原样通过），未引入 `MarkdownTableView`；单元格编辑态用 `TextField` 覆盖单格。取舍理由与后续代价见本文档「实施结果与偏差 §3 第 2 条」。
 - **验收标准**
   - `flutter test test/markdown_render_test.dart` 全绿：**原有 10 条语义一条不少**；新增「删除线有 `lineThrough`」「`- [ ] ` 不渲染出 `• [ ]` 且出现 `Checkbox`」「图片缺失时 `broken_image` + 整篇不崩」
   - `test/note_editor_controller_test.dart` 覆盖：`setMarkdown → markdown` 恒等；`convertActiveTo` 后 markdown 变化且字符不丢；`NoteDoc.empty()` 序列化为 `''`；`focusBlock` 后 `active` 正确
@@ -1123,6 +1162,39 @@ sequenceDiagram
     P->>P: _lastBody = md; _dirty = false
 ```
 
+### 14.3 附录：`NoteEditorController` 的对外面（as-built，`8230f54`）
+
+> 供后来者判断「改这个功能该调哪个方法」，避免去翻 1500 行实现。**T4 复核过：接线层零改动仍全绿，签名一个没变。**
+
+```dart
+// 读 / 状态
+String get markdown;   NoteDoc get doc;   BlockRef? get active;   bool get isEditing;
+Block Block/blockOf(BlockRef);  String textOf(BlockRef);  InlineRuns runsOf(BlockRef);
+TextSelection selectionOf(BlockRef);  int caretOf(BlockRef);  String selectionText();
+TextEditingController lineControllerFor(BlockRef);  FocusNode focusNodeFor(BlockRef);
+
+// 生命周期 / 焦点
+void setMarkdown(String md);   void focusBlock(BlockRef, {int caret, bool selectAll});
+void blur();
+
+// 行内编辑（打字管线：projectRuns → 提交 → L2）
+void onLineChanged(BlockRef, String newText);   void markSoftBreak(BlockRef);
+void toggleMark(InlineMarks);   void clearPendingMarks();
+void setLink(...);   void setLinkOn(BlockRef, String label, String url, {int start, int end});
+
+// 块级语义（全部委托 block_actions）
+void convertActiveTo(BlockType, {int? headingLevel, int? itemIndex});
+void convertActiveToCode();   void splitActive();   void backspaceAtStart();
+void toggleTaskItem(BlockRef, String itemId, bool done);
+
+// 插入
+void insertImageBlock(String assetId, String alt);
+void insertTableBlock({int rows, int cols});   void insertDividerBlock();
+void appendParagraphAndFocus();   void appendTableRow(BlockRef);
+```
+
+> 不在这个面上的功能（如「删除块」「删表格行列」）请直接用 `block_actions` 的纯函数再 `setDoc`，不要在控制器里加旁路。
+
 ---
 
 ## 15. 交付清单核对
@@ -1153,11 +1225,14 @@ sequenceDiagram
 | 设计基线 | `24f96b7` | 本文档（§1–§15） |
 | T1 数据层 | `2d55e88` | `block_model.dart` / `markdown_block_parser.dart` / `inline_projection.dart` |
 | T2 动作层 | `31ac7f3` | `block_actions.dart`（`splitBlock` / `mergeBackward` / `setBlockType` / 表格增删行列） |
+| T2b 动作层补强 | `924c76a` | 引用非首行退格改两级 + `setBlockType` 增 `itemIndex`（只抬光标所在行），收回两处能力缺口 |
 | T3 渲染与控制层 | `2ff5ea1` | `note_editor_controller.dart` / `block_view.dart` / `note_editor_body.dart`，`markdown_render.dart` 瘦身为 shim |
 | T4 接线层 | `8a9be67` | 去掉左右双框，工具栏 / 页面改接 `NoteEditorController` |
 | T3 补丁 | `86c2754` | `_isValidRef` 收紧（多行块拒绝块级 ref）+ 2 条回归 |
 | T4 补丁 | `0e59e96` | 第 ⑧ 条守卫：目录跳转必须真的落到标题块 |
 | T5a 收敛 | `fe3e276` | 控制器块级原语改走 `block_actions`，删掉双实现（−521 行） |
+| T5c 收尾 | `8230f54` | 删掉控制器里 `_mergeQuoteLineUp` / `_extractQuoteLineAsBlock`（连带 `_makeBlock` / `_idPrefixOf`），委托 `mergeBackward(itemIndex:)` / `setBlockType(itemIndex:)`；修掉 `_liftFromQuote` 残余引用顺序反了（首行被抬出时）。`git show --numstat`：controller +33 / −149，测试 +18 / −0 |
+| 文档回写（doc-only） | `d9bb2e0` / `01e8fe0` / `090f917` | 实施结果与偏差回写、测试数表格修正（只保留可复核的阶段）、共享 worktree 的 git 红线与代理坑 |
 
 ### 2. 测试
 
@@ -1169,21 +1244,28 @@ sequenceDiagram
 | T3 补丁 | 874 |
 | T4 补丁 | 875 |
 | T5a | **878**（全绿） |
+| T2b | **882**（全绿） |
+| T5c | **883**（全绿；+1 为 T3 新增的 `引用首行退格：降级成段落，其余行仍留在引用里`） |
 
-闸门：`dart run tool/analyze_inproc.dart` → 155 文件 0 error / 0 warning（3 条既有 `withOpacity` info）；`flutter test` → 878/878；L1 字节直通保持（20 条语料逐字节相等 + 端到端「打开不动 → 保存字节相同」用例）。
+闸门：`dart run tool/analyze_inproc.dart` → 155 文件 0 error / 0 warning（3 条既有 `withOpacity` info）；`flutter test` → 883/883（`8230f54`/T5c 后）；L1 字节直通保持（20 条语料逐字节相等 + 端到端「打开不动 → 保存字节相同」用例）。
 
-> 注：本机 `http_proxy/https_proxy` 会拦住 `flutter_tester` 的本地 WebSocket（报 `Invalid WebSocket upgrade request`），跑测试需先 `env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY flutter test`。
+> 注：本机 `http_proxy/https_proxy` 会拦住 `flutter_tester` 的本地 WebSocket（报 `Invalid WebSocket upgrade request`），跑测试需先 `env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY flutter test`。计数以最后一行 `+NNN: All tests passed!` 为准，不要读中间的 `+NNN` 进度行（并发跑会重复打印，容易读错）。
 
 ### 3. 关键偏差（与设计原文的差异，均是落地时的取舍）
 
-1. **块级语义只有一份实现（T5a 收敛）**。原计划 T3 先本地实现、T5 再接 `block_actions`；实际 T5a 完成后，Enter 分裂 / 行首退格 / 换类型 / 任务勾选 / 表格加行全部委托给 `block_actions`，控制器只剩行引用与 caret 映射、焦点编排、序列化缓存。三处例外保留本地并注释：**引用非首行退格**（`mergeBackward` 会把该行抬出引用块，设计 §5.4 只要求首行降级）、**引用换类型**（`setBlockType` 的引用分支只抬第一行，签名里没有行下标）、**表格单元格 Enter**（跳下一格，`splitBlock` 的表格分支只做表尾追加行）。顺带把两处与设计不符的旧行为改正并加测试锁住：段落跟在列表后退格 = 成为列表新末项（§5.4）、无序/有序/任务互转 = 整块保留且条目 id 全复用（§5.6）。
+1. **块级语义只有一份实现（T5a + T5c 收尾 `8230f54` 收敛完毕）**。Enter 分裂 / 行首退格 / 换类型 / 任务勾选 / 表格加行全部委托 `block_actions`，控制器只剩行引用与 caret 映射、焦点编排、序列化缓存。参考实现期曾在控制器里保留的**引用块两处**能力缺口，已先在纯函数层补齐（`924c76a`/T2b：`mergeBackward` 的引用非首行「并入上一行」、`setBlockType` 的 `itemIndex`），再于 `8230f54` 删掉控制器侧的 `_mergeQuoteLineUp` / `_extractQuoteLineAsBlock`（连带 `_makeBlock` / `_idPrefixOf`）。引用行号一律从 `BlockRef.itemId` 的 `'q:<n>'` 解码后**走 `itemIndex` 传入**，不把编码串当 `itemId` 传（这是本轮最后清掉的一个坑）。**唯一保留本地的边界是表格单元格 Enter**：`splitBlock` 的表格分支只做「表尾追加行」，单元格间跳格是控制器职责（`_enterTable`），T2 的注释里本来就这么划。顺带把两处与设计不符的旧行为改正并加测试锁住：段落跟在列表后退格 = 成为列表新末项（§5.4）、无序/有序/任务互转 = 整块保留且条目 id 全复用（§5.6）。
+   - **「委托语义等价」的可引证证据**：控制器里四条端到端用例 —— `引用第二行退格：并入上一行`、`引用首行退格：降级成段落，其余行仍留在引用里`（`8230f54` 补的，此前首行那半条没有端到端守卫）、`多行引用：分裂的是光标那一行（行号必须走 itemIndex，不能当 itemId 传）`、`引用多行只把光标那一行拎出来（其余行留在原块）` —— **测试一行未改，实现从控制器本地换成 `block_actions` 纯函数，仍然全绿**。它们以前守的是控制器本地实现、现在守的是 `block_actions`，是「行为契约没变、只换了实现位置」最直接的证据（强于口头声明「我照语义对齐了」）。控制器测试单文件 42 条全绿。
 2. **表格仍用 Flutter `Table` widget**，未换 `MarkdownTableView`：换取既有 `find.byType(Table)` 断言原样通过，单元格编辑态用 `TextField` 覆盖单格。
+   - **不影响 T2 的块级语义**：`block_actions` 对渲染完全无感——它只读写 `TableBlock` 的 `rows` / `aligns` / `hasHeader` 数据，import 只有 `block_model` / `inline_projection(show applyMark)` / `markdown_block_parser(show serializeInline)`，**不 import flutter**。将来换 `MarkdownTableView`（做单元格 Tab 跳转、表格工具条、列宽拖拽）**不需要改 `block_actions` 一行**，只动 `block_view.dart` + 控制器的焦点编排。
 3. **目录仍用 `extractHeadings(markdown)` 的字符偏移**做数据源，再映射成「块引用」；没有另建块级大纲模型。
 4. **链接对话框在页面内自实现**（`_showLinkDialog`），没有复用系统组件；确认后走 `setLinkOn(ref, label, url, start:, end:)`（T4 新增），避免对话框抢焦点导致 `active` 变 null。
 5. **行内格式覆盖 `buildTextSpan`**：编辑态文本是纯文本（看不到 `#` / `-` / `>` / `**`），但加粗 / 斜体 / 行内代码 / 删除线照样带样式；组字期回退父类，runs 落后一帧时按长度钳制，避免 RangeError。
 6. **补齐两个历史渲染缺口**：删除线（`lineThrough`）与 `- [ ]` 任务列表（Checkbox），两者在只读态与编辑态共用同一套样式函数。
+7. **「编辑态仍显示行内格式」在 widget 测试层拿不到直接证据（T4 发现，重要）**。控制器 `RichLineController.buildTextSpan` 在 Flutter widget 测试里**一律返回 plain `TextSpan`** —— `TextField` 是自己拼 `EditableText` 再套样式，测试拿不到控制器层的 mark 信息。所以 §7 第 5 条那条能力**在 widget 层无法被断言**。T4 做了反向验证：把 `buildTextSpan` 临时改成返回普通 `TextSpan` → **3 条红**，证明这段代码确实活着、只是测试抓不到。因此这条能力的唯一证据是 `note_editor_controller_test.dart` 里对 `InlineMarks` 的断言（判断文本里有没有 `**` 星号），属**间接证明，不是视觉证明**。真机目视仍待做（见 §4 延后项）。
+8. **已知限制 · 表格单元格内不显示行内格式**：单元格编辑态**不走 `RichLineController`**（复用 `Table` 里 Cell 的 `TextField`，绑定的是 `EditableText.buildTextSpan`），所以单元格里看不到加粗 / 斜体 / 删除线。**分期取舍，不是 bug**。与本条 2「单元格文本写入不在 `block_actions`」是同一根因的两面：它走的是**内容编辑管线**，不是块级结构语义。
+9. **测试规则 · 行内格式必须按「行级 ref」断言（T4 提炼，写给后来者）**：列表项用真实 `itemId`、引用行用 `'q:<n>'`、表格用 `'t:<row>:<col>'`。**用块级 `BlockRef` 断言会把前面几行也算进去，断言会假绿。** 这条与偏差 8 是配套的——块级 ref 在 `_isValidRef` 收紧后本身也会被拒绝。
 
-### 4. 延后项（需真机目视 / 真机输入法，本轮未做）
+### 4. 延后项（本轮未做；带触发条件的条目见末尾）
 
 - 图片块、分割线的**点击浮层**（替换图片 / 删除）尚未实现，只做了插入；
 - 代码块**语言选择器**（当前显示语言标注，不可切换）；
@@ -1191,6 +1273,10 @@ sequenceDiagram
 - **Ctrl+A 提示**（全选范围 = 当前行，未给用户提示）；
 - **Enter / Shift+Enter / Backspace 与中文输入法组字**在桌面 + Android 真机上的逐条确认（设计 §12 R-8：软键盘可能绕过 `onKeyEvent`）；
 - 长文滚动性能、图片替换删除、表格行列增删的**工具条入口**（控制器已提供 `appendTableRow`；删行列走 `block_actions` 的 `removeTableRow/removeTableColumn`，UI 未接）。
+- **表格换 `MarkdownTableView`**（含单元格 Tab 跳转 / 表格工具条 / 列宽拖拽）。触发条件：**要做上述任一交互时**。
+  - 代价已核实为**纯渲染层**：`block_actions` 对它完全无感（只读写 `TableBlock` 的 `rows`/`aligns`/`hasHeader`，**不 import flutter**，见偏差 2），换掉**不需要改 `block_actions` 一行**，只动 `block_view.dart` + 控制器焦点编排。
+- **性能四象限**（`block_view` 只读态/编辑态的重建粒度，即哪些块该按 `active` 精确重建、哪些该整列重建）。触发条件：**笔记 ≥ 3000 行 或 单块 > 50 行**。
+- ⚠️ 上面两条都属**性能 / 呈现层优化**：真正动手要重新打开 **L1 字节直通**（20 条语料逐字节 + 端到端用例守着）与 **caret 映射**（`_isValidRef` + 行级 ref 端到端用例守着）这两条**已验证红线**，当前收益不匹配风险，因此只记不排期。
 
 ### 5. 交付清单核对（补充）
 
