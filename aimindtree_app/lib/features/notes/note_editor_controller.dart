@@ -15,12 +15,17 @@
 /// - 滚动容器与按键路由的挂载 → `note_editor_body.dart`；
 /// - 工具栏按钮与页面接线 → T4（`markdown_toolbar.dart` / `note_editor_page.dart`）。
 ///
-/// **与 T2 `block_actions.dart` 的关系（并行约定）**
-/// T2 与本任务并行开工，为避免互相阻塞，块级原语在**本文件内本地实现**
-/// （只依赖 `block_model` / `markdown_block_parser` / `inline_projection`）。
-/// T4 的工具栏会改走 `block_actions.dart` 的纯函数；届时应把本文件的
-/// `_splitXxx` / `_mergeXxx` / `_convertXxx` 实现替换成对 `block_actions` 的调用，
-/// 本文件只保留「状态 + 焦点/光标编排 + 序列化缓存」这三件事。
+/// **与 T2 `block_actions.dart` 的关系（T5a 已收敛）**
+/// 块级语义（Enter 分裂 / 行首退格回并 / 换类型 / 任务勾选 / 表格增删行列）
+/// **只有一份实现**：`block_actions.dart` 里的纯函数 `splitBlock` / `mergeBackward` /
+/// `setBlockType` / `toggleTaskItem` / `insertTableRow|removeTableRow|insertTableColumn|
+/// removeTableColumn`。本文件只负责：
+/// 1. **行引用与 caret 映射**（`BlockRef` ↔ 块内某一行，含引用行 `'q:<n>'` 的换算）；
+/// 2. **焦点编排**（改完之后点哪个输入框、光标落在第几个字符）；
+/// 3. 富文本行控制器 / 序列化缓存 / `notifyListeners`。
+///
+/// 少数 block_actions 未覆盖（或语义与设计 §5.4 / §5.6 不一致）的边界仍留在本文件，
+/// 每处都有注释说明原因（引用非首行退格、引用「按光标行」换类型、表格单元格跳格）。
 ///
 /// **L1 字节直通（红线）**
 /// `setMarkdown(md)` 后 `markdown == md`（`\r\n` 归一化后逐字节相等）：
@@ -34,6 +39,7 @@ import 'package:flutter/material.dart' show Colors, FontStyle, FontWeight, TextD
 import 'package:flutter/services.dart' show HardwareKeyboard;
 import 'package:flutter/widgets.dart';
 
+import 'block_actions.dart' as actions;
 import 'block_model.dart';
 import 'inline_projection.dart';
 import 'markdown_block_parser.dart';
@@ -759,33 +765,78 @@ class NoteEditorController extends ChangeNotifier {
 
   /// 行首退格（Notion 式两级：先降级、再合并）。返回 true = 已消费该按键。
   ///
-  /// 设计 §5.4 的全部情形都在这里；为什么必须「先降级再合并」见设计原文。
+  /// 语义在 `block_actions.mergeBackward`：列表非首项并项 / 列表首项降级成段落 /
+  /// 标题降级 / 段落并入上一块（上一块不可拼接就删掉它）/ 代码块与原文块降级。
+  /// 这里只做「哪些块不走回并」的分流与「改完聚焦哪一行、光标落哪」。
   bool backspaceAtStart() {
     final ref = _active;
     if (ref == null) return false;
     final b = blockOf(ref);
     if (b == null) return false;
+
     switch (b) {
-      case ParagraphBlock():
-        return _mergeBackward(ref);
-      case HeadingBlock():
-        return _demoteToParagraph(ref);
+      case TableBlock():
+      case DividerBlock():
+      case ImageBlock():
+        // 单元格空：不跨单元格合并，也不跨块（设计 §5.4 最后一行）。
+        return false;
       case QuoteBlock():
-        return _backspaceInQuote(ref);
+        // 引用非首行：块内并入上一行。`mergeBackward` 的引用分支会把该行**抬出**
+        // 引用块变成独立段落（设计只在「引用第一行」要求降级）→ 这一小块留在本地。
+        final i = quoteLineIndexOf(ref) ?? 0;
+        if (i > 0) return _mergeQuoteLineUp(ref, b, i);
+        break;
+      case ParagraphBlock():
+      case HeadingBlock():
       case BulletListBlock():
       case OrderedListBlock():
       case TaskListBlock():
-        return _backspaceInList(ref);
       case CodeBlock():
       case RawBlock():
-        return _demoteToParagraph(ref);
-      case TableBlock():
-        // 单元格空：不跨单元格合并，也不跨块（设计 §5.4 最后一行）。
-        return false;
-      case DividerBlock():
-      case ImageBlock():
-        return false;
+        break;
     }
+
+    final mergedText = textOf(ref);
+    final result = actions.mergeBackward(
+      _doc,
+      ref,
+      // 引用第一行 → 降级（行号走 itemIndex，不能把 `'q:0'` 当 itemId 传）。
+      itemIndex: b is QuoteBlock ? 0 : null,
+    );
+    if (identical(result.doc, _doc)) return false;
+    _commit(result.doc);
+
+    final target = _rowRefFor(result.caret);
+    focusBlock(target, caret: _caretInMergedRow(target, mergedText));
+    return true;
+  }
+
+  /// 把 `mergeBackward` 返回的 caret 翻成控制器要求的行引用。
+  ///
+  /// 多行块没有行 id，`block_actions` 只能返回块级 ref：段落并入引用块时内容落在
+  /// **末行**，所以引用块的块级 ref 一律解释成「最后一行」。其余情形返回的已经是
+  /// 有效行引用，原样透传。
+  BlockRef _rowRefFor(BlockRef ref) {
+    if (_isValidRef(ref)) return ref;
+    final b = _blockById(ref.blockId);
+    if (b is QuoteBlock && b.lines.isNotEmpty) {
+      return quoteLineRef(ref.blockId, b.lines.length - 1);
+    }
+    return ref;
+  }
+
+  /// 回并之后光标落在哪一行的第几个字符。
+  ///
+  /// 只有「拼到上一行末尾」的情形才落在拼接处（= 回并后长度 − 被并入的文本长度）；
+  /// 「成为新末行 / 新末项」一律落在行首。判据：拼接后该行一定以被并入文本结尾且
+  /// 更长；而「新末行 / 新末项」的内容就是被并入的文本本身（长度相等）→ 不会误判。
+  int _caretInMergedRow(BlockRef target, String mergedText) {
+    final rowText = textOf(target);
+    if (mergedText.isEmpty) return rowText.length;
+    if (rowText.length > mergedText.length && rowText.endsWith(mergedText)) {
+      return rowText.length - mergedText.length;
+    }
+    return 0;
   }
 
   // ===== 插入 =====
@@ -837,39 +888,28 @@ class NoteEditorController extends ChangeNotifier {
     if (b is! TaskListBlock) return;
     final i = _taskIndex(b.items, ref.itemId);
     if (i < 0) return;
-    final items = <TaskItem>[...b.items];
-    items[i] = items[i].copyWith(checked: !items[i].checked);
-    final idx = _indexOfBlock(b.id);
-    if (idx < 0) return;
-    _replaceRange(idx, 1, <Block>[
-      TaskListBlock(id: b.id, trailingGap: b.trailingGap, items: items),
-    ]);
+    final next = actions.toggleTaskItem(
+      _doc,
+      ref,
+      b.items[i].id,
+      !b.items[i].checked,
+    );
+    if (identical(next, _doc)) return;
+    _commit(next);
   }
 
   // ===== 表格 =====
 
   /// 表格末尾追加一行（Enter 在最后一格时调用；也供 T5 的表格工具条复用）。
+  ///
+  /// 结构变更（含列数与 `aligns` 补齐）走 `block_actions.insertTableRow`；
+  /// 聚焦留给调用方（`_enterTable` 要聚焦到新行首格）。
   void appendTableRow(BlockRef ref) {
     final b = blockOf(ref);
     if (b is! TableBlock) return;
-    final idx = _indexOfBlock(b.id);
-    if (idx < 0) return;
-    final cols = _columnCount(b);
-    final rows = <List<InlineRuns>>[
-      for (final row in b.rows) <InlineRuns>[...row],
-    ];
-    rows.add(<InlineRuns>[
-      for (var c = 0; c < cols; c++) const <InlineNode>[TextRun('')],
-    ]);
-    _replaceRange(idx, 1, <Block>[
-      TableBlock(
-        id: b.id,
-        hasHeader: b.hasHeader,
-        aligns: b.aligns,
-        trailingGap: b.trailingGap,
-        rows: rows,
-      ),
-    ]);
+    final next = actions.insertTableRow(_doc, ref, b.rows.length - 1);
+    if (identical(next, _doc)) return;
+    _commit(next);
   }
 
   // ===== 文本写回（内部） =====
@@ -920,144 +960,64 @@ class NoteEditorController extends ChangeNotifier {
 
   // ===== 回车语义 =====
 
+  /// 语义化回车（在活动行光标处）。
+  ///
+  /// 块级语义**全部**在 `block_actions.splitBlock`（段落 / 标题 / 引用 / 三类列表 /
+  /// 代码块 / 表格 / 图片 / 分割线的分支都在那边，只此一份实现）。
+  /// 这里只做三件事：分流「不该分裂的块」、喂对 `caretOffset` / `itemIndex`、
+  /// 决定改完聚焦哪一行。
   void _handleEnter(BlockRef ref, int caret) {
     final b = blockOf(ref);
     if (b == null) return;
+
     switch (b) {
-      case ParagraphBlock(:final runs):
-        _splitSingleLine(ref, b, runs, caret);
-      case HeadingBlock(:final runs):
-        // 标题回车 → 下方新段落（避免连写标题）。
-        _splitSingleLine(ref, b, runs, caret);
+      case TableBlock():
+        // Enter 在表格里是「跳到下一格」，只有到表尾才追加行；`splitBlock` 的表格分支
+        // 只会「追加一行」（T2 也把单元格跳格标为控制器职责）→ 这一小块留在本地。
+        _enterTable(ref);
+        return;
+      case CodeBlock():
+      case RawBlock():
+        // 代码块 / 原文块的换行就是软换行（`onLineChanged` 已直接接受）；
+        // 代码块的「末空行退出」走 [_exitCodeBlock]，不从这里分裂。
+        return;
+      case ParagraphBlock():
+      case HeadingBlock():
       case QuoteBlock():
-        _enterQuote(ref, caret);
       case BulletListBlock():
       case OrderedListBlock():
       case TaskListBlock():
-        _enterList(ref, caret);
-      case CodeBlock():
-      case RawBlock():
-        // 已由 onLineChanged 直接接受成软换行。
-        break;
-      case TableBlock():
-        _enterTable(ref);
       case DividerBlock():
       case ImageBlock():
-        _insertParagraphAfter(ref);
+        break;
     }
-  }
 
-  /// 段落 / 标题：按光标分裂，后半段成为新的**段落**。
-  void _splitSingleLine(BlockRef ref, Block b, InlineRuns runs, int caret) {
-    final total = plainTextOf(runs).length;
-    final c = caret.clamp(0, total);
-    final idx = _indexOfBlock(b.id);
-    if (idx < 0) return;
-    final head = sliceRuns(runs, 0, c);
-    final tail = sliceRuns(runs, c, total);
-    final Block first;
-    if (b is HeadingBlock) {
-      first = HeadingBlock(
-        id: b.id,
-        level: b.level,
-        trailingGap: '\n\n',
-        runs: head,
-      );
-    } else {
-      first = ParagraphBlock(id: b.id, trailingGap: '\n\n', runs: head);
-    }
-    final second = ParagraphBlock(
-      id: newBlockId('p'),
-      trailingGap: b.trailingGap,
-      runs: tail,
+    // 引用行的行号编码在 `BlockRef.itemId`（`'q:<n>'`）里，而 `splitBlock` 要的是下标
+    // 参数 → 必须把行号取出来走 `itemIndex`（把 `'q:2'` 当 itemId 传会静默失效）。
+    // 列表项的 itemId 是真 id，`splitBlock` 自己就能定位，不需要 itemIndex。
+    final lineIndex = b is QuoteBlock ? quoteLineIndexOf(ref) : null;
+
+    final result = actions.splitBlock(
+      _doc,
+      ref,
+      caretOffset: caret,
+      itemIndex: lineIndex,
     );
-    _replaceRange(idx, 1, <Block>[first, second]);
-    focusBlock(BlockRef(second.id));
+    if (identical(result.doc, _doc)) return;
+    _commit(result.doc);
+    focusBlock(_splitTargetOf(b, lineIndex, result.caret));
   }
 
-  /// 引用：块内新增一行；空行回车 → 该行退出引用成为段落，并在下方再插空段落。
-  void _enterQuote(BlockRef ref, int caret) {
-    final b = blockOf(ref);
-    if (b is! QuoteBlock) return;
-    final i = quoteLineIndexOf(ref) ?? 0;
-    final idx = _indexOfBlock(b.id);
-    if (idx < 0) return;
-    final lines = <InlineRuns>[...b.lines];
-    final line = i < lines.length ? lines[i] : const <InlineNode>[];
-    final text = plainTextOf(line);
-    final c = caret.clamp(0, text.length);
-
-    if (text.isEmpty) {
-      lines.removeAt(i);
-      final para = ParagraphBlock(
-        id: newBlockId('p'),
-        trailingGap: b.trailingGap,
-        runs: const <InlineNode>[],
-      );
-      if (lines.isEmpty) {
-        _replaceRange(idx, 1, <Block>[para]);
-      } else {
-        _replaceRange(idx, 1, <Block>[
-          QuoteBlock(id: b.id, trailingGap: '\n\n', lines: lines),
-          para,
-        ]);
-      }
-      focusBlock(BlockRef(para.id));
-      return;
+  /// 分裂后该聚焦哪一行。
+  ///
+  /// 段落 / 标题 / 列表 / 图片 / 分割线：`splitBlock` 返回的就是新行引用，直接用。
+  /// 引用行是唯一例外 —— 多行块没有行 id，`splitBlock` 只能给「块级」ref，这里按
+  /// 「新行紧跟原行」补成行引用（原行是空行时该行已退出引用，返回的 caret 本身有效）。
+  BlockRef _splitTargetOf(Block before, int? lineIndex, BlockRef caret) {
+    if (before is QuoteBlock && !_isValidRef(caret)) {
+      return quoteLineRef(before.id, (lineIndex ?? 0) + 1);
     }
-
-    lines[i] = sliceRuns(line, 0, c);
-    lines.insert(i + 1, sliceRuns(line, c, text.length));
-    _replaceRange(idx, 1, <Block>[
-      QuoteBlock(id: b.id, trailingGap: b.trailingGap, lines: lines),
-    ]);
-    focusBlock(quoteLineRef(b.id, i + 1));
-  }
-
-  /// 列表（无序 / 有序 / 任务）：块内分裂成两项；空项回车 → 「列表收尾」成段落。
-  void _enterList(BlockRef ref, int caret) {
-    final shape = _shapeOf(blockOf(ref));
-    if (shape == null) return;
-    final i = _idIndex(shape.ids, ref.itemId);
-    if (i < 0) return;
-    final idx = _indexOfBlock(shape.block.id);
-    if (idx < 0) return;
-    final text = plainTextOf(shape.runs[i]);
-    final c = caret.clamp(0, text.length);
-
-    if (text.isEmpty) {
-      final ids = <String>[...shape.ids]..removeAt(i);
-      final runs = <InlineRuns>[...shape.runs]..removeAt(i);
-      final checked = <bool>[...shape.checked]..removeAt(i);
-      final para = ParagraphBlock(
-        id: newBlockId('p'),
-        trailingGap: shape.block.trailingGap,
-        runs: const <InlineNode>[],
-      );
-      if (ids.isEmpty) {
-        _replaceRange(idx, 1, <Block>[para]);
-      } else {
-        _replaceRange(idx, 1, <Block>[
-          shape.rebuild(ids: ids, runs: runs, checked: checked, gap: '\n\n'),
-          para,
-        ]);
-      }
-      focusBlock(BlockRef(para.id));
-      return;
-    }
-
-    final ids = <String>[...shape.ids];
-    final runs = <InlineRuns>[...shape.runs];
-    final checked = <bool>[...shape.checked];
-    runs[i] = sliceRuns(shape.runs[i], 0, c);
-    final newId = newBlockId(shape.type == BlockType.taskList ? 'ti' : 'li');
-    ids.insert(i + 1, newId);
-    runs.insert(i + 1, sliceRuns(shape.runs[i], c, text.length));
-    checked.insert(i + 1, false);
-    _replaceRange(idx, 1, <Block>[
-      shape.rebuild(ids: ids, runs: runs, checked: checked),
-    ]);
-    focusBlock(BlockRef(shape.block.id, itemId: newId));
+    return caret;
   }
 
   /// 表格：光标跳下一单元格；最后一行最后一格 → 追加一行。
@@ -1080,243 +1040,64 @@ class NoteEditorController extends ChangeNotifier {
   }
 
   /// 代码块：末空行再回车 → 退出代码块，下方补一个段落。
+  ///
+  /// `_applyText` 已经把那个多余的 `\n` 提交进 `code`；这里交给 `splitBlock` 的
+  /// 代码块分支去掉它并补段落。输入框里多出来的换行由 `_commit → _syncLineControllers`
+  /// 收回（不再手工 `_writeLineValue`，避免与输入法组字打架）。
   void _exitCodeBlock(BlockRef ref, String text) {
     final b = blockOf(ref);
     if (b is! CodeBlock) return;
-    final idx = _indexOfBlock(b.id);
-    if (idx < 0) return;
-    final code = text.endsWith('\n') ? text.substring(0, text.length - 1) : text;
-    final para = ParagraphBlock(
-      id: newBlockId('p'),
-      trailingGap: b.trailingGap,
-      runs: const <InlineNode>[],
-    );
-    _replaceRange(idx, 1, <Block>[
-      CodeBlock(
-        id: b.id,
-        language: b.language,
-        trailingGap: '\n\n',
-        code: code,
-      ),
-      para,
-    ]);
-    _writeLineValue(ref, code, caret: code.length);
-    focusBlock(BlockRef(para.id));
-  }
-
-  /// 图片 / 分割线后面补一个空段落并聚焦（它们自己没有可编辑行）。
-  void _insertParagraphAfter(BlockRef ref) {
-    final idx = _indexOfBlock(ref.blockId);
-    if (idx < 0) return;
-    final para = ParagraphBlock(id: newBlockId('p'), runs: const <InlineNode>[]);
-    _insertBlockAt(idx + 1, para);
-    focusBlock(BlockRef(para.id));
+    final result = actions.splitBlock(_doc, ref, caretOffset: text.length);
+    if (identical(result.doc, _doc)) return;
+    _commit(result.doc);
+    focusBlock(result.caret);
   }
 
   // ===== 退格语义（内部） =====
 
-  /// 段落：合并进上一个块；上一个是代码 / 表格 / 分割线 / 图片 / 原文 → 删掉它。
-  bool _mergeBackward(BlockRef ref) {
-    final idx = _indexOfBlock(ref.blockId);
-    if (idx <= 0) return false;
-    final cur = _doc.blocks[idx];
-    if (cur is! ParagraphBlock) return false;
-    final prev = _doc.blocks[idx - 1];
-    final curRuns = cur.runs;
-
-    switch (prev) {
-      case ParagraphBlock(:final runs):
-        final joined = <InlineNode>[...runs, ...curRuns];
-        _replaceRange(idx - 1, 2, <Block>[
-          ParagraphBlock(id: prev.id, trailingGap: cur.trailingGap, runs: joined),
-        ]);
-        focusBlock(BlockRef(prev.id), caret: plainTextOf(runs).length);
-        return true;
-      case HeadingBlock(:final level, :final runs):
-        // 标题 / 段落 → 文本拼接，类型保持上一个块（Notion 同款）。
-        _replaceRange(idx - 1, 2, <Block>[
-          HeadingBlock(
-            id: prev.id,
-            level: level,
-            trailingGap: cur.trailingGap,
-            runs: <InlineNode>[...runs, ...curRuns],
-          ),
-        ]);
-        focusBlock(BlockRef(prev.id), caret: plainTextOf(runs).length);
-        return true;
-      case QuoteBlock(:final lines):
-        _replaceRange(idx - 1, 2, <Block>[
-          QuoteBlock(
-            id: prev.id,
-            trailingGap: cur.trailingGap,
-            lines: <InlineRuns>[...lines, curRuns],
-          ),
-        ]);
-        focusBlock(quoteLineRef(prev.id, lines.length));
-        return true;
-      case BulletListBlock():
-      case OrderedListBlock():
-      case TaskListBlock():
-        final shape = _shapeOf(prev);
-        if (shape == null || shape.ids.isEmpty) return false;
-        final lastIndex = shape.ids.length - 1;
-        final lastRuns = shape.runs[lastIndex];
-        final runs = <InlineRuns>[...shape.runs];
-        runs[lastIndex] = <InlineNode>[...lastRuns, ...curRuns];
-        _replaceRange(idx - 1, 2, <Block>[
-          shape.rebuild(runs: runs, gap: cur.trailingGap),
-        ]);
-        focusBlock(
-          BlockRef(prev.id, itemId: shape.ids[lastIndex]),
-          caret: plainTextOf(lastRuns).length,
-        );
-        return true;
-      case CodeBlock():
-      case TableBlock():
-      case DividerBlock():
-      case ImageBlock():
-      case RawBlock():
-        // 不可拼接的块：等价于「选中上一个块删掉」，光标留在当前段首。
-        _replaceRange(idx - 1, 1, const <Block>[]);
-        focusBlock(ref, caret: 0);
-        return true;
-    }
-  }
-
-  /// 引用：首行降级成段落；其余行合并进上一行。
-  bool _backspaceInQuote(BlockRef ref) {
-    final b = blockOf(ref);
-    if (b is! QuoteBlock) return false;
-    final i = quoteLineIndexOf(ref) ?? 0;
+  /// 引用非首行退格：把该行并入上一行（块内，不跨块）。
+  ///
+  /// 为什么不用 `block_actions.mergeBackward`：它把被指向的行**抬出**引用块变成独立
+  /// 段落（设计 §5.4 只要求「引用第一行」降级），而第二行起再退格应当是「并进上一行」，
+  /// 否则一次退格就把整行搬到引用外面，视觉上像丢内容。
+  bool _mergeQuoteLineUp(BlockRef ref, QuoteBlock b, int i) {
+    if (i <= 0 || i >= b.lines.length) return false;
     final idx = _indexOfBlock(b.id);
     if (idx < 0) return false;
     final lines = <InlineRuns>[...b.lines];
-
-    if (i <= 0) {
-      // 首行 → 从引用里脱离成独立段落（放在引用上方）。
-      if (lines.isEmpty) return false;
-      final head = lines.removeAt(0);
-      final paraId = newBlockId('p');
-      if (lines.isEmpty) {
-        _replaceRange(idx, 1, <Block>[
-          ParagraphBlock(
-            id: paraId,
-            trailingGap: b.trailingGap,
-            runs: head,
-          ),
-        ]);
-      } else {
-        _replaceRange(idx, 1, <Block>[
-          ParagraphBlock(id: paraId, trailingGap: '\n\n', runs: head),
-          QuoteBlock(id: b.id, trailingGap: b.trailingGap, lines: lines),
-        ]);
-      }
-      focusBlock(BlockRef(paraId), caret: 0);
-      return true;
-    }
-
-    if (i >= lines.length) return false;
-    final prevRuns = lines[i - 1];
-    lines[i - 1] = <InlineNode>[...prevRuns, ...lines[i]];
+    final prev = lines[i - 1];
+    lines[i - 1] = <InlineNode>[...prev, ...lines[i]];
     lines.removeAt(i);
     _replaceRange(idx, 1, <Block>[
       QuoteBlock(id: b.id, trailingGap: b.trailingGap, lines: lines),
     ]);
-    focusBlock(quoteLineRef(b.id, i - 1), caret: plainTextOf(prevRuns).length);
-    return true;
-  }
-
-  /// 列表：非首项 → 删项并入前一项；首项 → 脱离成独立段落。
-  bool _backspaceInList(BlockRef ref) {
-    final shape = _shapeOf(blockOf(ref));
-    if (shape == null) return false;
-    final i = _idIndex(shape.ids, ref.itemId);
-    if (i < 0) return false;
-    final idx = _indexOfBlock(shape.block.id);
-    if (idx < 0) return false;
-
-    if (i == 0) {
-      final runs = <InlineRuns>[...shape.runs];
-      final ids = <String>[...shape.ids];
-      final checked = <bool>[...shape.checked];
-      final head = runs.removeAt(0);
-      ids.removeAt(0);
-      checked.removeAt(0);
-      final para = ParagraphBlock(
-        id: newBlockId('p'),
-        trailingGap: ids.isEmpty ? shape.block.trailingGap : '\n\n',
-        runs: head,
-      );
-      if (ids.isEmpty) {
-        _replaceRange(idx, 1, <Block>[para]);
-      } else {
-        _replaceRange(idx, 1, <Block>[
-          para,
-          shape.rebuild(ids: ids, runs: runs, checked: checked),
-        ]);
-      }
-      focusBlock(BlockRef(para.id), caret: 0);
-      return true;
-    }
-
-    final runs = <InlineRuns>[...shape.runs];
-    final ids = <String>[...shape.ids];
-    final checked = <bool>[...shape.checked];
-    final prevRuns = runs[i - 1];
-    runs[i - 1] = <InlineNode>[...prevRuns, ...runs[i]];
-    runs.removeAt(i);
-    ids.removeAt(i);
-    checked.removeAt(i);
-    _replaceRange(idx, 1, <Block>[
-      shape.rebuild(ids: ids, runs: runs, checked: checked),
-    ]);
-    focusBlock(
-      BlockRef(shape.block.id, itemId: ids[i - 1]),
-      caret: plainTextOf(prevRuns).length,
-    );
-    return true;
-  }
-
-  /// 就地降级成段落（保留文本与 id，所以控制器 / 光标天然不断）。
-  bool _demoteToParagraph(BlockRef ref) {
-    final b = blockOf(ref);
-    if (b == null) return false;
-    final idx = _indexOfBlock(b.id);
-    if (idx < 0) return false;
-    final text = textOf(ref);
-    _replaceRange(idx, 1, <Block>[
-      ParagraphBlock(
-        id: b.id,
-        trailingGap: b.trailingGap,
-        runs: textToRuns(text),
-      ),
-    ]);
-    _lines[ref]?.applyRuns(textToRuns(text));
-    focusBlock(ref, caret: 0);
+    focusBlock(quoteLineRef(b.id, i - 1), caret: plainTextOf(prev).length);
     return true;
   }
 
   // ===== 换类型 =====
 
   void _convert(BlockRef ref, Block b, BlockType target, int level) {
-    // 多行块（引用 / 列表）→ 只把**光标所在那一行**拎出来成独立块，
-    // 其余行留在原块里（设计 §5.6 的落地口径）。
-    final shape = _shapeOf(b);
-    if (shape != null || b is QuoteBlock) {
-      _extractLineAsBlock(ref, b, target, level);
+    // 引用 → 其它：设计 §5.6 要求「只有光标所在行改变」。`block_actions.setBlockType`
+    // 的引用分支只抬第一行（它拿不到行下标）→ 这一小块留在本地。
+    if (b is QuoteBlock) {
+      _extractQuoteLineAsBlock(ref, b, target, level);
       return;
     }
-    final idx = _indexOfBlock(b.id);
-    if (idx < 0) return;
+
     final caret = caretOf(ref);
-    final runs = runsOf(ref);
-    final created =
-        _makeBlock(target, runs, level: level, id: b.id, gap: b.trailingGap);
-    _replaceRange(idx, 1, <Block>[created]);
-    _lines[ref]?.applyRuns(runs);
-    // 换类型后**行引用的形状会变**（段落/标题 ↔ 列表/引用），旧 ref 可能指向
-    // 一个不存在的行 → 块会直接退出编辑态（点完按钮输入框就没了）。
-    _focusFirstLineOf(created, caret: caret);
+    final next = actions.setBlockType(_doc, ref, target, headingLevel: level);
+    if (identical(next, _doc)) return;
+    _commit(next);
+
+    // 行引用的形状可能变了（段落/标题 ↔ 列表/引用）：旧 ref 还有效就原地不动
+    // （caret 严格不变），否则聚焦新块的第一行 —— 否则输入框会直接消失。
+    if (_isValidRef(ref)) {
+      focusBlock(ref, caret: caret);
+      return;
+    }
+    final created = _blockById(b.id);
+    if (created != null) _focusFirstLineOf(created, caret: caret);
   }
 
   /// 聚焦新块的第一行（按新的行引用形状），光标落在 [caret]。
@@ -1326,36 +1107,22 @@ class NoteEditorController extends ChangeNotifier {
     focusBlock(refs.first, caret: caret);
   }
 
-  /// 把多行块里的一行拎出来，按 [target] 造成独立块插在原块之后。
-  void _extractLineAsBlock(BlockRef ref, Block b, BlockType target, int level) {
+  /// 把引用块里**光标所在那一行**拎出来，按 [target] 造成独立块插在原块之后。
+  ///
+  /// 只有引用还留在这里：列表的同类操作已由 `setBlockType` 的 `_liftFromList` 覆盖
+  /// （它用条目 id 定位，能精确抬出被指向的那一项）。
+  void _extractQuoteLineAsBlock(BlockRef ref, QuoteBlock b, BlockType target, int level) {
     final idx = _indexOfBlock(b.id);
     if (idx < 0) return;
     final caret = caretOf(ref);
-    final InlineRuns line;
-    final Block? rest;
-    if (b is QuoteBlock) {
-      final i = quoteLineIndexOf(ref) ?? 0;
-      if (i >= b.lines.length) return;
-      final lines = <InlineRuns>[...b.lines];
-      line = lines.removeAt(i);
-      rest = lines.isEmpty
-          ? null
-          : QuoteBlock(id: b.id, trailingGap: b.trailingGap, lines: lines);
-    } else {
-      final shape = _shapeOf(b);
-      if (shape == null) return;
-      final i = _idIndex(shape.ids, ref.itemId);
-      if (i < 0) return;
-      final runs = <InlineRuns>[...shape.runs];
-      final ids = <String>[...shape.ids];
-      final checked = <bool>[...shape.checked];
-      line = runs.removeAt(i);
-      ids.removeAt(i);
-      checked.removeAt(i);
-      rest = ids.isEmpty
-          ? null
-          : shape.rebuild(ids: ids, runs: runs, checked: checked);
-    }
+    final i = quoteLineIndexOf(ref) ?? 0;
+    if (i >= b.lines.length) return;
+
+    final lines = <InlineRuns>[...b.lines];
+    final line = lines.removeAt(i);
+    final rest = lines.isEmpty
+        ? null
+        : QuoteBlock(id: b.id, trailingGap: b.trailingGap, lines: lines);
 
     final created = _makeBlock(target, line, level: level, gap: b.trailingGap);
     // 被拎出来的块跟着原块的「后继间隔」走；原块若还在，则与它之间用两个换行。
@@ -1621,16 +1388,29 @@ class NoteEditorController extends ChangeNotifier {
         }
         next[i] = runs;
         return QuoteBlock(id: b.id, trailingGap: b.trailingGap, lines: next);
-      case BulletListBlock():
-      case OrderedListBlock():
-      case TaskListBlock():
-        final shape = _shapeOf(b);
-        if (shape == null) return b;
-        final i = _idIndex(shape.ids, ref.itemId);
+      case BulletListBlock(:final items):
+        final i = _itemIndex(items, ref.itemId);
         if (i < 0) return b;
-        final next = <InlineRuns>[...shape.runs];
-        next[i] = runs;
-        return shape.rebuild(runs: next);
+        final next = <ListItem>[...items];
+        next[i] = ListItem(id: items[i].id, runs: runs);
+        return BulletListBlock(id: b.id, trailingGap: b.trailingGap, items: next);
+      case OrderedListBlock(:final start, :final items):
+        final i = _itemIndex(items, ref.itemId);
+        if (i < 0) return b;
+        final next = <ListItem>[...items];
+        next[i] = ListItem(id: items[i].id, runs: runs);
+        return OrderedListBlock(
+          id: b.id,
+          trailingGap: b.trailingGap,
+          start: start,
+          items: next,
+        );
+      case TaskListBlock(:final items):
+        final i = _taskIndex(items, ref.itemId);
+        if (i < 0) return b;
+        final next = <TaskItem>[...items];
+        next[i] = TaskItem(id: items[i].id, runs: runs, checked: items[i].checked);
+        return TaskListBlock(id: b.id, trailingGap: b.trailingGap, items: next);
       case CodeBlock(:final language):
         return CodeBlock(
           id: b.id,
@@ -1671,37 +1451,6 @@ class NoteEditorController extends ChangeNotifier {
     }
   }
 
-  _ListShape? _shapeOf(Block? b) {
-    if (b is BulletListBlock) {
-      return _ListShape(
-        type: BlockType.bulletList,
-        block: b,
-        ids: <String>[for (final it in b.items) it.id],
-        runs: <InlineRuns>[for (final it in b.items) it.runs],
-        checked: <bool>[for (final _ in b.items) false],
-      );
-    }
-    if (b is OrderedListBlock) {
-      return _ListShape(
-        type: BlockType.orderedList,
-        block: b,
-        ids: <String>[for (final it in b.items) it.id],
-        runs: <InlineRuns>[for (final it in b.items) it.runs],
-        checked: <bool>[for (final _ in b.items) false],
-      );
-    }
-    if (b is TaskListBlock) {
-      return _ListShape(
-        type: BlockType.taskList,
-        block: b,
-        ids: <String>[for (final it in b.items) it.id],
-        runs: <InlineRuns>[for (final it in b.items) it.runs],
-        checked: <bool>[for (final it in b.items) it.checked],
-      );
-    }
-    return null;
-  }
-
   static int _itemIndex(List<ListItem> items, String? id) {
     if (id == null) return -1;
     for (var i = 0; i < items.length; i++) {
@@ -1714,15 +1463,6 @@ class NoteEditorController extends ChangeNotifier {
     if (id == null) return -1;
     for (var i = 0; i < items.length; i++) {
       if (items[i].id == id) return i;
-    }
-    return -1;
-  }
-
-  /// 在「条目 id 列表」里定位（列表统一视图 [_ListShape] 用）。
-  static int _idIndex(List<String> ids, String? id) {
-    if (id == null) return -1;
-    for (var i = 0; i < ids.length; i++) {
-      if (ids[i] == id) return i;
     }
     return -1;
   }
@@ -1782,10 +1522,6 @@ class NoteEditorController extends ChangeNotifier {
         BlockType.raw => 'raw',
       };
 }
-
-/// 纯文本 → 单 run（把代码块 / 原文降级成段落时用，字符一个字不动）。
-InlineRuns textToRuns(String text) =>
-    text.isEmpty ? const <InlineNode>[] : <InlineNode>[TextRun(text)];
 
 /// 「换个间隔」的块重建（[Block] 没有 copyWith，这里集中一处免得散落）。
 Block _withGap(Block b, String gap) {
@@ -1868,69 +1604,5 @@ Block _withGap(Block b, String gap) {
         trailingGap: gap,
         text: text,
       );
-  }
-}
-
-/// 列表（无序 / 有序 / 任务）的统一视图：三种列表的分裂 / 合并 / 摘行逻辑同构，
-/// 用它把「按类型重建」的那一个 switch 收在一处。
-class _ListShape {
-  _ListShape({
-    required this.type,
-    required this.block,
-    required this.ids,
-    required this.runs,
-    required this.checked,
-  });
-
-  final BlockType type;
-  final Block block;
-  final List<String> ids;
-  final List<InlineRuns> runs;
-  final List<bool> checked;
-
-  Block rebuild({
-    List<String>? ids,
-    List<InlineRuns>? runs,
-    List<bool>? checked,
-    String? gap,
-  }) {
-    final theIds = ids ?? this.ids;
-    final theRuns = runs ?? this.runs;
-    final theChecked = checked ?? this.checked;
-    final theGap = gap ?? block.trailingGap;
-    final b = block;
-    if (b is BulletListBlock) {
-      return BulletListBlock(
-        id: b.id,
-        trailingGap: theGap,
-        items: <ListItem>[
-          for (var i = 0; i < theIds.length; i++)
-            ListItem(id: theIds[i], runs: theRuns[i]),
-        ],
-      );
-    }
-    if (b is OrderedListBlock) {
-      return OrderedListBlock(
-        id: b.id,
-        trailingGap: theGap,
-        start: b.start,
-        items: <ListItem>[
-          for (var i = 0; i < theIds.length; i++)
-            ListItem(id: theIds[i], runs: theRuns[i]),
-        ],
-      );
-    }
-    return TaskListBlock(
-      id: b.id,
-      trailingGap: theGap,
-      items: <TaskItem>[
-        for (var i = 0; i < theIds.length; i++)
-          TaskItem(
-            id: theIds[i],
-            runs: theRuns[i],
-            checked: i < theChecked.length && theChecked[i],
-          ),
-      ],
-    );
   }
 }

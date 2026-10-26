@@ -155,6 +155,23 @@ void main() {
       c.dispose();
     });
 
+    test('无序 → 有序：整块保留（条目与 id 全复用），光标不动', () {
+      // 设计 §5.6：同类列表互转只换外壳、不拆块。T5a 起交给
+      // `block_actions.setBlockType`（它的 retarget 保留每个条目的 id）。
+      final c = NoteEditorController(markdown: '- 一\n- 二');
+      final list = c.doc.blocks.single as BulletListBlock;
+      final item = list.items[1];
+      c.focusBlock(BlockRef(list.id, itemId: item.id), caret: 1);
+
+      c.convertActiveTo(BlockType.orderedList);
+      final ordered = c.doc.blocks.single as OrderedListBlock;
+      expect(ordered.items, hasLength(2));
+      expect(ordered.items[1].id, item.id, reason: '条目 id 必须复用，光标才不丢');
+      expect(c.markdown, '1. 一\n2. 二');
+      expect(c.caretOf(c.active!), 1);
+      c.dispose();
+    });
+
     test('多行块不接受「块级 ref」（幽灵行防护）', () {
       for (final md in <String>['- a', '> b', '| c |\n| --- |\n| d |']) {
         final c = NoteEditorController(markdown: md);
@@ -257,6 +274,25 @@ void main() {
       c.dispose();
     });
 
+    test('多行引用：分裂的是光标那一行（行号必须走 itemIndex，不能当 itemId 传）', () {
+      // 陷阱回归：行号编码在 `itemId`（`'q:<n>'`）里，若把 `'q:1'` 当 itemId 传给
+      // `block_actions.splitBlock` 会静默失效（它只认真正的条目 id）→ 必须换成
+      // `itemIndex: 1`，否则永远只分裂第一行。
+      final c = NoteEditorController(markdown: '> 一\n> 二三');
+      final q = c.doc.blocks.single as QuoteBlock;
+      final ref = quoteLineRef(q.id, 1);
+      c.focusBlock(ref, caret: 1);
+      c.onLineChanged(ref, '二\n三');
+
+      final lines = (c.doc.blocks.single as QuoteBlock).lines;
+      expect(lines, hasLength(3));
+      expect(plainTextOf(lines[0]), '一', reason: '第一行不能被牵连');
+      expect(plainTextOf(lines[1]), '二');
+      expect(plainTextOf(lines[2]), '三');
+      expect(c.active, quoteLineRef(q.id, 2));
+      c.dispose();
+    });
+
     test('代码块回车是软换行；末空行再回车退出成段落', () {
       final c = NoteEditorController(markdown: '```dart\nab\n```');
       final ref = _firstRef(c);
@@ -351,6 +387,24 @@ void main() {
       expect(c.doc.blocks[2], isA<BulletListBlock>());
       expect(c.textOf(c.active!), '一');
       expect(c.markdown, '前文\n\n一\n\n- 二');
+      c.dispose();
+    });
+
+    test('段落跟在列表后：行首退格 → 成为列表的新末项（设计 §5.4）', () {
+      // 设计 §5.4「段落，上一个是列表 → 合并进上一个块末尾（成为其新末项）」。
+      // T5a 起由 `block_actions.mergeBackward` 负责；此前本地实现是「并进最后一项的
+      // 文本」，与设计不符 → 这条测试锁住正确的形态。
+      final c = NoteEditorController(markdown: '- 一\n\n第二段');
+      final para = c.doc.blocks[1] as ParagraphBlock;
+      c.focusBlock(BlockRef(para.id), caret: 0);
+      expect(c.backspaceAtStart(), isTrue);
+
+      final list = c.doc.blocks.single as BulletListBlock;
+      expect(list.items, hasLength(2));
+      expect(plainTextOf(list.items[1].runs), '第二段');
+      expect(c.active, BlockRef(list.id, itemId: list.items[1].id));
+      expect(c.caretOf(c.active!), 0, reason: '新末项的光标落在行首');
+      expect(c.markdown, '- 一\n- 第二段');
       c.dispose();
     });
 
