@@ -443,7 +443,11 @@ class RichLineController extends TextEditingController {
         caret' = caret.clamp(0, plainTextOf(newRuns).length)   // 内容不变 → 通常完全一致
 ```
 - 标题→列表→引用这类互转**只改类型不改文本**，所以 `caret' == caret` 严格成立。
-- 一个 `QuoteBlock` 多行 → 转段落时，只有光标所在行变成段落，其余行仍留在原 quote 块里（主块占用原 id → 光标不丢）。落地签名：`setBlockType(doc, at, type, {headingLevel, itemIndex})`，`itemIndex` 即光标所在行号。
+- 一个 `QuoteBlock` 多行 → 转段落时，只有光标所在行变成段落，其余行仍留在原 quote 块里。落地签名：`setBlockType(doc, at, type, {headingLevel, itemIndex})`，`itemIndex` 即光标所在行号。
+- **光标为什么丢不掉（as-built `_convert`，`note_editor_controller.dart:1058`；此处纠正一版口头说法）**：**不是**「主块沿用原 id，所以旧 ref 仍然有效」。旧 ref 是继续有效还是失效，取决于**新旧块要求的行引用形状是否兼容**，所以 `_convert` 是两条路：
+  1. **形状兼容** → `_isValidRef(ref)` 为真 → `focusBlock(ref, caret: caret)`，ref 原地不动、`caret' == caret` 严格成立（段落 ↔ 标题：两者都要求 `itemId == null`；无序/有序/任务互转：条目 id 复用）。
+  2. **形状变了** → 旧 ref 判 false → `_focusFirstLineOf(created, caret: caret)`（`:1080`，定义在 `:1084`）**按新的行引用形状重新锚定**。典型就是引用行 `BlockRef(q, itemId: 'q:<n>')` 转标题：`_isValidRef`（`:1240`）对 `ParagraphBlock / HeadingBlock / CodeBlock / RawBlock` 一律要求 `itemId == null`，旧 ref 必然失效，必须换成块级 ref 才能聚焦；`caret` 只能靠参数显式传进去，不是「沿用」来的。
+  - 这个区分不是措辞洁癖：T4 报的「点完类型按钮输入框消失」正是**第 2 条该走而没走**的形态。守卫用例 `换类型：引用首行抬出后，残余引用排在主块之后（顺序不能反）`（`test/note_editor_controller_test.dart:141`）断言了 `active.itemId` 由 `'q:0'` → `null`。
   - **块顺序（as-built，`_liftFromQuote`）**：`itemIndex == 0` → **主块在前、残余引用在后**；`itemIndex > 0` → **残余引用在前、主块在后**。两种排法都由「最后一块接管原块的 `trailingGap`、中间那块用 `_gapOf`」保证分隔不串味。参考实现期控制器曾**一律**把残余排前面，导致「首行转标题」顺序是反的；`8230f54` 改走纯函数后与本节描述一致。
 
 ### 5.7 非纯文本块的编辑入口
