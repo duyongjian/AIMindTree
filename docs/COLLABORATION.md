@@ -99,7 +99,8 @@ HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= ALL_PROXY= all_proxy= flutter.
 | analyze 判定 | **error 与 warning 都算失败**；info 允许，但**不得新增**（存量 3 条 `withOpacity` 废弃告警） |
 | test 判定 | 0 失败、0 编译错误；条数 **≥ 基线 + 新增条数** |
 | 门禁跑完 | `git status --porcelain` 应为空 |
-| **基线是移动靶** | 本轮基线 **602 → 670 → 674 → 695**（51 个测试文件）。**不要抄文档里的旧数字**，每次**当场实测**再写进文档 |
+| **基线是移动靶** | 本轮基线 **602 → 670 → 674 → 695 → 878 → 882 → 883**。**不要抄文档里的旧数字**，每次**当场实测**再写进文档 |
+| **全量 test 必须串行** | 同一 worktree 里并发跑 `flutter test` 会锁 `build/native_assets/windows/sqlite3.dll`，报 `Flutter failed to delete file`，**一条测试都不会执行**（见 §9）。跑之前先确认没有别人的 dart/flutter 进程 |
 
 > 附：`grep -rn "'local-dev'" aimindtree_app/lib` → 必须 **0 命中**；`test/` 里的 **27 处**是合法多设备夹具（刻意模拟多设备），**不许动**。
 
@@ -127,4 +128,29 @@ HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= ALL_PROXY= all_proxy= flutter.
 
 本机若有 `http_proxy/https_proxy=http://127.0.0.1:9562` 之类代理，会拦住 `flutter_tester` 的本地 WebSocket，报 `Invalid WebSocket upgrade request`（**不是代码问题**）。必须按 §5 显式置空：`HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= ALL_PROXY= all_proxy= flutter test`。
 
-**当前测试基线（2026-10-27 实测）：878/878。** 每次当场复测，别抄旧数字。
+**当前测试基线（2026-10-27 实测）：883/883**（`8230f54`/T5c 后）。每次当场复测，别抄旧数字。
+
+判定只看**最后一行** `+NNN: All tests passed!`。中间那些 `+NNN: <同一测试名>` 的重复进度行是并发打印的，不要拿其中某一行当总数。
+
+---
+
+## 9. 全量 `flutter test` 必须串行化（2026-10-27 实测）
+
+同一 worktree 里两个人（或两个 worker）同时跑全量 `flutter test`，会抢 `build/native_assets/windows/sqlite3.dll` 的文件锁，先启动的那个直接把后启动的顶掉：
+
+```
+Flutter failed to delete a file at
+"D:\...\aimindtree_app\build\native_assets\windows\sqlite3.dll".
+The flutter tool cannot access the file.
+```
+
+**症状具有强误导性**：既没有测试失败、也没有编译错误，命令直接退出——看起来像"跑完了没输出"，极易被误读成"全绿"。实际**一条测试都没执行**。
+
+| 规矩 | 说明 |
+| --- | --- |
+| 跑全量前先查进程 | `tasklist \| grep -c "dart.exe\|flutter_tester"` → 必须是 `0` |
+| 看到上面那条报错 | **不要**当成通过，也不要归因于代码；等对方跑完再重跑 |
+| 自己跑完立刻报数 | 报 **分子/分母 + 末行原文**，不要只说"绿了" |
+| 单文件测试也受影响 | 它同样走 `native_assets` 构建；并发时倾向单跑自己那个文件、避开对方的全量窗口 |
+
+> 这条比代理问题（§8）更容易骗人：§8 至少会报 `Invalid WebSocket upgrade request` 这种显式错误，而这条只留下一句"删不掉文件"，随后静默退场。
