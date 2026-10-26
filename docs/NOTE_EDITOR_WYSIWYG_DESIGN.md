@@ -1287,7 +1287,7 @@ void appendParagraphAndFocus();   void appendTableRow(BlockRef);
 
 - 图片块、分割线的**点击浮层**（替换图片 / 删除）尚未实现，只做了插入；
 - 代码块**语言选择器**（当前显示语言标注，不可切换）；
-- 表格单元格 **Tab 跳转**（当前只支持 Enter 跳格，且不拦 Tab）；
+- 表格单元格 **Tab 跳转**（当前只支持 Enter 跳格，且不拦 Tab）。**真做时要动两层**：`note_editor_body.dart` 的 `Focus(onKeyEvent:)`（`:95` `_onKeyEvent`）现在只处理退格、**不认 Tab**（Tab 在该文件只出现在一句「不参与 Tab 焦点遍历」的注释里）；控制器 `_enterTable` 只管 Enter。届时把「单元格导航」整体（Tab / Shift+Tab / Enter 三键）划给控制器，比只补一个 Tab 键更一致 —— 只补 Tab 会留下「三键里两键在控制器、一键在 body」的割裂。
 - **Ctrl+A 提示**（全选范围 = 当前行，未给用户提示）；
 - **Enter / Shift+Enter / Backspace 与中文输入法组字**在桌面 + Android 真机上的逐条确认（设计 §12 R-8：软键盘可能绕过 `onKeyEvent`）；
 - 长文滚动性能、图片替换删除、表格行列增删的**工具条入口**（控制器已提供 `appendTableRow`；删行列走 `block_actions` 的 `removeTableRow/removeTableColumn`，UI 未接）。
