@@ -10,7 +10,7 @@
  * 同步（均须 ``Authorization: Bearer <token>``，按 token 归属的 user_id 隔离）：
  * - ``POST /sync/push``   ``{device_id, envelopes:[...]}`` → ``{received, accepted, server_time}``
  * - ``POST /sync/pull``   ``{device_id, since|null}``      → ``{envelopes:[...], server_time}``
- * - ``GET  /sync/manifest``                             → ``{count}``
+ * - ``GET  /sync/manifest``                             → ``{count, max_version}``
  *
  * 管理接口（与 Netlify 版逐字一致，供本地管理后台调用；``Authorization: Bearer
  * <ADMIN_TOKEN>``，未配置 ADMIN_TOKEN 时全部 404，令牌不符 401）：
@@ -307,12 +307,26 @@ async function handlePull(request, env, ownerId) {
   return jsonResponse({ envelopes, server_time: nowIso() });
 }
 
-/** GET /sync/manifest —— 本用户当前存量 envelope 数。 */
+/**
+ * GET /sync/manifest —— 本用户当前存量 envelope 数与最大版本号。
+ *
+ * 响应（与 EdgeOne / Netlify 版**逐字一致**）：
+ * ``{count, max_version}``；``count`` 保留原字段以兼容只读它的旧版 App。
+ *
+ * ``max_version`` 是**逐实体修订号**（不是全局 generation）：服务端在 push 时
+ * 对每个实体算 ``max(既有, 客户端声明) + 1``，因此它只是「命名空间内被改得
+ * 最狠的那个实体改了多少次」，两端数字不必天然相等，只作总览参考。
+ * 空命名空间下 SQLite 的 ``MAX()`` 返回 NULL → 回落 0。
+ */
 async function handleManifest(env, ownerId) {
   const row = await env.DB.prepare(
-    'SELECT COUNT(*) AS count FROM sync_envelopes WHERE owner_id = ?'
+    'SELECT COUNT(*) AS count, MAX(base_version) AS max_version ' +
+      'FROM sync_envelopes WHERE owner_id = ?'
   ).bind(ownerId).first();
-  return jsonResponse({ count: row ? row.count : 0 });
+  return jsonResponse({
+    count: row ? Number(row.count) || 0 : 0,
+    max_version: row ? Number(row.max_version) || 0 : 0,
+  });
 }
 
 // ---------------- 管理接口（/admin/*） ----------------

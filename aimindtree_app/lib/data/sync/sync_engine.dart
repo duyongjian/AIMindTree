@@ -97,6 +97,27 @@ class PushReport {
   final DateTime serverTime;
 }
 
+/// 本地同步数据的**总览**（设置页「数据版本」卡的本机一侧）。
+///
+/// ⚠️ 口径说明（必须与服务端 [SyncManifest] 的口径一起读）：
+/// - [count] 是 [kSyncTableAllowlist] 15 张表的**总行数**，含软删（tombstone）
+///   行——本地删除是软删（`deleted_at` 非空但行还在），服务端也存墓碑，两边
+///   都算进去才可比；`homeworks` 等 4 张不同步的表**不在**统计范围内；
+/// - [maxVersion] 是 15 张表里最大的 `version`。它是**逐实体修订号**，不是
+///   全局 generation：每个实体各自从 1 起算，且每次「上传」都会跑全量
+///   `pushAll`，服务端对**未变化的行**也做 `max(既有, 声明) + 1`，所以服务
+///   端版本会一路爬升、本机与服务器的数字**不必然相等**。本视图只回答
+///   「两边大概差多少」，不是一致性断言。
+class SyncOverview {
+  const SyncOverview({required this.count, required this.maxVersion});
+
+  /// 15 张同步表的总行数（含墓碑）。
+  final int count;
+
+  /// 15 张同步表里最大的 `version`（无任何行时为 0）。
+  final int maxVersion;
+}
+
 /// 拉取结果。
 class PullReport {
   const PullReport({
@@ -626,6 +647,41 @@ SyncEngine({
   /// 外部更新 last_pulled_at（例如从持久化恢复）。
   void updateLastPulledAt(DateTime t) {
     _lastPulledAt = t;
+  }
+
+  // ============ 本地总览（设置页「数据版本」卡）============
+
+  /// 统计本机同步范围（[kSyncTableAllowlist] 的 15 张表）的记录数与最大版本。
+  ///
+  /// 为什么单独提供：设置页要显示「本机 vs 服务器」的总览，但**不让 UI 直接
+  /// 写 SQL**——表名清单的唯一真相源是 [kSyncTableAllowlist]，写死在 UI 里会
+  /// 在加表/减表时静默失配。
+  ///
+  /// 实现是 15 次 `SELECT COUNT(*), MAX(version)`（每表一次，走索引/全表扫但
+  /// 不读 payload，因此 [note_assets] 的 `data_base64` 不会被拉进内存）。
+  /// 表名来自编译期常量，不是用户输入 → 无注入面。
+  Future<SyncOverview> localOverview() async {
+    var count = 0;
+    var maxVersion = 0;
+    for (final table in kSyncTableAllowlist) {
+      final stat = await _tableStat(table);
+      count += stat.count;
+      if (stat.maxVersion > maxVersion) maxVersion = stat.maxVersion;
+    }
+    return SyncOverview(count: count, maxVersion: maxVersion);
+  }
+
+  /// 单表的 `COUNT(*)` + `MAX(version)`。
+  ///
+  /// 空表时 SQLite 的 `MAX()` 返回 NULL → 用 [readNullable] 读并回落 0。
+  Future<({int count, int maxVersion})> _tableStat(String table) async {
+    final row = await _db
+        .customSelect('SELECT COUNT(*) AS c, MAX(version) AS m FROM $table')
+        .getSingle();
+    return (
+      count: row.read<int>('c'),
+      maxVersion: row.readNullable<int>('m') ?? 0,
+    );
   }
 
   // ============ Merge（LWW）============

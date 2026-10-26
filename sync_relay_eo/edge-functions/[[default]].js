@@ -11,7 +11,7 @@
  * 同步（均须 ``Authorization: Bearer <token>``，按 token 归属的 user_id 隔离）：
  * - ``POST /sync/push``   ``{device_id, envelopes:[...]}`` → ``{received, accepted, server_time}``
  * - ``POST /sync/pull``   ``{device_id, since|null}``      → ``{envelopes:[...], server_time}``
- * - ``GET  /sync/manifest``                             → ``{count}``
+ * - ``GET  /sync/manifest``                             → ``{count, max_version}``
  *
  * envelope 字段（与 App ``SyncEnvelope`` 一致）：
  * ``device_id / entity_table / entity_id / op / payload / base_version /
@@ -485,10 +485,36 @@ async function handlePull(request, kv, ownerId, env) {
   return jsonResponse({ envelopes, server_time: nowIso() });
 }
 
-/** GET /sync/manifest —— 本用户当前存量 envelope 数。 */
+/**
+ * GET /sync/manifest —— 本用户当前存量 envelope 数与最大版本号。
+ *
+ * 响应与 CF / Netlify 版**逐字一致**：``{count, max_version}``。
+ *
+ * 取舍说明：KV 没有 SQL 聚合，``max_version`` 只能在列完键名后**逐值读取**
+ * 求最大（与 [handlePull] 同量级的一次全命名空间扫描）。这里刻意**流式聚合**
+ * ——每条读完只留一个 running max，不把 envelope（含数 MB 的
+ * ``data_base64``）攒进内存，避免把函数内存打爆。
+ *
+ * 代价是 O(记录数) 次 KV get：命名空间很大时比只读 count 慢得多。没有改成
+ * 「push 时维护汇总键」是因为 KV 无原子自增 + 60s 最终一致，汇总键会漂移；
+ * 而 manifest 是低频的**总览探针**（进设置页 / 同步完各一次），准确优先。
+ * 若将来实测不可接受，再引入汇总键并接受「可能略微低估」。
+ */
 async function handleManifest(kv, ownerId) {
   const keys = await listAllKeys(kv, envelopePrefix(ownerId));
-  return jsonResponse({ count: keys.length });
+  let maxVersion = 0;
+  for (const key of keys) {
+    const raw = await kv.get(key);
+    if (!raw) continue; // 传播中的删除/未同步：不计入
+    try {
+      const rec = JSON.parse(raw);
+      const v = Number(rec && rec.base_version);
+      if (Number.isFinite(v) && v > maxVersion) maxVersion = v;
+    } catch {
+      // 坏记录：不参与 max，也不影响 count（count 以键名为准）。
+    }
+  }
+  return jsonResponse({ count: keys.length, max_version: maxVersion });
 }
 
 // ---------------- 路由 ----------------

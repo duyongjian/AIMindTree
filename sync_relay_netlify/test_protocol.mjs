@@ -136,11 +136,13 @@ async function main() {
     serverTime = data && data.server_time;
   }
 
-  // 10) manifest（alice）= 2
+  // 10) manifest（alice）= 2，且带 max_version
   {
     const { status, data } = await json(h(req('GET', '/sync/manifest', undefined, envA)));
     check('manifest 200', status === 200);
     check('manifest count=2', data && data.count === 2);
+    // 两条都是 base_version=0 的首次上传 → 服务端版本 = max(0,0)+1 = 1。
+    check('manifest max_version=1', data && data.max_version === 1);
   }
 
   // 11) pull 全量（alice）
@@ -189,6 +191,7 @@ async function main() {
     check('bob sees 0 envelopes (isolation)', data && data.envelopes.length === 0);
     const { data: m } = await json(h(req('GET', '/sync/manifest', undefined, envB)));
     check('bob manifest count=0', m && m.count === 0);
+    check('bob manifest max_version=0（空命名空间不返回 null）', m && m.max_version === 0);
   }
 
   // 14) bob 也能正常 push 自己的数据
@@ -426,6 +429,24 @@ async function main() {
     check('per_user 首条 envelope 最多', s.per_user[0].user_id === 'u_x0' && s.per_user[0].envelopes === 2);
     const { data: u } = await json(await h2(req('GET', '/admin/users', undefined, adminAuth)));
     check('users 列表最多 100 条', u.users.length === 100);
+  }
+
+  // 32) manifest 的 max_version 随覆盖递增（另起干净 store，不污染上面的统计）
+  {
+    const store3 = makeMemoryStore();
+    const h3 = (r) => handleFetch(r, store3, {});
+    const { data: reg } = await json(h3(req('POST', '/auth/register', { username: 'ver', password: 'mnbvcxz12345' })));
+    const envV = { Authorization: 'Bearer ' + reg.token };
+    const env = (id, v) => ({ device_id: 'dV', entity_table: 'notes', entity_id: id, op: 'upsert', payload: { v }, base_version: v, updated_at: '2026-01-01T00:00:00Z', deleted_at: null });
+
+    await json(h3(req('POST', '/sync/push', { device_id: 'dV', envelopes: [env('k1', 5)] }, envV)));
+    let m = (await json(h3(req('GET', '/sync/manifest', undefined, envV)))).data;
+    check('首次 push（base_version=5）→ max_version=6', m.count === 1 && m.max_version === 6);
+
+    // 覆盖同 key：max(既有 6, 声明 1)+1 = 7 → count 不变、版本继续爬。
+    await json(h3(req('POST', '/sync/push', { device_id: 'dV', envelopes: [env('k1', 1)] }, envV)));
+    m = (await json(h3(req('GET', '/sync/manifest', undefined, envV)))).data;
+    check('覆盖同 key 后 count 仍 1 / max_version=7', m.count === 1 && m.max_version === 7);
   }
 
   console.log(`\nNetlify 中继协议测试：通过 ${pass}，失败 ${fail}`);

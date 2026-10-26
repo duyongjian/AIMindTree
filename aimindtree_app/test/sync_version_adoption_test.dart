@@ -44,6 +44,10 @@ class _FakeSyncApi implements SyncApi {
   Future<String?> testConnection() async => null;
 
   @override
+  Future<SyncManifestResult> fetchManifest() async =>
+      const SyncManifestResult.ok(SyncManifest(count: 0, maxVersion: 0));
+
+  @override
   void close() {}
 
   @override

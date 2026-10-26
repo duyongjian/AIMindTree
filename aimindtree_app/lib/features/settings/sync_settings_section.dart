@@ -5,6 +5,8 @@
 /// 上传/拉取按钮 → 「服务器与网络」卡片（自定义地址 + HTTP 代理 + 测试连接）。
 ///
 /// 要点：
+/// - 「数据版本」卡并列显示**本机 / 服务器**的记录数与最大版本号，让用户一眼
+///   看出两端差多少（对比口径见 SyncOverview / SyncManifest 的文档注释）；
 /// - 三个中继的 HTTP 契约逐字一致，App 侧只换地址；三个后端的账号体系
 ///   **互相独立**（同一用户在 CF 与 Netlify 上是不同账号），用户名/令牌
 ///   按后端隔离存储（见 [SyncConfig]）；
@@ -23,12 +25,14 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import '../../core/logger.dart';
 import '../../core/secret_store.dart';
 import '../../data/sync/direct_connect.dart';
 import '../../data/sync/http_proxy.dart';
 import '../../data/sync/sync_api.dart';
 import '../../data/sync/sync_account.dart';
 import '../../data/sync/sync_config.dart';
+import '../../data/sync/sync_engine.dart';
 import '../../data/sync/sync_outbox.dart';
 import '../../data/sync/sync_scheduler.dart';
 import '../../data/sync/sync_status.dart';
@@ -57,6 +61,8 @@ class SyncSettingsSection extends StatefulWidget {
 }
 
 class _SyncSettingsSectionState extends State<SyncSettingsSection> {
+  static final AppLog _log = AppLog('sync_settings');
+
   /// 当前选中的后端（表单 / 按钮都跟着它走）。
   late SyncBackend _backend;
 
@@ -74,6 +80,18 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   /// 最近一次「测试连接」的结果；null 表示还没测过。
   String? _testResult;
 
+  /// 本机同步数据总览（15 张同步表的行数 / 最大版本）；null = 还没查过。
+  SyncOverview? _localOverview;
+
+  /// 服务器数据总览；null = 没取到（未登录 / 没地址 / 网络失败 / 旧中继）。
+  SyncManifest? _serverManifest;
+
+  /// 取不到服务器总览时的原因（人类可读，直接显示在本卡里）。
+  String? _serverError;
+
+  /// 正在查服务器总览（刷新按钮转圈 + 防重复点击）。
+  bool _manifestLoading = false;
+
   @override
   void initState() {
     super.initState();
@@ -86,6 +104,9 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
         TextEditingController(text: widget.config.urlOverrideOf(_backend)?.trim() ?? '');
     _proxy = TextEditingController(text: widget.config.cfProxy ?? '');
     _refreshLoginState();
+    // 进页面就查一次：本机走本地库（快），服务器走一次 manifest（可能慢，
+    // 所以异步不阻塞首帧，失败也只是显示「—」）。
+    _refreshVersions();
   }
 
   @override
@@ -102,6 +123,75 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     final ok = await widget.config.isLoggedIn(_backend);
     if (!mounted) return;
     setState(() => _loggedIn = ok);
+  }
+
+  /// 刷新「数据版本」卡：本机 + 服务器各查一次。
+  ///
+  /// 两侧互不影响：服务器查失败只清空服务器那一栏，本机数字照常显示。
+  /// 同步（上传 / 拉取）完成后也会调它，让数字立刻跟上。
+  Future<void> _refreshVersions() async {
+    await Future.wait([_loadLocalOverview(), _loadServerManifest()]);
+  }
+
+  /// 本机总览：走 [SyncEngine.localOverview]（15 张同步表的聚合查询）。
+  ///
+  /// 本地库查询理论上不会失败，但仍兜底——设置页不能因为一次查询异常整页崩。
+  Future<void> _loadLocalOverview() async {
+    try {
+      final overview = await widget.scheduler.engine.localOverview();
+      if (!mounted) return;
+      setState(() => _localOverview = overview);
+    } on Object catch (e) {
+      _log.w('本机数据总览查询失败：$e');
+    }
+  }
+
+  /// 服务器总览：带令牌 GET `<base>/sync/manifest`。
+  ///
+  /// 三种「查不到」都只写 [_serverError] 并清空 [_serverManifest]，UI 显示
+  /// 「—」+ 原因，**不弹 SnackBar**（进页面自动查一次，弹窗会打扰）：
+  /// - 后端暂不可用 / 地址未配置；
+  /// - 未登录（没有该后端的用户令牌）；
+  /// - 网络失败或旧中继不认识该端点。
+  Future<void> _loadServerManifest() async {
+    final backend = _backend;
+    final disabled = backend.disabledReason;
+    if (disabled != null) {
+      _setServerUnavailable('${backend.label}$disabled');
+      return;
+    }
+    final url = widget.config.urlOf(backend).trim();
+    if (url.isEmpty) {
+      _setServerUnavailable('${backend.label} 地址未配置');
+      return;
+    }
+    final token = await widget.config.resolveUserToken(backend);
+    if (token == null || token.isEmpty) {
+      _setServerUnavailable('未登录 ${backend.label} 账号');
+      return;
+    }
+
+    if (mounted) setState(() => _manifestLoading = true);
+    final api = HttpSyncApi(baseUrl: url, userToken: token, backend: backend);
+    try {
+      final result = await api.fetchManifest();
+      if (!mounted) return;
+      setState(() {
+        _serverManifest = result.manifest;
+        _serverError = result.error;
+      });
+    } finally {
+      api.close();
+      if (mounted) setState(() => _manifestLoading = false);
+    }
+  }
+
+  void _setServerUnavailable(String reason) {
+    if (!mounted) return;
+    setState(() {
+      _serverManifest = null;
+      _serverError = reason;
+    });
   }
 
   void _snack(String text, {bool ok = true}) {
@@ -148,8 +238,12 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
       _pass.clear();
       _endpoint.text = widget.config.urlOverrideOf(b)?.trim() ?? '';
       _testResult = null; // 上一个后端的测试结果不适用
+      // 账号体系互相独立 → 服务器那栏的旧数字不适用，立刻重查。
+      _serverManifest = null;
+      _serverError = null;
     });
     await _refreshLoginState();
+    await _loadServerManifest();
   }
 
   /// 保存地址与代理。
@@ -313,6 +407,8 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
       if (!mounted) return;
       setState(() {});
       await _refreshLoginState();
+      // 拿到令牌了 → 服务器那栏可以从「未登录」变成真实数字。
+      await _loadServerManifest();
       _snack(register ? '注册并登录成功：$username' : '登录成功：$username');
     } on SyncAccountApiException catch (e) {
       _snack('${register ? '注册' : '登录'}失败：${e.message}', ok: false);
@@ -333,6 +429,8 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     if (!mounted) return;
     setState(() {});
     await _refreshLoginState();
+    // 令牌已清 → 服务器那栏回落成「未登录」提示。
+    await _loadServerManifest();
     _snack('已退出 ${_backend.label} 账号。');
   }
 
@@ -406,6 +504,10 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
       await widget.statusStore.setStatus('error:$e');
       if (!mounted) return;
       _snack(push ? '上传失败：$e' : '拉取失败：$e', ok: false);
+    } finally {
+      // 同步完（成功或失败）都刷新「数据版本」卡：成功时数字跟上，失败时至少
+      // 把上次同步时间刷新出来。失败也不影响上面的 SnackBar 提示。
+      await _refreshVersions();
     }
   }
 
@@ -651,6 +753,187 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     );
   }
 
+  /// 「数据版本」卡片：本机 / 服务器各自的**记录数 + 最大版本**。
+  ///
+  /// 存在的理由：用户看不到本地和云端差多少，只能靠「上传/拉取完成 N 条」的
+  /// 提示猜。这里把两侧的总览并排列出来，一眼能看出「本机比服务器多/少多少」。
+  ///
+  /// 降级策略（所有失败路径都只显示「—」+ 一行原因，**不弹窗、不卡 UI**）：
+  /// - 未登录 / 地址未配置 / 后端暂不可用 → 服务器那栏「—」+ 原因；
+  /// - 网络失败或旧中继不返回 `max_version` → 同上（后者靠
+  ///   [HttpSyncApi.parseManifest] 的缺字段容错回落 0）。
+  Widget _dataVersionCard() {
+    final theme = Theme.of(context);
+    final local = _localOverview;
+    final server = _serverManifest;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        border: Border.all(color: theme.dividerColor),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.numbers_outlined,
+                  color: theme.colorScheme.primary, size: 22),
+              const SizedBox(width: 6),
+              const Text(
+                '数据版本',
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+              ),
+              const Spacer(),
+              // 刷新只重查两侧；加载中把按钮换成小转圈，防重复点击。
+              _manifestLoading
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : OutlinedButton.icon(
+                      onPressed: _refreshVersions,
+                      icon: const Icon(Icons.refresh, size: 16),
+                      label: const Text('刷新'),
+                    ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          // 表头 + 两行数据：列宽用 Expanded 平分，窄屏也不会溢出。
+          Row(
+            children: [
+              const SizedBox(width: 72),
+              Expanded(
+                child: Text(
+                  '记录数',
+                  textAlign: TextAlign.end,
+                  style: TextStyle(color: theme.hintColor, fontSize: 12),
+                ),
+              ),
+              Expanded(
+                child: Text(
+                  '最大版本',
+                  textAlign: TextAlign.end,
+                  style: TextStyle(color: theme.hintColor, fontSize: 12),
+                ),
+              ),
+            ],
+          ),
+          const Divider(height: 12),
+          _versionRow(
+            label: '本机',
+            count: local?.count,
+            maxVersion: local?.maxVersion,
+            fallback: '统计中…',
+          ),
+          const SizedBox(height: 6),
+          _versionRow(
+            label: '服务器',
+            count: server?.count,
+            maxVersion: server?.maxVersion,
+            fallback: '—',
+          ),
+          if (_serverError != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                _serverError!,
+                style: TextStyle(color: theme.hintColor, fontSize: 11),
+              ),
+            ),
+          const Divider(height: 16),
+          // 上次同步时间：SyncStatusStore 里一直有值，但此前界面上看不到。
+          _lastSyncLine('上次上传', widget.statusStore.lastPushAt),
+          const SizedBox(height: 2),
+          _lastSyncLine('上次拉取', widget.statusStore.lastPulledAt),
+          const SizedBox(height: 8),
+          Text(
+            '记录数含软删墓碑；版本是逐实体修订号（不是全局版本号），'
+            '每次上传都会让服务端版本递增，故两边数字不必然相等。',
+            style: TextStyle(color: theme.hintColor, fontSize: 11),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 总览表里的一行：标签 + 记录数 + 最大版本；查不到时整行显示 [fallback]。
+  Widget _versionRow({
+    required String label,
+    required int? count,
+    required int? maxVersion,
+    required String fallback,
+  }) {
+    final theme = Theme.of(context);
+    final known = count != null && maxVersion != null;
+    return Row(
+      children: [
+        SizedBox(
+          width: 72,
+          child: Text(label, style: const TextStyle(fontSize: 13)),
+        ),
+        if (!known)
+          Expanded(
+            child: Text(
+              fallback,
+              style: TextStyle(color: theme.hintColor, fontSize: 12),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          )
+        else ...[
+          Expanded(
+            child: Text(
+              '$count',
+              textAlign: TextAlign.end,
+              style: const TextStyle(fontSize: 13),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              '$maxVersion',
+              textAlign: TextAlign.end,
+              style: const TextStyle(fontSize: 13),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// 「上次上传 / 上次拉取」一行；没记录时显示「从未」。
+  Widget _lastSyncLine(String label, DateTime? time) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 72,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: Theme.of(context).hintColor,
+              fontSize: 12,
+            ),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            time == null ? '从未' : _formatTime(time),
+            style: const TextStyle(fontSize: 12),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 本地时区 `YYYY-MM-DD HH:mm`（服务器时间存的是 UTC，转成本地更好读）。
+  String _formatTime(DateTime t) {
+    final l = t.toLocal();
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${l.year}-${two(l.month)}-${two(l.day)} '
+        '${two(l.hour)}:${two(l.minute)}';
+  }
+
   /// 「服务器与网络」卡片：自定义同步地址 + 自定义 HTTP 代理。
   ///
   /// 存在的理由：实测有用户线路既被 DNS 投毒（返回黑洞 IP），又把 Cloudflare
@@ -797,6 +1080,9 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
               const SizedBox(height: 16),
               // 上传 / 拉取（对当前选中后端）
               _syncButtons(),
+              const SizedBox(height: 16),
+              // 「数据版本」卡片（本机 / 服务器 记录数 + 最大版本）
+              _dataVersionCard(),
               const SizedBox(height: 16),
               // 「服务器与网络」卡片（自定义同步地址 / HTTP 代理）
               _serverNetworkCard(),

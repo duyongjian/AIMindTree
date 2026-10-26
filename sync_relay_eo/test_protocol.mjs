@@ -295,10 +295,14 @@ async function run() {
     pushTime1 = r.body.server_time;
   }
 
-  // --- 12) manifest ---
+  // --- 12) manifest（count + max_version）---
   {
     const r = await get(env, '/sync/manifest', aliceToken);
     assert(r.body.count === 2, 'Alice manifest count=2');
+    // 两条都是 base_version=1 的首次上传 → 服务端版本 = max(0,1)+1 = 2。
+    assert(r.body.max_version === 2, 'Alice manifest max_version=2');
+    // 旧版 App 只读 count：字段必须保留（向后兼容）。
+    assert(typeof r.body.count === 'number', 'manifest 仍保留 count 字段');
   }
 
   // --- 13) pull 全量 ---
@@ -322,6 +326,8 @@ async function run() {
     pushTime1b = r.body.server_time;
     const manifest = await get(env, '/sync/manifest', aliceToken);
     assert(manifest.body.count === 2, '覆盖同 key 后 count 仍为 2');
+    // 覆盖会再次递增该实体版本：max(既有 2, 声明 1)+1 = 3。
+    assert(manifest.body.max_version === 3, '覆盖同 key 后 max_version 递增到 3');
 
     const pull = await post(env, '/sync/pull', { device_id: 'd1', since: null }, aliceToken);
     const n1 = pull.body.envelopes.find((e) => e.entity_id === 'n1');
@@ -465,6 +471,8 @@ async function run() {
 
     const manifest = await get(fresh, '/sync/manifest', token);
     assert(manifest.body.count === 300, 'manifest count=300');
+    // 300 条都是 base_version=1 的首次上传 → 服务端版本统一为 2。
+    assert(manifest.body.max_version === 2, 'manifest max_version=2（300 条批量）');
 
     const pull = await post(fresh, '/sync/pull', { device_id: 'd1', since: null }, token);
     assert(pull.body.envelopes.length === 300, 'pull 全量取回全部 300 条（256 单页翻页未漏）');
@@ -489,6 +497,8 @@ async function run() {
     await post(fresh, '/sync/push', { device_id: 'd1', envelopes: [mkEnvId('notes', dottedId, 'd1', { v: 2 })] }, token);
     const manifest = await get(fresh, '/sync/manifest', token);
     assert(manifest.body.count === 1, '带特殊字符的 entity_id 覆盖而非新增');
+    // 推了两次（base_version=1 → 2 → 3）：版本继续递增，count 不变。
+    assert(manifest.body.max_version === 3, '特殊字符 id 二次 push 后 max_version=3');
     const pull = await post(fresh, '/sync/pull', { device_id: 'd1', since: null }, token);
     assert(pull.body.envelopes[0].entity_id === dottedId, 'entity_id 原样返回给 App');
     assert(pull.body.envelopes[0].payload.v === 2, '特殊字符 id 下 upsert 仍覆盖最新态');
@@ -619,6 +629,15 @@ async function runEntryTests() {
     );
     const manifest = JSON.parse(await manifestRes.text());
     assert(manifest.count === 1, '入口 manifest count=1');
+    assert(manifest.max_version === 2, '入口 manifest max_version=2');
+  }
+
+  // 空命名空间 → count=0 / max_version=0（不能是 null / undefined）
+  {
+    const fresh = makeEnv();
+    const reg = await post(fresh, '/auth/register', { username: 'emptyv', password: 'qzwtpnke4721' }, '');
+    const m = await get(fresh, '/sync/manifest', reg.body.token);
+    assert(m.body.count === 0 && m.body.max_version === 0, '空命名空间 manifest count=0 max_version=0');
   }
 }
 

@@ -12,7 +12,7 @@
  * 同步（均须 ``Authorization: Bearer <token>``，按 token 归属的 user_id 隔离）：
  * - ``POST /sync/push``   ``{device_id, envelopes:[...]}`` → ``{received, accepted, server_time}``
  * - ``POST /sync/pull``   ``{device_id, since|null}``      → ``{envelopes:[...], server_time}``
- * - ``GET  /sync/manifest``                             → ``{count}``
+ * - ``GET  /sync/manifest``                             → ``{count, max_version}``
  *
  * 管理接口（与 CF 版逐字一致；``Authorization: Bearer <ADMIN_TOKEN>``，
  * 未配置 ADMIN_TOKEN 时全部 404，令牌不符 401）：
@@ -435,10 +435,35 @@ async function handlePull(request, store, ownerId, env) {
   return jsonResponse({ envelopes, server_time: nowIso() });
 }
 
-/** GET /sync/manifest —— 本用户当前存量 envelope 数。 */
+/**
+ * GET /sync/manifest —— 本用户当前存量 envelope 数与最大版本号。
+ *
+ * 响应与 CF / EdgeOne 版**逐字一致**：``{count, max_version}``。
+ *
+ * 取舍说明：Blobs 没有 SQL 聚合，``max_version`` 只能在列完键名后**逐值读取**
+ * 求最大（与 [handlePull] 同量级的一次全命名空间扫描）。这里刻意**流式聚合**
+ * ——每条读完只留一个 running max，不把 envelope（含数 MB 的
+ * ``data_base64``）攒进内存。
+ *
+ * 代价是 O(记录数) 次 get。没有改成「push 时维护汇总键」是因为 Blobs 无原子
+ * 自增，并发 push 会让汇总键漂移；而 manifest 是低频的**总览探针**（进设置页 /
+ * 同步完各一次），准确优先。
+ */
 async function handleManifest(store, ownerId) {
   const keys = await store.listKeys(envelopePrefix(ownerId));
-  return jsonResponse({ count: keys.length });
+  let maxVersion = 0;
+  for (const key of keys) {
+    const raw = await store.get(key);
+    if (!raw) continue;
+    try {
+      const rec = JSON.parse(raw);
+      const v = Number(rec && rec.base_version);
+      if (Number.isFinite(v) && v > maxVersion) maxVersion = v;
+    } catch {
+      // 坏记录：不参与 max，也不影响 count（count 以键名为准）。
+    }
+  }
+  return jsonResponse({ count: keys.length, max_version: maxVersion });
 }
 
 // ---------------- 管理接口（/admin/*） ----------------

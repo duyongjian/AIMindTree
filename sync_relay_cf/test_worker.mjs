@@ -106,9 +106,22 @@ class MockD1 {
       }
       return [...groups.values()];
     }
+    // 聚合查询（COUNT(*) 且可选地同句带 MAX(col)）：manifest / admin stats。
+    // COUNT 与 MAX 同句时必须合成**同一行**返回（manifest 读的就是这一行）。
     if (sql.includes('COUNT(*)')) {
       const alias = (sql.match(/COUNT\(\*\)\s+(?:AS\s+)?(\w+)/i) || [])[1] || 'count';
-      return [{ [alias]: out.length }];
+      const row = { [alias]: out.length };
+      const mm = sql.match(/MAX\((\w+)\)/i);
+      if (mm) {
+        const mAlias = (sql.match(/MAX\(\w+\)\s+(?:AS\s+)?(\w+)/i) || [])[1] || 'max';
+        let m = 0;
+        for (const r of out) {
+          const v = Number(r[mm[1]]);
+          if (Number.isFinite(v) && v > m) m = v;
+        }
+        row[mAlias] = m;
+      }
+      return [row];
     }
     if (sql.includes('ORDER BY server_time') || sql.includes('ORDER BY owner_id, server_time')) {
       out.sort((a, b) =>
@@ -281,10 +294,14 @@ async function run() {
     assert(r.body.versions['notes:n1'] === 2 && r.body.versions['notes:n2'] === 2, 'versions 为 max(既有, 声明)+1 = 2');
   }
 
-  // 8) Alice manifest
+  // 8) Alice manifest（count + max_version）
   {
     const r = await json(await get('/sync/manifest', env, aliceToken));
     assert(r.body.count === 2, 'Alice manifest count=2');
+    // 两条都是 base_version=1 的首次上传 → 服务端版本 = max(0,1)+1 = 2。
+    assert(r.body.max_version === 2, 'Alice manifest max_version=2');
+    // 旧版 App 只读 count，字段必须保留（向后兼容）。
+    assert(typeof r.body.count === 'number', 'manifest 仍保留 count 字段');
   }
 
   // 9) Alice pull 全量
@@ -299,6 +316,8 @@ async function run() {
     await post('/sync/push', { device_id: 'd1', envelopes: [mkEnv('notes', 'n1', 'd1', { title: 'A-updated' })] }, env, aliceToken);
     const manifest = await json(await get('/sync/manifest', env, aliceToken));
     assert(manifest.body.count === 2, '覆盖同 key 后 count 仍为 2');
+    // 覆盖会再次递增该实体版本：max(既有 2, 声明 1)+1 = 3 → 命名空间最大版本 3。
+    assert(manifest.body.max_version === 3, '覆盖同 key 后 max_version 递增到 3');
     const pull = await json(await post('/sync/pull', { device_id: 'd1', since: null }, env, aliceToken));
     const n1 = pull.body.envelopes.find((e) => e.entity_id === 'n1');
     assert(n1.payload.title === 'A-updated', '覆盖后拉取到新 payload');
@@ -339,6 +358,16 @@ async function run() {
   {
     const bobWithAliceToken = await json(await get('/sync/manifest', env, aliceToken2));
     assert(bobWithAliceToken.body.count === 4, 'Alice 的旧登录令牌仍指向 Alice 命名空间');
+    // 命名空间隔离：Alice 的最大版本只由她自己的 4 条决定（n1=3, 其余=2）。
+    assert(bobWithAliceToken.body.max_version === 3, 'Alice manifest max_version=3（隔离自 Bob）');
+  }
+
+  // 14b) 空命名空间 → max_version=0（SQLite MAX() 对空集返回 NULL → 回落 0）
+  {
+    const fresh = makeEnv();
+    const reg = await json(await post('/auth/register', { username: 'empty', password: 'kdmvnzqa1029' }, fresh, ''));
+    const m = await json(await get('/sync/manifest', fresh, reg.body.token));
+    assert(m.body.count === 0 && m.body.max_version === 0, '空命名空间 manifest count=0 max_version=0');
   }
 
   // 15) 未知路径 404

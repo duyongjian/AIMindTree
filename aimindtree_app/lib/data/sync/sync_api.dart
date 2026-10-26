@@ -3,7 +3,7 @@
 /// 客户端不直连 Supabase；统一走 Supabase ai-proxy 中转：
 ///   POST /sync/push   `{device_id, envelopes}` → `{received, server_time}`
 ///   POST /sync/pull   `{device_id, since}`      → `{envelopes, server_time}`
-///   GET  /sync/manifest                         → `{count}`
+///   GET  /sync/manifest                         → `{count, max_version}`
 ///
 /// HttpSyncApi 用 dart:io `HttpClient`（与 DifyClient 同实现，复用 UTF-8 +
 /// 超时逻辑）；不引入 `package:http` 以减少依赖。MockSyncApi 给测试用，
@@ -32,6 +32,13 @@ abstract class SyncApi {
 
   /// 测试连通性；返回 null = OK，非 null = 错误描述。
   Future<String?> testConnection();
+
+  /// 取服务端该用户命名空间的数据总览（记录数 + 最大版本号）。
+  ///
+  /// 取不到（未登录 / 网络失败 / 旧中继不支持）时返回
+  /// [SyncManifestResult.fail]，**不抛异常**——调用方是设置页 UI，总要能
+  /// 优雅降级成「—」而不是崩掉一张卡。
+  Future<SyncManifestResult> fetchManifest();
 
   /// 关闭底层 HTTP 客户端 / 测试占位。
   void close();
@@ -68,6 +75,44 @@ class SyncPullResult {
   const SyncPullResult({required this.envelopes, required this.serverTime});
   final List<SyncEnvelope> envelopes;
   final DateTime serverTime;
+}
+
+/// `GET /sync/manifest` 的响应：服务端该用户命名空间下的**数据总览**。
+///
+/// ⚠️ 口径说明（与本地侧 `SyncOverview` 对齐，UI 并列显示时才有可比性）：
+/// - [count]：服务端保存的 envelope 条数（按 `(entity_table, entity_id)` 去重
+///   后的实体数）。软删墓碑（tombstone）在服务端也占一条，所以它会把「已删除」
+///   的数据算进来；
+/// - [maxVersion]：所有 envelope 里最大的 `base_version`。它是**逐实体修订号**
+///   而不是全局 generation——每个实体各自从 1 起算，且服务端每次收到 push 都
+///   对该实体做 `max(既有, 客户端声明) + 1`，所以**未变化的行也会让服务端版本
+///   递增**。因此本机与服务器这两个数字**不必然相等**，只看作「差多少」的粗
+///   略参考，不是一致性断言。
+class SyncManifest {
+  const SyncManifest({required this.count, required this.maxVersion});
+
+  /// 服务端实体条数（含墓碑）。
+  final int count;
+
+  /// 服务端最大实体修订号（无数据时为 0）。
+  final int maxVersion;
+}
+
+/// [SyncApi.fetchManifest] 的返回：成功带 [manifest]，失败带 [error]。
+///
+/// 单独包一层（而不是直接返回可空的 [SyncManifest]）是为了让 UI 能区分
+/// 「服务器真的 0 条」与「压根没取到」——两者都显示 0 会误导用户。
+class SyncManifestResult {
+  const SyncManifestResult.ok(this.manifest) : error = null;
+
+  const SyncManifestResult.fail(this.error) : manifest = null;
+
+  final SyncManifest? manifest;
+
+  /// 失败原因（人类可读，直接进 UI）；成功时为 null。
+  final String? error;
+
+  bool get ok => manifest != null;
 }
 
 class SyncApiException implements Exception {
@@ -231,6 +276,47 @@ class HttpSyncApi implements SyncApi {
     }
   }
 
+  /// 带令牌 GET `sync/manifest` 并解析总览。
+  ///
+  /// 与 [testConnection] 走同一个端点，但这里**解析响应体**（那里只 drain）。
+  /// 任何异常（网络 / 超时 / 4xx / 坏 JSON）都被收敛成
+  /// [SyncManifestResult.fail]，调用方无需 try/catch。
+  @override
+  Future<SyncManifestResult> fetchManifest() async {
+    try {
+      final url = _url('manifest');
+      final client = await _ensureClient();
+      final req = await client.getUrl(url).timeout(const Duration(seconds: 15));
+      _headers.forEach(req.headers.set);
+      final resp = await req.close().timeout(const Duration(seconds: 15));
+      final payload = await resp.transform(utf8.decoder).join();
+      if (resp.statusCode != 200) {
+        return SyncManifestResult.fail('HTTP ${resp.statusCode}');
+      }
+      final decoded = jsonDecode(payload);
+      if (decoded is! Map<String, dynamic>) {
+        return const SyncManifestResult.fail('响应不是 JSON 对象');
+      }
+      return SyncManifestResult.ok(parseManifest(decoded));
+    } on Object catch (e) {
+      return SyncManifestResult.fail('$e');
+    }
+  }
+
+  /// 把 manifest 响应体解析成 [SyncManifest]。
+  ///
+  /// **对旧中继容错**：`max_version` 是本轮新增字段，已部署的旧中继仍只回
+  /// `{count}`。缺字段时回落 0（而不是抛异常 / 返回 null）——设置页据此显示
+  /// 「—」，而不是整张卡崩掉。同理 `count` 缺失或非数字也回落 0。
+  static SyncManifest parseManifest(Map<String, dynamic> json) => SyncManifest(
+        count: _intOf(json['count']),
+        maxVersion: _intOf(json['max_version']),
+      );
+
+  /// 宽容取整数：字段缺失 / 为 null / 类型不对（网关塞了字符串或 null）一律
+  /// 回落 0，绝不让一次坏响应把整张设置页卡崩。
+  static int _intOf(Object? v) => v is num ? v.toInt() : 0;
+
   @override
   void close() => _client?.close(force: true);
 }
@@ -259,6 +345,17 @@ class MockSyncApi implements SyncApi {
 
   /// 预置 pull 响应序列：每次 pullSince 取出一条。
   final List<SyncEnvelope> _pullQueue;
+
+  /// [fetchManifest] 的预设返回值；null 表示「服务端没有数据可取」。
+  ///
+  /// 测试想验证降级路径就把它设成 null 或设 [manifestError]。
+  SyncManifest? manifestOverride = const SyncManifest(count: 0, maxVersion: 0);
+
+  /// 非空时 [fetchManifest] 一律返回失败（模拟未登录 / 网络失败 / 旧中继）。
+  String? manifestError;
+
+  /// fetchManifest 调用次数（测试断言用）。
+  int manifestCalls = 0;
 
   /// push 历史（用于测试断言）。
   final List<List<SyncEnvelope>> pushHistory = [];
@@ -299,6 +396,16 @@ class MockSyncApi implements SyncApi {
 
   @override
   Future<String?> testConnection() async => null;
+
+  @override
+  Future<SyncManifestResult> fetchManifest() async {
+    manifestCalls++;
+    final err = manifestError;
+    if (err != null) return SyncManifestResult.fail(err);
+    return SyncManifestResult.ok(
+      manifestOverride ?? const SyncManifest(count: 0, maxVersion: 0),
+    );
+  }
 
   @override
   void close() {}
