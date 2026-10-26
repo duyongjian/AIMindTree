@@ -102,3 +102,29 @@ HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= ALL_PROXY= all_proxy= flutter.
 | **基线是移动靶** | 本轮基线 **602 → 670 → 674 → 695**（51 个测试文件）。**不要抄文档里的旧数字**，每次**当场实测**再写进文档 |
 
 > 附：`grep -rn "'local-dev'" aimindtree_app/lib` → 必须 **0 命中**；`test/` 里的 **27 处**是合法多设备夹具（刻意模拟多设备），**不许动**。
+
+---
+
+## 7. 共享 worktree 的 git 红线（2026-10-27 实战事故）
+
+同一 worktree 上多人并行时，**任何作用于整个工作区的 git 命令都会静默吃掉别人未提交的改动**。已发生一次：一条已写好、已验证但尚未提交的测试，被并发的全工作区操作清掉（`git status` 变干净、文件回退），只能重写重提。
+
+| 禁止 | 原因 |
+| --- | --- |
+| `git add -a` / `git add .` / `git commit -a` | 会把别人在途改动一起卷进你的 commit |
+| `git stash` / `git checkout -- .` / `git reset --hard` | 会丢弃别人未提交的改动 |
+| 把未提交改动留在共享工作区 | 下一轮任何全工作区操作都可能带走它 |
+
+正确做法：
+1. **只 `git add <自己名下的具体文件>`**，逐个列路径；
+2. 提交前 `git status --porcelain` 自查：除自己文件外不应有变化（别人的 `??`/`M` 一律不碰、不提交）；
+3. **改完立刻提交**，不要攒；
+4. 回退自己改动用 `git checkout -- <你那个文件>`（单文件），**绝不用** `git reset --hard <commit>`（会连别人的已提交提交一起丢）。
+
+---
+
+## 8. flutter test 与本地代理
+
+本机若有 `http_proxy/https_proxy=http://127.0.0.1:9562` 之类代理，会拦住 `flutter_tester` 的本地 WebSocket，报 `Invalid WebSocket upgrade request`（**不是代码问题**）。必须按 §5 显式置空：`HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= ALL_PROXY= all_proxy= flutter test`。
+
+**当前测试基线（2026-10-27 实测）：878/878。** 每次当场复测，别抄旧数字。
