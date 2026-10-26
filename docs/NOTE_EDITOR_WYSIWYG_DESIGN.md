@@ -1164,36 +1164,51 @@ sequenceDiagram
 
 ### 14.3 附录：`NoteEditorController` 的对外面（as-built，`8230f54`）
 
-> 供后来者判断「改这个功能该调哪个方法」，避免去翻 1500 行实现。**T4 复核过：接线层零改动仍全绿，签名一个没变。**
+> 供后来者判断「改这个功能该调哪个方法」，避免去翻 1500 行实现。**签名逐个按 `8230f54` 源码核对，不是凭记忆写的**（抽法见本节末）。共 **41 个公开成员**：9 个 getter + 1 个 setter + 31 个方法 / 工厂。
 
 ```dart
 // 读 / 状态
-String get markdown;   NoteDoc get doc;   BlockRef? get active;   bool get isEditing;
-Block Block/blockOf(BlockRef);  String textOf(BlockRef);  InlineRuns runsOf(BlockRef);
-TextSelection selectionOf(BlockRef);  int caretOf(BlockRef);  String selectionText();
-TextEditingController lineControllerFor(BlockRef);  FocusNode focusNodeFor(BlockRef);
+NoteDoc get doc;   String get markdown;   BlockRef? get active;   bool get isEditing;
+Block? get activeBlock;   InlineMarks get pendingMarks;   bool get hasSelection;
+bool get activeSupportsInlineMarks;   AssetResolver? get resolveAsset;   set resolveAsset(AssetResolver?);
+Block? blockOf(BlockRef);   String textOf(BlockRef);   InlineRuns runsOf(BlockRef);
+bool isMarkOn(InlineMarks);
+TextSelection? selectionOf(BlockRef);   int caretOf(BlockRef);   String selectionText();
+RichLineController lineControllerFor(BlockRef);   FocusNode focusNodeFor(BlockRef);
 
-// 生命周期 / 焦点
-void setMarkdown(String md);   void focusBlock(BlockRef, {int caret, bool selectAll});
-void blur();
+// 生命周期 / 焦点 / 释放
+factory NoteEditorController({String markdown, AssetResolver? resolveAsset});
+void setMarkdown(String md);   void load(String md);   void blur();
+void focusBlock(BlockRef, {int? caret});   void dispose();
 
 // 行内编辑（打字管线：projectRuns → 提交 → L2）
-void onLineChanged(BlockRef, String newText);   void markSoftBreak(BlockRef);
-void toggleMark(InlineMarks);   void clearPendingMarks();
-void setLink(...);   void setLinkOn(BlockRef, String label, String url, {int start, int end});
+void onLineChanged(BlockRef, String newText);   void clearPendingMarks();
+void markSoftBreak();                  // 无参，作用于当前行
+void toggleMark(InlineMarks);
+void setLink(String label, String url);
+void setLinkOn(BlockRef, String label, String url, {int? start, int? end});
 
 // 块级语义（全部委托 block_actions）
-void convertActiveTo(BlockType, {int? headingLevel, int? itemIndex});
-void convertActiveToCode();   void splitActive();   void backspaceAtStart();
-void toggleTaskItem(BlockRef, String itemId, bool done);
+void convertActiveTo(BlockType type, {int level = 1});   // 是 level，不是 headingLevel/itemIndex
+void convertActiveToCode();   void splitActive();   bool backspaceAtStart();
+void toggleTaskItem(BlockRef);         // 只有 ref，itemId/done 由块内状态决定
 
 // 插入
-void insertImageBlock(String assetId, String alt);
-void insertTableBlock({int rows, int cols});   void insertDividerBlock();
+void insertImageBlock(String assetId, {String alt = ''});
+void insertTableBlock({int rows = 2, int cols = 2});   void insertDividerBlock();
 void appendParagraphAndFocus();   void appendTableRow(BlockRef);
 ```
 
-> 不在这个面上的功能（如「删除块」「删表格行列」）请直接用 `block_actions` 的纯函数再 `setDoc`，不要在控制器里加旁路。
+`RichLineController`（编辑态行控制器）的公开面只有四项：`applyRuns` / `syncRunsQuiet` / `setBaseQuiet` / `buildTextSpan`（`buildTextSpan` 是 override，见偏差 7）。
+
+> **对外没有 doc setter**。写回统一走控制器私有 `_commit(NoteDoc)`（`:1135`，内部重算 id 索引与序列化缓存），所以「页面层自己调 `block_actions` 拿个新 `NoteDoc` 再塞回去」这条路**目前不存在**。要新增块级能力，正确姿势是：`block_actions` 写纯函数 → 控制器加一个薄委托方法（内部 `_commit`）→ 页面层只调控制器。这也是 T5a/T5c 收敛的结论，别在页面层开旁路。
+>
+> 抽签名的命令（想知道某天有没有被动过，跑这个就行）：
+> ```bash
+> git show <rev>:aimindtree_app/lib/features/notes/note_editor_controller.dart \
+>   | awk 'NR>=260 && NR<=1215' \
+>   | grep -nE "^  [A-Za-z_][A-Za-z0-9_<>,? ]* (get )?[a-zA-Z][A-Za-z0-9_]*[\(=]|^  set [a-zA-Z]+\("
+> ```
 
 ---
 
@@ -1230,9 +1245,9 @@ void appendParagraphAndFocus();   void appendTableRow(BlockRef);
 | T4 接线层 | `8a9be67` | 去掉左右双框，工具栏 / 页面改接 `NoteEditorController` |
 | T3 补丁 | `86c2754` | `_isValidRef` 收紧（多行块拒绝块级 ref）+ 2 条回归 |
 | T4 补丁 | `0e59e96` | 第 ⑧ 条守卫：目录跳转必须真的落到标题块 |
-| T5a 收敛 | `fe3e276` | 控制器块级原语改走 `block_actions`，删掉双实现（−521 行） |
+| T5a 收敛 | `fe3e276` | 控制器块级原语改走 `block_actions`，删掉双实现。`git show --numstat`：controller **+197 / −525**（净 −328），测试 **+54 / −0** |
 | T5c 收尾 | `8230f54` | 删掉控制器里 `_mergeQuoteLineUp` / `_extractQuoteLineAsBlock`（连带 `_makeBlock` / `_idPrefixOf`），委托 `mergeBackward(itemIndex:)` / `setBlockType(itemIndex:)`；修掉 `_liftFromQuote` 残余引用顺序反了（首行被抬出时）。`git show --numstat`：controller +33 / −149，测试 +18 / −0 |
-| 文档回写（doc-only） | `d9bb2e0` / `01e8fe0` / `090f917` | 实施结果与偏差回写、测试数表格修正（只保留可复核的阶段）、共享 worktree 的 git 红线与代理坑 |
+| 文档回写（doc-only） | `d9bb2e0` / `01e8fe0` / `090f917` / `0f6f488` | 实施结果与偏差回写、测试数表格修正（只保留可复核的阶段）、共享 worktree 的 git 红线与代理坑；**全量 `flutter test` 必须串行化**（并发抢 `build/native_assets/windows/sqlite3.dll` 会报一句 `Flutter failed to delete a file` 后**静默退场**，无失败无报错，极易被读成「全绿」）、测试基线表更新到 883 |
 
 ### 2. 测试
 
@@ -1249,12 +1264,15 @@ void appendParagraphAndFocus();   void appendTableRow(BlockRef);
 
 闸门：`dart run tool/analyze_inproc.dart` → 155 文件 0 error / 0 warning（3 条既有 `withOpacity` info）；`flutter test` → 883/883（`8230f54`/T5c 后）；L1 字节直通保持（20 条语料逐字节相等 + 端到端「打开不动 → 保存字节相同」用例）。
 
-> 注：本机 `http_proxy/https_proxy` 会拦住 `flutter_tester` 的本地 WebSocket（报 `Invalid WebSocket upgrade request`），跑测试需先 `env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY flutter test`。计数以最后一行 `+NNN: All tests passed!` 为准，不要读中间的 `+NNN` 进度行（并发跑会重复打印，容易读错）。
+> 注 1（代理坑）：本机 `http_proxy/https_proxy` 会拦住 `flutter_tester` 的本地 WebSocket（报 `Invalid WebSocket upgrade request`），跑测试需先 `env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY flutter test`。计数以最后一行 `+NNN: All tests passed!` 为准，不要读中间的 `+NNN` 进度行（并发跑会重复打印，容易读错）。
+>
+> 注 2（并发坑，`0f6f488`）：**同一个 worktree 里不要并发跑全量 `flutter test`**。两个 runner 会抢 `build/native_assets/windows/sqlite3.dll`，后启动的那个只吐一句 `Flutter failed to delete a file` 就**静默退出** —— 没有编译错误、没有测试失败，输出看着像正常结束，实际一条用例都没跑。跑之前先确认进程数：`tasklist | grep -c "dart.exe\|flutter_tester"` 应为 0。见 `docs/COLLABORATION.md` §9。
 
 ### 3. 关键偏差（与设计原文的差异，均是落地时的取舍）
 
 1. **块级语义只有一份实现（T5a + T5c 收尾 `8230f54` 收敛完毕）**。Enter 分裂 / 行首退格 / 换类型 / 任务勾选 / 表格加行全部委托 `block_actions`，控制器只剩行引用与 caret 映射、焦点编排、序列化缓存。参考实现期曾在控制器里保留的**引用块两处**能力缺口，已先在纯函数层补齐（`924c76a`/T2b：`mergeBackward` 的引用非首行「并入上一行」、`setBlockType` 的 `itemIndex`），再于 `8230f54` 删掉控制器侧的 `_mergeQuoteLineUp` / `_extractQuoteLineAsBlock`（连带 `_makeBlock` / `_idPrefixOf`）。引用行号一律从 `BlockRef.itemId` 的 `'q:<n>'` 解码后**走 `itemIndex` 传入**，不把编码串当 `itemId` 传（这是本轮最后清掉的一个坑）。**唯一保留本地的边界是表格单元格 Enter**：`splitBlock` 的表格分支只做「表尾追加行」，单元格间跳格是控制器职责（`_enterTable`），T2 的注释里本来就这么划。顺带把两处与设计不符的旧行为改正并加测试锁住：段落跟在列表后退格 = 成为列表新末项（§5.4）、无序/有序/任务互转 = 整块保留且条目 id 全复用（§5.6）。
    - **「委托语义等价」的可引证证据**：控制器里四条端到端用例 —— `引用第二行退格：并入上一行`、`引用首行退格：降级成段落，其余行仍留在引用里`（`8230f54` 补的，此前首行那半条没有端到端守卫）、`多行引用：分裂的是光标那一行（行号必须走 itemIndex，不能当 itemId 传）`、`引用多行只把光标那一行拎出来（其余行留在原块）` —— **测试一行未改，实现从控制器本地换成 `block_actions` 纯函数，仍然全绿**。它们以前守的是控制器本地实现、现在守的是 `block_actions`，是「行为契约没变、只换了实现位置」最直接的证据（强于口头声明「我照语义对齐了」）。控制器测试单文件 42 条全绿。
+   - **「签名未变」的口径（可复现，别只看人嘴）**：对 `8a9be67` 与 `8230f54` 两个 rev 各抽一遍类体方法签名行再 `diff` —— `NoteEditorController` 的**公开成员零新增、零删除、零改签名**；删掉的 15 个符号全是私有（含私有类 `_ListShape` 及其 `rebuild`），新增的 3 个也全是私有（`_splitTargetOf` / `_rowRefFor` / `_caretInMergedRow`）。**库级唯一变化**：删掉一个无引用的顶层公开助手 `textToRuns`（原 T3 用于「代码块 / 原文降级成段落」，`fe3e276` 改走 `block_actions` 后成死代码，`lib/` + `test/` 全仓零调用点，删前已 `grep` 确认）。所以准确的表述是「控制器公开面不变」，不是「一个签名都没动」。
 2. **表格仍用 Flutter `Table` widget**，未换 `MarkdownTableView`：换取既有 `find.byType(Table)` 断言原样通过，单元格编辑态用 `TextField` 覆盖单格。
    - **不影响 T2 的块级语义**：`block_actions` 对渲染完全无感——它只读写 `TableBlock` 的 `rows` / `aligns` / `hasHeader` 数据，import 只有 `block_model` / `inline_projection(show applyMark)` / `markdown_block_parser(show serializeInline)`，**不 import flutter**。将来换 `MarkdownTableView`（做单元格 Tab 跳转、表格工具条、列宽拖拽）**不需要改 `block_actions` 一行**，只动 `block_view.dart` + 控制器的焦点编排。
 3. **目录仍用 `extractHeadings(markdown)` 的字符偏移**做数据源，再映射成「块引用」；没有另建块级大纲模型。
