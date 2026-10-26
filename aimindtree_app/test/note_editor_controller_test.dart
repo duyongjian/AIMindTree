@@ -138,13 +138,15 @@ void main() {
       c.dispose();
     });
 
-    test('引用首行 → 标题：主块在前、残余引用在后（块顺序 + 行引用形状迁移）', () {
-      // 与上一条互补：那条守 `li == 1`「只抬一行（残余在前）」；这条守 `li == 0`
-      // 时**残余块的插入位置**（主块在前）。顺序反了会在 `as HeadingBlock` 处直接抛
-      // TypeError，不是软断言 —— 将来若有人「顺手统一」成残余在前，这里必红。
+    test('换类型：引用首行抬出后，残余引用排在主块之后（顺序不能反）', () {
+      // 与上一条互补：那条守 `li == 1`「只抬一行」；这条守 `li == 0`。
+      // li==0 时主块在前、残余在后；li>0 时相反 —— 两个分支顺序不同，是阅读顺序
+      // 决定的，不是笔误。将来若有人「顺手统一」成残余在前，这里必红：块顺序由
+      // 下面的 `as HeadingBlock` 硬转换保证（顺序反了就抛 TypeError，不是软断言）。
       final c = NoteEditorController(markdown: '> 一\n> 二');
       final q = c.doc.blocks.single as QuoteBlock;
       c.focusBlock(quoteLineRef(q.id, 0));
+      expect(c.active!.itemId, 'q:0', reason: '前置：确认聚焦的确实是引用行引用');
       c.convertActiveTo(BlockType.heading, level: 1);
 
       expect(c.doc.blocks, hasLength(2));
@@ -163,6 +165,8 @@ void main() {
       expect(c.active, isNotNull);
       expect(c.active!.blockId, h.id);
       expect(c.active!.itemId, isNull);
+      // 文档层再钉一次（不依赖 `active` 的维护逻辑）：主块的可编辑行只剩块级 ref。
+      expect(editableRefsOf(c.doc.blocks[0]).single.itemId, isNull);
       expect(c.caretOf(c.active!), 0);
       c.dispose();
     });
