@@ -1,0 +1,144 @@
+classDiagram
+    direction TB
+
+    class NoteDoc {
+        +List~Block~ blocks
+        +String prologue
+        +factory empty()
+    }
+
+    class Block {
+        <<abstract>>
+        +String id
+        +String? source
+        +String trailingGap
+        +bool textEditable
+    }
+
+    class ParagraphBlock { +InlineRuns runs }
+    class HeadingBlock { +int level +InlineRuns runs }
+    class QuoteBlock { +List~InlineRuns~ lines }
+    class BulletListBlock { +List~ListItem~ items }
+    class OrderedListBlock { +int start +List~ListItem~ items }
+    class TaskListBlock { +List~TaskItem~ items }
+    class CodeBlock { +String language +String code }
+    class TableBlock { +bool hasHeader +List~TableAlign~ aligns +List~List~InlineRuns~~ rows }
+    class DividerBlock { }
+    class ImageBlock { +String assetId +String alt }
+    class RawBlock { +String text }
+
+    class ListItem { +String id +InlineRuns runs }
+    class TaskItem { +String id +InlineRuns runs +bool checked }
+    class TableAlign { <<enumeration>> none left center right }
+
+    class InlineNode { <<abstract>> }
+    class TextRun { +String text +InlineMarks marks +String? href }
+    class InlineMarks { +int bits +has(m) bool +or(o) InlineMarks +minus(o) InlineMarks }
+
+    class BlockRef { +String blockId +String? itemId }
+
+    class MarkdownBlockParser {
+        <<utility>>
+        +parseMarkdownDoc(md) NoteDoc
+        +serializeDoc(doc) String
+        +parseInline(src) InlineRuns
+        +serializeInline(runs) String
+        +escapeLineStart(line) String
+    }
+
+    class InlineProjection {
+        <<utility>>
+        +projectRuns(oldText, oldRuns, newText) InlineRuns
+        +applyMark(runs, start, end, mark, on) InlineRuns
+        +normalizeRuns(runs) InlineRuns
+        +plainTextOf(runs) String
+    }
+
+    class BlockActions {
+        <<utility>>
+        +setBlockType(doc, ref, type) NoteDoc
+        +splitBlock(doc, ref, caret) NoteDoc
+        +mergeBackward(doc, ref) NoteDoc
+        +toggleTaskChecked(doc, ref) NoteDoc
+        +insertBlockAfter(doc, ref, block) NoteDoc
+        +deleteBlock(doc, blockId) NoteDoc
+        +addTableRow(doc, ref) NoteDoc
+        +setTableCell(doc, ref, row, col, text) NoteDoc
+    }
+
+    class NoteEditorController {
+        +NoteDoc doc
+        +String markdown
+        +BlockRef? active
+        +InlineMarks pendingMarks
+        +setMarkdown(md) void
+        +focusBlock(ref, caret) void
+        +setTextOfBlock(ref, newText) void
+        +toggleMark(mark) void
+        +convertActiveTo(type, level) void
+        +splitActive() void
+        +backspaceAtStart() void
+        +insertImageBlock(assetId, alt) void
+        +insertTableBlock(rows, cols) void
+        +insertDividerBlock() void
+        +selectionText() String
+    }
+
+    class RichLineController {
+        +InlineRuns runs
+        +TextStyle base
+        +buildTextSpan(ctx, style, withComposing) TextSpan
+    }
+
+    class BlockView { +Widget build() }
+    class NoteEditorBody { +Widget build() }
+    class MarkdownToolbar { +NoteEditorController controller +Future? onInsertImage }
+    class NoteEditorPage { +Widget build() }
+    class MarkdownRenderShim { +renderMarkdownBlocks(md, resolveAsset) List~Widget~ }
+
+    NoteDoc "1" *-- "n" Block
+    Block <|-- ParagraphBlock
+    Block <|-- HeadingBlock
+    Block <|-- QuoteBlock
+    Block <|-- BulletListBlock
+    Block <|-- OrderedListBlock
+    Block <|-- TaskListBlock
+    Block <|-- CodeBlock
+    Block <|-- TableBlock
+    Block <|-- DividerBlock
+    Block <|-- ImageBlock
+    Block <|-- RawBlock
+
+    ParagraphBlock --> InlineNode : runs
+    HeadingBlock --> InlineNode : runs
+    QuoteBlock --> InlineNode : lines
+    BulletListBlock --> ListItem : items
+    OrderedListBlock --> ListItem : items
+    TaskListBlock --> TaskItem : items
+    ListItem --> InlineNode : runs
+    TaskItem --> InlineNode : runs
+    TableBlock --> InlineNode : rows
+
+    InlineNode <|-- TextRun
+    TextRun --> InlineMarks : marks
+    TableBlock --> TableAlign : aligns
+
+    MarkdownBlockParser ..> NoteDoc : 构建
+    MarkdownBlockParser ..> InlineNode : 构建
+    BlockActions ..> NoteDoc : 变换
+    InlineProjection ..> InlineNode : 变换
+    NoteEditorController --> NoteDoc : 持有
+    NoteEditorController --> BlockRef : 当前焦点
+    NoteEditorController ..> BlockActions : 调用
+    NoteEditorController ..> InlineProjection : 调用
+    NoteEditorController ..> MarkdownBlockParser : 序列化
+    NoteEditorController "1" o-- "n" RichLineController : 每行一个
+    NoteEditorPage --> MarkdownToolbar : 使用
+    NoteEditorPage --> NoteEditorBody : 使用
+    NoteEditorPage --> NoteEditorController : 监听
+    NoteEditorBody --> BlockView
+    BlockView --> NoteEditorController : 读/写
+    BlockView --> RichLineController : 绑定
+    MarkdownToolbar --> NoteEditorController : 下发动作
+    MarkdownRenderShim ..> MarkdownBlockParser : 只读解析
+    MarkdownRenderShim ..> BlockView : 只读渲染

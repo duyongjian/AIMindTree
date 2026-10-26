@@ -1,0 +1,73 @@
+sequenceDiagram
+    autonumber
+    actor U as 用户
+    participant P as NoteEditorPage
+    participant C as NoteEditorController
+    participant PA as MarkdownBlockParser
+    participant B as BlockView
+    participant RC as RichLineController
+    participant A as BlockActions
+    participant PR as InlineProjection
+    participant DB as AppDatabase
+
+    Note over P,C: ① 加载（一次性）
+    P->>DB: select notes / contentMd
+    DB-->>P: row.contentMd
+    P->>C: setMarkdown(row.contentMd)
+    C->>PA: parseMarkdownDoc(md)
+    PA-->>C: NoteDoc(每块带 source=原文片段)
+    C->>P: notifyListeners()
+    P->>P: _lastBody = row.contentMd（先同步 baseline，避免误标脏）
+    P->>B: 渲染 READ 态（看不到 Markdown 标记）
+
+    Note over U,RC: ② 就地编辑某个块
+    U->>B: tap 某个段落
+    B->>C: focusBlock(ref)
+    C->>RC: 取/建 controller, text = plainTextOf(runs)
+    C-->>B: active = ref
+    B->>RC: TextField 进入编辑态（style 由 buildTextSpan 提供）
+    U->>RC: 按键输入
+    RC->>C: onChanged(newText)
+    C->>PR: projectRuns(oldText, oldRuns, newText)
+    PR-->>C: 新 runs（保留未改动区间的格式）
+    C->>C: 写回 block 且 source = null（标记为已编辑）
+    C->>PA: serializeDoc(doc)
+    PA-->>C: md（未编辑的块走 source 直通）
+    C-->>P: notifyListeners() → md != _lastBody → _dirty = true
+
+    Note over U,DB: ③ 工具栏加粗（N4：点了就立刻看到）
+    U->>U: 在块内选中一段文字
+    U->>P: tap「加粗」按钮
+    P->>C: toggleMark(bold)
+    C->>C: ref = active, sel = selectionOf(ref)
+    C->>PR: applyMark(runs, sel.start, sel.end, bold, on)
+    PR-->>C: 新 runs
+    C->>A: replaceBlockRuns(doc, ref, newRuns)
+    A-->>C: 新 NoteDoc
+    C->>PA: serializeDoc(doc)
+    PA-->>C: md
+    C->>RC: requestFocus + selection 保持（caret 不变）
+    C-->>B: notifyListeners()
+    B-->>U: 立刻渲染出加粗效果（编辑态与只读态一致）
+
+    Note over U,DB: ④ Enter 分裂 / 行首退格
+    U->>RC: Enter
+    RC->>C: onChanged 检测到新增 \n
+    C->>C: 先回滚 \n
+    C->>A: splitBlock(doc, ref, caret)
+    A-->>C: 两个块（同级同类型）
+    C->>RC: focus 新块 / caret = 0
+    U->>RC: Backspace（caret=0）
+    RC->>C: onKeyEvent 拦截（caret=0 且无选区；此时不会产生 onChange）
+    C->>A: mergeBackward(doc, ref) 或先降级为段落
+    A-->>C: 新 NoteDoc
+    C-->>B: notifyListeners()
+
+    Note over U,DB: ⑤ 保存（content_md 仍是 Markdown 纯文本）
+    U->>P: tap「保存」
+    P->>C: markdown
+    C-->>P: md
+    P->>DB: repo.saveNote(Note(contentMd: md, ...))
+    DB-->>P: Note(version+1)
+    P->>DB: assets.reconcileForNote(id, extractAssetIds(md))
+    P->>P: _lastBody = md; _dirty = false
