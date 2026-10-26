@@ -1141,3 +1141,63 @@ sequenceDiagram
 - [x] §12 风险清单 + 5 个待拍板问题
 - [x] §13 Anything UNCLEAR：本设计自行做的假设表
 - [x] §14 类图 / 时序图
+
+---
+
+## 实施结果与偏差（T1–T5 落地记录）
+
+### 1. 提交链（master，本地，未 push）
+
+| 任务 | commit | 内容 |
+| --- | --- | --- |
+| 设计基线 | `24f96b7` | 本文档（§1–§15） |
+| T1 数据层 | `2d55e88` | `block_model.dart` / `markdown_block_parser.dart` / `inline_projection.dart` |
+| T2 动作层 | `31ac7f3` | `block_actions.dart`（`splitBlock` / `mergeBackward` / `setBlockType` / 表格增删行列） |
+| T3 渲染与控制层 | `2ff5ea1` | `note_editor_controller.dart` / `block_view.dart` / `note_editor_body.dart`，`markdown_render.dart` 瘦身为 shim |
+| T4 接线层 | `8a9be67` | 去掉左右双框，工具栏 / 页面改接 `NoteEditorController` |
+| T3 补丁 | `86c2754` | `_isValidRef` 收紧（多行块拒绝块级 ref）+ 2 条回归 |
+| T4 补丁 | `0e59e96` | 第 ⑧ 条守卫：目录跳转必须真的落到标题块 |
+| T5a 收敛 | `fe3e276` | 控制器块级原语改走 `block_actions`，删掉双实现（−521 行） |
+
+### 2. 测试
+
+| 阶段 | 全量测试数 |
+| --- | --- |
+| 改造前基线 | 759 |
+| T1 | 785 |
+| T2 | 826 |
+| T3 | 865 |
+| T4 | 872 |
+| T3 补丁 | 874 |
+| T4 补丁 | 875 |
+| T5a | **878**（全绿） |
+
+闸门：`dart run tool/analyze_inproc.dart` → 155 文件 0 error / 0 warning（3 条既有 `withOpacity` info）；`flutter test` → 878/878；L1 字节直通保持（20 条语料逐字节相等 + 端到端「打开不动 → 保存字节相同」用例）。
+
+> 注：本机 `http_proxy/https_proxy` 会拦住 `flutter_tester` 的本地 WebSocket（报 `Invalid WebSocket upgrade request`），跑测试需先 `env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY flutter test`。
+
+### 3. 关键偏差（与设计原文的差异，均是落地时的取舍）
+
+1. **块级语义只有一份实现（T5a 收敛）**。原计划 T3 先本地实现、T5 再接 `block_actions`；实际 T5a 完成后，Enter 分裂 / 行首退格 / 换类型 / 任务勾选 / 表格加行全部委托给 `block_actions`，控制器只剩行引用与 caret 映射、焦点编排、序列化缓存。三处例外保留本地并注释：**引用非首行退格**（`mergeBackward` 会把该行抬出引用块，设计 §5.4 只要求首行降级）、**引用换类型**（`setBlockType` 的引用分支只抬第一行，签名里没有行下标）、**表格单元格 Enter**（跳下一格，`splitBlock` 的表格分支只做表尾追加行）。顺带把两处与设计不符的旧行为改正并加测试锁住：段落跟在列表后退格 = 成为列表新末项（§5.4）、无序/有序/任务互转 = 整块保留且条目 id 全复用（§5.6）。
+2. **表格仍用 Flutter `Table` widget**，未换 `MarkdownTableView`：换取既有 `find.byType(Table)` 断言原样通过，单元格编辑态用 `TextField` 覆盖单格。
+3. **目录仍用 `extractHeadings(markdown)` 的字符偏移**做数据源，再映射成「块引用」；没有另建块级大纲模型。
+4. **链接对话框在页面内自实现**（`_showLinkDialog`），没有复用系统组件；确认后走 `setLinkOn(ref, label, url, start:, end:)`（T4 新增），避免对话框抢焦点导致 `active` 变 null。
+5. **行内格式覆盖 `buildTextSpan`**：编辑态文本是纯文本（看不到 `#` / `-` / `>` / `**`），但加粗 / 斜体 / 行内代码 / 删除线照样带样式；组字期回退父类，runs 落后一帧时按长度钳制，避免 RangeError。
+6. **补齐两个历史渲染缺口**：删除线（`lineThrough`）与 `- [ ]` 任务列表（Checkbox），两者在只读态与编辑态共用同一套样式函数。
+
+### 4. 延后项（需真机目视 / 真机输入法，本轮未做）
+
+- 图片块、分割线的**点击浮层**（替换图片 / 删除）尚未实现，只做了插入；
+- 代码块**语言选择器**（当前显示语言标注，不可切换）；
+- 表格单元格 **Tab 跳转**（当前只支持 Enter 跳格，且不拦 Tab）；
+- **Ctrl+A 提示**（全选范围 = 当前行，未给用户提示）；
+- **Enter / Shift+Enter / Backspace 与中文输入法组字**在桌面 + Android 真机上的逐条确认（设计 §12 R-8：软键盘可能绕过 `onKeyEvent`）；
+- 长文滚动性能、图片替换删除、表格行列增删的**工具条入口**（控制器已提供 `appendTableRow`；删行列走 `block_actions` 的 `removeTableRow/removeTableColumn`，UI 未接）。
+
+### 5. 交付清单核对（补充）
+
+- [x] 编辑器为真 WYSIWYG：编辑态无任何 Markdown 标记符，样式保留
+- [x] 打开不改 → 保存字节相同（L1 直通），不产生脏标记、不触发同步假冲突
+- [x] Enter 分裂 / Notion 式两级退格 / 换类型 / 任务勾选 / 表格加行
+- [x] 块级语义单一实现（`block_actions`），控制器只留状态与焦点编排
+- [ ] 真机 IME 与点击浮层类交互（见 §4 延后项）
