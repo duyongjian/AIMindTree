@@ -26,11 +26,12 @@
 ///    附属块（残余引用多行、残余列表项）才用 `newBlockId()`。
 /// 5. **纯函数**：同样的入参永远得到同样的结构（`newBlockId()` 产生的 id 除外，id 不参与 `==`）。
 ///
-/// **与冻结契约的两处「加法」（向后兼容，见交付报告）**
+/// **与冻结契约的三处「加法」（都是可选具名参数，向后兼容，见交付报告）**
 /// - [splitBlock] / [mergeBackward] 各多了一个**可选具名参数**：块内偏移与条目/行下标 ——
 ///   因为 `BlockRef` 只承载 `(blockId, itemId)`，装不下「光标在块内第几个字符」。
 ///   不传时退化为「在末尾回车 / 首项」的默认语义，冻结的调用形状 `splitBlock(doc, at)` 依然成立。
-/// - [setBlockType] 多了一个可选具名参数 `headingLevel`（H1–H6 必须能指定级别）。
+/// - [setBlockType] 多了两个可选具名参数：`headingLevel`（H1–H6 必须能指定级别）与
+///   `itemIndex`（引用行没有 id，要支持「只改光标所在那一行」就必须能传行号，设计 §5.6）。
 library;
 
 import 'block_model.dart';
@@ -400,25 +401,34 @@ import 'markdown_block_parser.dart' show serializeInline;
     return (doc: _splice(doc, i, 1, <Block>[para]), caret: BlockRef(para.id));
   }
 
-  // 3) 引用 → 被指向的那一行降级为段落，其余行仍留在引用里（设计 §5.6 同款规则）。
+  // 3) 引用：**首行**降级为段落（设计 §5.4 两级退格的第一步）；
+  //    第 2 行起 → 并入**上一行**（与「列表非首项并进前一项」同款，块结构不变）。
   if (b is QuoteBlock) {
     final lines = b.lines;
     if (lines.isEmpty) return (doc: doc, caret: at);
     final li = _clamp(itemIndex ?? 0, lines.length - 1);
-    final cur = lines[li];
-    final rest = <InlineRuns>[...lines]..removeAt(li);
+
+    // 非首行：行内文本拼接，行数与块结构都不变（一个字都不丢，也不多冒出块）。
+    if (li > 0) {
+      final merged = <InlineRuns>[
+        ...lines.sublist(0, li - 1),
+        _concat(lines[li - 1], lines[li]),
+        ...lines.sublist(li + 1),
+      ];
+      final quote = QuoteBlock(id: b.id, trailingGap: b.trailingGap, lines: merged);
+      return (doc: _splice(doc, i, 1, <Block>[quote]), caret: BlockRef(quote.id));
+    }
+
+    // 首行：降级为独立段落，其余行仍留在引用块里。
+    final cur = lines.first;
+    final rest = lines.sublist(1);
     if (rest.isEmpty) {
       final para = ParagraphBlock(id: b.id, trailingGap: b.trailingGap, runs: cur);
       return (doc: _splice(doc, i, 1, <Block>[para]), caret: BlockRef(para.id));
     }
-    if (li == 0) {
-      final para = ParagraphBlock(id: newBlockId('p'), trailingGap: _gapOf(b), runs: cur);
-      final quote = QuoteBlock(id: b.id, trailingGap: b.trailingGap, lines: rest);
-      return (doc: _splice(doc, i, 1, <Block>[para, quote]), caret: BlockRef(para.id));
-    }
-    final quote = QuoteBlock(id: b.id, trailingGap: _gapOf(b), lines: rest);
-    final para = ParagraphBlock(id: newBlockId('p'), trailingGap: b.trailingGap, runs: cur);
-    return (doc: _splice(doc, i, 1, <Block>[quote, para]), caret: BlockRef(para.id));
+    final para = ParagraphBlock(id: newBlockId('p'), trailingGap: _gapOf(b), runs: cur);
+    final quote = QuoteBlock(id: b.id, trailingGap: b.trailingGap, lines: rest);
+    return (doc: _splice(doc, i, 1, <Block>[para, quote]), caret: BlockRef(para.id));
   }
 
   // 4) 代码块 / RawBlock → 文本原样降级为段落（一个字不少）。
@@ -555,14 +565,17 @@ import 'markdown_block_parser.dart' show serializeInline;
 ///   其余项仍留在原列表块里（位置按被指向项的前后保持顺序）；
 /// - 段落 / 标题 → 列表：整段文本包成**单项**列表；
 /// - 段落 / 标题 → 代码块：文本原样进 `code`（行内格式无法承载，会退化成纯文本）；
-/// - 引用 → 段落 / 标题 / 列表 / 代码：只抬出**被指向的那一行**（默认第一行），其余行仍是引用块
-///   （与设计 §5.6 的「只有光标所在行改变」一致）；
+/// - 引用 → 段落 / 标题 / 列表 / 代码：只抬出**被指向的那一行**（默认第一行，可用 [itemIndex] 指定），
+///   其余行仍是引用块（与设计 §5.6 的「只有光标所在行改变」一致）；
 /// - 代码块 / RawBlock → 其它文本块：正文原样降级，不丢字符；
 /// - 表格 / 分割线 / 图片 → 文本块：**保持原样**（没有可承载的正文载体，硬转会丢内容）；
 ///   同理文本块 → 表格 / 分割线 / 图片也保持原样（表格需要行列结构、图片需要 assetId）；
 ///   需要建表格/分割线/图片请用 T3 的 `insertTableBlock` / `insertDividerBlock` / `insertImageBlock`；
 /// - 目标类型就是当前类型（标题还要级别相同）→ **原样返回 doc**，
 ///   这样不会无谓地把 `source` 打掉（L1）。
+///
+/// [itemIndex] 只对引用有意义（引用行没有 id，`BlockRef` 也装不下行号）：缩放后越界自动 clamp，
+/// 缺省 = 第一行。列表 / 其它块忽略该参数（列表用 [BlockRef.itemId] 定位）。
 ///
 /// 注意：设计 §6.1 的「同一类型再点一次 → 回落段落」的**开关语义不在本函数**里，
 /// 由工具栏/T3 决定（否则 `setBlockType` 会变得不幂等，难以推理）。
@@ -571,6 +584,7 @@ NoteDoc setBlockType(
   BlockRef at,
   BlockType type, {
   int? headingLevel,
+  int? itemIndex,
 }) {
   final i = _indexOf(doc, at.blockId);
   if (i < 0) return doc;
@@ -590,7 +604,7 @@ NoteDoc setBlockType(
     ]);
   }
 
-  final repl = _convert(b, at, type, headingLevel);
+  final repl = _convert(b, at, type, headingLevel, itemIndex);
   if (repl == null) return doc; // 不可直接转 → 保持（绝不丢内容）
   return _splice(doc, i, 1, repl);
 }
@@ -827,7 +841,13 @@ int _level(int? level) {
 /// 把 [b] 转成 [target]；返回 `null` = 「不可直接转，保持原样」。
 ///
 /// 约定：返回列表里**占用原 id 的那一个就是主块**（T3 靠它维持光标）。
-List<Block>? _convert(Block b, BlockRef at, BlockType target, int? headingLevel) {
+List<Block>? _convert(
+  Block b,
+  BlockRef at,
+  BlockType target,
+  int? headingLevel,
+  int? itemIndex,
+) {
   final gap = b.trailingGap;
   final id = b.id;
 
@@ -854,7 +874,7 @@ List<Block>? _convert(Block b, BlockRef at, BlockType target, int? headingLevel)
     return _fromRuns(id, gap, <InlineNode>[TextRun(b.text)], target, headingLevel);
   }
 
-  if (b is QuoteBlock) return _liftFromQuote(b, at, target, headingLevel);
+  if (b is QuoteBlock) return _liftFromQuote(b, at, target, headingLevel, itemIndex);
 
   if (b is BulletListBlock) return _liftFromList(_BulletOps(b), at, target, headingLevel);
   if (b is OrderedListBlock) return _liftFromList(_OrderedOps(b), at, target, headingLevel);
@@ -928,37 +948,36 @@ List<Block>? _fromRuns(
   }
 }
 
-/// 引用 → 其它类型：只抬出**第一行**，其余行留在原引用块里。
+/// 引用 → 其它类型：只抬出**被指向的那一行**（默认第一行），其余行留在原引用块里。
 ///
-/// 取舍：`BlockRef` 只能定位到块（引用行没有 id），而 [setBlockType] 的签名里没有行下标；
-/// 「换块类型」在 UI 上的语义就是「把当前这一块变成 X」，因此统一按首行处理 ——
-/// 其余行原样留在引用块里，**一个字都不丢**。需要指定某一行的场景请走 [mergeBackward]（带 itemIndex）。
+/// 取舍：引用行没有 id，行号只能由调用方通过 [itemIndex] 给（设计 §5.6 要求「只有光标所在行改变」）。
+/// 被抬出的主块**占用原 id**（光标不丢）；残余引用块用新 id，位置按被指向行保持阅读顺序：
+/// 首行 → 主块在前、残余在后；非首行 → 残余在前、主块在后。两种排法都让最后一块接管原 `trailingGap`。
 List<Block>? _liftFromQuote(
   QuoteBlock b,
   BlockRef at,
   BlockType target,
   int? headingLevel,
+  int? itemIndex,
 ) {
   if (b.lines.isEmpty) return null;
-  final cur = b.lines.first;
-  final rest = b.lines.sublist(1);
+  final li = _clamp(itemIndex ?? 0, b.lines.length - 1);
+  final cur = b.lines[li];
+  final rest = b.lines.sublist(0, li) + b.lines.sublist(li + 1);
 
-  final primary = _fromRuns(
-    b.id,
-    rest.isEmpty ? b.trailingGap : _gapOf(b),
-    cur,
-    target,
-    headingLevel,
-  );
+  final primaryGap = rest.isEmpty ? b.trailingGap : (li == 0 ? _gapOf(b) : b.trailingGap);
+  final restGap = li == 0 ? b.trailingGap : _gapOf(b);
+
+  final primary = _fromRuns(b.id, primaryGap, cur, target, headingLevel);
   if (primary == null) return null;
   if (rest.isEmpty) return primary;
 
   final remainder = QuoteBlock(
     id: newBlockId('q'),
-    trailingGap: b.trailingGap,
+    trailingGap: restGap,
     lines: rest,
   );
-  return <Block>[...primary, remainder];
+  return li == 0 ? <Block>[...primary, remainder] : <Block>[remainder, ...primary];
 }
 
 /// 列表 → 其它类型：列表内部互转整块保留；转到非列表则抬出被指向的那一项。

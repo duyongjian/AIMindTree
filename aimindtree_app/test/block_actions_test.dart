@@ -480,6 +480,40 @@ void main() {
       expect(allText(r.doc), '甲乙');
     });
 
+    test('引用非首行退格 → 并入上一行（块结构不变、行数不变）', () {
+      final doc = NoteDoc(blocks: [
+        QuoteBlock(id: 'q', trailingGap: '', lines: [
+          [const TextRun('甲')],
+          [const TextRun('乙')],
+          [const TextRun('丙')],
+        ]),
+      ]);
+      final r = mergeBackward(doc, const BlockRef('q'), itemIndex: 1);
+      expect(r.doc.blocks.length, 1, reason: '不该冒出新块');
+      final q = r.doc.blocks.single as QuoteBlock;
+      expect(q.lines.length, 2, reason: '两行并成一行');
+      expect(plainTextOf(q.lines[0]), '甲乙');
+      expect(plainTextOf(q.lines[1]), '丙');
+      expect(r.caret, BlockRef(q.id));
+      expect(allText(r.doc), '甲乙丙', reason: '不丢字符');
+      expect(serializeDoc(r.doc), '> 甲乙\n> 丙');
+    });
+
+    test('引用末行退格 → 并入倒数第二行，marks 保留', () {
+      final doc = NoteDoc(blocks: [
+        QuoteBlock(id: 'q', trailingGap: '', lines: [
+          [const TextRun('甲')],
+          [const TextRun('乙', marks: InlineMarks.bold)],
+        ]),
+      ]);
+      final r = mergeBackward(doc, const BlockRef('q'), itemIndex: 99); // 越界 → clamp 到末行
+      final q = r.doc.blocks.single as QuoteBlock;
+      expect(q.lines.length, 1);
+      expect(plainTextOf(q.lines.single), '甲乙');
+      expect((q.lines.single.last as TextRun).marks, InlineMarks.bold);
+      expect(serializeDoc(r.doc), '> 甲**乙**');
+    });
+
     test('列表非首项 → 删本项并入前一项（不跨块）', () {
       final doc = d('- a\n- b\n- c');
       final r = mergeBackward(doc, itemRef(doc, 0, 1));
@@ -615,6 +649,41 @@ void main() {
       expect(r.blocks[0], isA<ParagraphBlock>());
       expect(r.blocks[1], isA<BulletListBlock>());
       expect(allText(r), 'ab');
+    });
+
+    test('引用第二行 → 标题：只改该行，残余引用在前，全文字符不丢', () {
+      final doc = NoteDoc(blocks: [
+        QuoteBlock(id: 'q', trailingGap: '', lines: [
+          [const TextRun('甲')],
+          [const TextRun('乙')],
+          [const TextRun('丙')],
+        ]),
+      ]);
+      final r = setBlockType(doc, const BlockRef('q'), BlockType.heading,
+          headingLevel: 2, itemIndex: 1);
+      expect(r.blocks.length, 2);
+      final q = r.blocks[0] as QuoteBlock;
+      final h = r.blocks[1] as HeadingBlock;
+      expect(q.lines.length, 2, reason: '被抬出的行从引用里摘掉');
+      expect(plainTextOf(q.lines[0]), '甲');
+      expect(plainTextOf(q.lines[1]), '丙');
+      expect(plainTextOf(h.runs), '乙');
+      expect(h.level, 2);
+      expect(h.id, 'q', reason: '主块占用原 id → 光标不丢');
+      expect(allText(r), '甲丙乙');
+      expect(serializeDoc(r), '> 甲\n> 丙\n\n## 乙');
+    });
+
+    test('setBlockType 的 itemIndex 越界 → clamp 到末行（不抛）', () {
+      final doc = NoteDoc(blocks: [
+        QuoteBlock(id: 'q', trailingGap: '', lines: [
+          [const TextRun('甲')],
+          [const TextRun('乙')],
+        ]),
+      ]);
+      final r = setBlockType(doc, const BlockRef('q'), BlockType.paragraph, itemIndex: 99);
+      expect(plainTextOf((r.blocks.last as ParagraphBlock).runs), '乙');
+      expect(allText(r), '甲乙');
     });
 
     test('引用 → 段落：只抬第一行，其余行仍是引用', () {
