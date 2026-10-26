@@ -765,8 +765,9 @@ class NoteEditorController extends ChangeNotifier {
 
   /// 行首退格（Notion 式两级：先降级、再合并）。返回 true = 已消费该按键。
   ///
-  /// 语义在 `block_actions.mergeBackward`：列表非首项并项 / 列表首项降级成段落 /
-  /// 标题降级 / 段落并入上一块（上一块不可拼接就删掉它）/ 代码块与原文块降级。
+  /// 语义全在 `block_actions.mergeBackward`：列表非首项并项 / 列表首项降级成段落 /
+  /// 标题降级 / 段落并入上一块（上一块不可拼接就删掉它）/ 代码块与原文块降级 /
+  /// 引用首行降级、引用非首行并入上一行。
   /// 这里只做「哪些块不走回并」的分流与「改完聚焦哪一行、光标落哪」。
   bool backspaceAtStart() {
     final ref = _active;
@@ -780,14 +781,9 @@ class NoteEditorController extends ChangeNotifier {
       case ImageBlock():
         // 单元格空：不跨单元格合并，也不跨块（设计 §5.4 最后一行）。
         return false;
-      case QuoteBlock():
-        // 引用非首行：块内并入上一行。`mergeBackward` 的引用分支会把该行**抬出**
-        // 引用块变成独立段落（设计只在「引用第一行」要求降级）→ 这一小块留在本地。
-        final i = quoteLineIndexOf(ref) ?? 0;
-        if (i > 0) return _mergeQuoteLineUp(ref, b, i);
-        break;
       case ParagraphBlock():
       case HeadingBlock():
+      case QuoteBlock():
       case BulletListBlock():
       case OrderedListBlock():
       case TaskListBlock():
@@ -796,33 +792,37 @@ class NoteEditorController extends ChangeNotifier {
         break;
     }
 
+    // 引用行的行号在 `BlockRef.itemId`（`'q:<n>'`）里，`mergeBackward` 要的是下标参数
+    // → 取出行号走 `itemIndex`（把 `'q:1'` 当 itemId 传会静默失效）。
+    final lineIndex = b is QuoteBlock ? quoteLineIndexOf(ref) : null;
+
     final mergedText = textOf(ref);
-    final result = actions.mergeBackward(
-      _doc,
-      ref,
-      // 引用第一行 → 降级（行号走 itemIndex，不能把 `'q:0'` 当 itemId 传）。
-      itemIndex: b is QuoteBlock ? 0 : null,
-    );
+    final result = actions.mergeBackward(_doc, ref, itemIndex: lineIndex);
     if (identical(result.doc, _doc)) return false;
     _commit(result.doc);
 
-    final target = _rowRefFor(result.caret);
+    final target = _rowRefFor(b, lineIndex, result.caret);
     focusBlock(target, caret: _caretInMergedRow(target, mergedText));
     return true;
   }
 
   /// 把 `mergeBackward` 返回的 caret 翻成控制器要求的行引用。
   ///
-  /// 多行块没有行 id，`block_actions` 只能返回块级 ref：段落并入引用块时内容落在
-  /// **末行**，所以引用块的块级 ref 一律解释成「最后一行」。其余情形返回的已经是
-  /// 有效行引用，原样透传。
-  BlockRef _rowRefFor(BlockRef ref) {
-    if (_isValidRef(ref)) return ref;
-    final b = _blockById(ref.blockId);
+  /// 引用块没有行 id，`block_actions` 只能返回块级 ref，两种情况落点不同：
+  /// - **段落并入引用块** → 内容落在末行；
+  /// - **引用第 n 行（n>0）并进上一行** → 光标应落在 n-1 行。
+  /// 其余情形返回的已经是有效行引用，原样透传。
+  BlockRef _rowRefFor(Block before, int? lineIndex, BlockRef caret) {
+    if (_isValidRef(caret)) return caret;
+    final b = _blockById(caret.blockId);
     if (b is QuoteBlock && b.lines.isNotEmpty) {
-      return quoteLineRef(ref.blockId, b.lines.length - 1);
+      final li = lineIndex;
+      if (before is QuoteBlock && li != null && li > 0) {
+        return quoteLineRef(caret.blockId, li - 1);
+      }
+      return quoteLineRef(caret.blockId, b.lines.length - 1);
     }
-    return ref;
+    return caret;
   }
 
   /// 回并之后光标落在哪一行的第几个字符。
@@ -1053,40 +1053,20 @@ class NoteEditorController extends ChangeNotifier {
     focusBlock(result.caret);
   }
 
-  // ===== 退格语义（内部） =====
-
-  /// 引用非首行退格：把该行并入上一行（块内，不跨块）。
-  ///
-  /// 为什么不用 `block_actions.mergeBackward`：它把被指向的行**抬出**引用块变成独立
-  /// 段落（设计 §5.4 只要求「引用第一行」降级），而第二行起再退格应当是「并进上一行」，
-  /// 否则一次退格就把整行搬到引用外面，视觉上像丢内容。
-  bool _mergeQuoteLineUp(BlockRef ref, QuoteBlock b, int i) {
-    if (i <= 0 || i >= b.lines.length) return false;
-    final idx = _indexOfBlock(b.id);
-    if (idx < 0) return false;
-    final lines = <InlineRuns>[...b.lines];
-    final prev = lines[i - 1];
-    lines[i - 1] = <InlineNode>[...prev, ...lines[i]];
-    lines.removeAt(i);
-    _replaceRange(idx, 1, <Block>[
-      QuoteBlock(id: b.id, trailingGap: b.trailingGap, lines: lines),
-    ]);
-    focusBlock(quoteLineRef(b.id, i - 1), caret: plainTextOf(prev).length);
-    return true;
-  }
-
   // ===== 换类型 =====
 
   void _convert(BlockRef ref, Block b, BlockType target, int level) {
-    // 引用 → 其它：设计 §5.6 要求「只有光标所在行改变」。`block_actions.setBlockType`
-    // 的引用分支只抬第一行（它拿不到行下标）→ 这一小块留在本地。
-    if (b is QuoteBlock) {
-      _extractQuoteLineAsBlock(ref, b, target, level);
-      return;
-    }
-
     final caret = caretOf(ref);
-    final next = actions.setBlockType(_doc, ref, target, headingLevel: level);
+    // 引用行的行号同样只能通过 `itemIndex` 传（`'q:<n>'` 不是真 itemId）：
+    // 设计 §5.6 要求「只有光标所在行改变」，其它行留在残余引用块里。
+    final lineIndex = b is QuoteBlock ? quoteLineIndexOf(ref) : null;
+    final next = actions.setBlockType(
+      _doc,
+      ref,
+      target,
+      headingLevel: level,
+      itemIndex: lineIndex,
+    );
     if (identical(next, _doc)) return;
     _commit(next);
 
@@ -1105,88 +1085,6 @@ class NoteEditorController extends ChangeNotifier {
     final refs = editableRefsOf(block);
     if (refs.isEmpty) return;
     focusBlock(refs.first, caret: caret);
-  }
-
-  /// 把引用块里**光标所在那一行**拎出来，按 [target] 造成独立块插在原块之后。
-  ///
-  /// 只有引用还留在这里：列表的同类操作已由 `setBlockType` 的 `_liftFromList` 覆盖
-  /// （它用条目 id 定位，能精确抬出被指向的那一项）。
-  void _extractQuoteLineAsBlock(BlockRef ref, QuoteBlock b, BlockType target, int level) {
-    final idx = _indexOfBlock(b.id);
-    if (idx < 0) return;
-    final caret = caretOf(ref);
-    final i = quoteLineIndexOf(ref) ?? 0;
-    if (i >= b.lines.length) return;
-
-    final lines = <InlineRuns>[...b.lines];
-    final line = lines.removeAt(i);
-    final rest = lines.isEmpty
-        ? null
-        : QuoteBlock(id: b.id, trailingGap: b.trailingGap, lines: lines);
-
-    final created = _makeBlock(target, line, level: level, gap: b.trailingGap);
-    // 被拎出来的块跟着原块的「后继间隔」走；原块若还在，则与它之间用两个换行。
-    if (rest == null) {
-      _replaceRange(idx, 1, <Block>[created]);
-    } else {
-      _replaceRange(idx, 1, <Block>[_withGap(rest, '\n\n'), created]);
-    }
-    _focusFirstLineOf(created, caret: caret);
-  }
-
-  /// 按类型造一个新块（内容 = [runs]）。
-  Block _makeBlock(
-    BlockType type,
-    InlineRuns runs, {
-    int level = 1,
-    String? id,
-    String gap = '\n\n',
-  }) {
-    final blockId = id ?? newBlockId(_idPrefixOf(type));
-    switch (type) {
-      case BlockType.paragraph:
-        return ParagraphBlock(id: blockId, trailingGap: gap, runs: runs);
-      case BlockType.heading:
-        return HeadingBlock(
-          id: blockId,
-          level: level.clamp(1, 6),
-          trailingGap: gap,
-          runs: runs,
-        );
-      case BlockType.quote:
-        return QuoteBlock(id: blockId, trailingGap: gap, lines: <InlineRuns>[runs]);
-      case BlockType.bulletList:
-        return BulletListBlock(
-          id: blockId,
-          trailingGap: gap,
-          items: <ListItem>[ListItem(id: newBlockId('li'), runs: runs)],
-        );
-      case BlockType.orderedList:
-        return OrderedListBlock(
-          id: blockId,
-          trailingGap: gap,
-          items: <ListItem>[ListItem(id: newBlockId('li'), runs: runs)],
-        );
-      case BlockType.taskList:
-        return TaskListBlock(
-          id: blockId,
-          trailingGap: gap,
-          items: <TaskItem>[TaskItem(id: newBlockId('ti'), runs: runs)],
-        );
-      case BlockType.code:
-        return CodeBlock(
-          id: blockId,
-          trailingGap: gap,
-          code: plainTextOf(runs),
-        );
-      case BlockType.divider:
-        return DividerBlock(id: blockId, trailingGap: gap);
-      case BlockType.image:
-      case BlockType.table:
-      case BlockType.raw:
-        // 这三类没有「由文本直接造」的语义，退回段落（调用方本就不该走到）。
-        return ParagraphBlock(id: blockId, trailingGap: gap, runs: runs);
-    }
   }
 
   // ===== 块树操作（内部） =====
@@ -1507,20 +1405,6 @@ class NoteEditorController extends ChangeNotifier {
     }
     return last;
   }
-
-  static String _idPrefixOf(BlockType type) => switch (type) {
-        BlockType.paragraph => 'p',
-        BlockType.heading => 'h',
-        BlockType.quote => 'q',
-        BlockType.bulletList => 'ul',
-        BlockType.orderedList => 'ol',
-        BlockType.taskList => 'tl',
-        BlockType.code => 'c',
-        BlockType.table => 'tb',
-        BlockType.divider => 'hr',
-        BlockType.image => 'img',
-        BlockType.raw => 'raw',
-      };
 }
 
 /// 「换个间隔」的块重建（[Block] 没有 copyWith，这里集中一处免得散落）。

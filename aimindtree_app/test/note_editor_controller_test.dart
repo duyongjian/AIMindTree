@@ -408,6 +408,24 @@ void main() {
       c.dispose();
     });
 
+    test('引用首行退格：降级成段落，其余行仍留在引用里', () {
+      // 设计 §5.4 两级退格的第一步。守卫原因：T5b 之后「非首行并进上一行」也在
+      // block_actions 里，两条路径共用一个入口，容易在收敛时把首行这条一起弄丢。
+      final c = NoteEditorController(markdown: '> 一\n> 二');
+      final q = c.doc.blocks.single as QuoteBlock;
+      c.focusBlock(quoteLineRef(q.id, 0), caret: 0);
+      expect(c.backspaceAtStart(), isTrue);
+
+      expect(c.doc.blocks, hasLength(2));
+      expect(c.doc.blocks[0], isA<ParagraphBlock>());
+      expect(c.doc.blocks[1], isA<QuoteBlock>());
+      expect(plainTextOf((c.doc.blocks[1] as QuoteBlock).lines.single), '二');
+      expect(c.textOf(c.active!), '一', reason: '首行内容一个字不丢，光标落到这一行');
+      expect(c.caretOf(c.active!), 0);
+      expect(c.markdown, '一\n\n> 二');
+      c.dispose();
+    });
+
     test('引用第二行退格：并入上一行', () {
       final c = NoteEditorController(markdown: '> 第一行\n> 第二行');
       final q = c.doc.blocks.single as QuoteBlock;
