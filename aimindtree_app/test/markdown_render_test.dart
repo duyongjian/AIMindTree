@@ -221,4 +221,64 @@ void main() {
     expect(_containing(tester, '随便一段'), isNotEmpty);
     expect(tester.takeException(), isNull);
   });
+
+  // ------------------------------------------------------------------
+  // T3 新增：两个历史渲染缺口（设计 §6.3）+ 表格对齐（设计 §6.6 P1）
+  // ------------------------------------------------------------------
+
+  testWidgets('删除线：渲染出 lineThrough，正文里不出现 ~~',
+      (WidgetTester tester) async {
+    await _pump(tester, '删除线 ~~strike~~ 示例');
+
+    final spans = <TextSpan>[
+      for (final r in _renderedTexts(tester)) ..._flattenSpans(r.widget.textSpan),
+    ];
+    final strike = spans.firstWhere(
+      (s) => s.text == 'strike',
+      orElse: () => const TextSpan(),
+    );
+    expect(strike.style?.decoration, TextDecoration.lineThrough);
+    // 标记符不能漏到屏幕上。
+    expect(_containing(tester, '~~'), isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('任务列表：渲染可勾选的 Checkbox，不出现 • [ ] 原文',
+      (WidgetTester tester) async {
+    await _pump(tester, '- [ ] 待办一\n- [x] 已办二');
+
+    expect(find.byType(Checkbox), findsNWidgets(2));
+    expect(_containing(tester, '待办一'), isNotEmpty);
+    expect(_containing(tester, '已办二'), isNotEmpty);
+    // 缺口的验收口径：不允许把 `- [ ] ` 当普通无序列表渲染。
+    expect(_containing(tester, '• [ ]'), isEmpty);
+    expect(_containing(tester, '[ ]'), isEmpty);
+    expect(_renderedTexts(tester).where((r) => r.text == '• '), isEmpty);
+
+    // 勾选态直接反映在 Checkbox 上（true / false 各一个）。
+    final values = tester
+        .widgetList<Checkbox>(find.byType(Checkbox))
+        .map((c) => c.value)
+        .toList();
+    expect(values, <bool>[false, true]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('表格对齐：左 / 中 / 右分别落到 TextAlign',
+      (WidgetTester tester) async {
+    await _pump(
+        tester, '| 左 | 中 | 右 |\n| :--- | :---: | ---: |\n| a | b | c |');
+
+    TextAlign? alignOf(String cell) {
+      for (final r in _containing(tester, cell)) {
+        if (r.text == cell) return r.widget.textAlign;
+      }
+      return null;
+    }
+
+    expect(alignOf('左'), TextAlign.left);
+    expect(alignOf('中'), TextAlign.center);
+    expect(alignOf('右'), TextAlign.right);
+    expect(tester.takeException(), isNull);
+  });
 }

@@ -1,0 +1,764 @@
+/// 笔记编辑器的「单个块」渲染（T3 渲染层）。
+///
+/// 设计依据：`docs/NOTE_EDITOR_WYSIWYG_DESIGN.md` §2.2（分层图）、§5.2（编辑态仍显示加粗）、
+/// §6.2–§6.5（渲染升级 / 两个缺口 / 表格选型 / 图片）。
+///
+/// **这个文件管什么**
+/// - 一套**视觉语言常量**（字号 / 间距 / 灰底 / 边框），只读态与编辑态共用 →
+///   「点进去」时不会跳变；也保证与改造前 `markdown_render.dart` 的预览栏视觉零差异；
+/// - 11 种块各自的 Widget：[BlockView]（可编辑，依赖 [NoteEditorController]）；
+/// - 只读版：[buildReadOnlyBlock] / [buildReadOnlyDoc]（供 `markdown_render.dart`
+///   兼容 shim 与未来任何「只读展示 Markdown」的页面复用）；
+/// - 编辑态的一行 = 一个 `TextField`，文本是**纯文本**（看不到 `#`/`-`/`>`/`**`），
+///   样式由 [RichLineController.buildTextSpan] 逐段套回来。
+///
+/// **这个文件不管什么**
+/// - 文档状态与块级编辑原语 → `note_editor_controller.dart`；
+/// - 滚动容器 / 按键路由 → `note_editor_body.dart`；
+/// - 解析与序列化 → `markdown_block_parser.dart`（本文件**不做任何解析**）。
+library;
+
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+
+import 'block_model.dart';
+import 'note_editor_controller.dart';
+
+// ---------------------------------------------------------------------------
+// 视觉语言（与改造前 markdown_render.dart 逐项对齐，禁止随手改字号）
+// ---------------------------------------------------------------------------
+
+/// 正文基准样式（改造前 `_kBase`）。
+const TextStyle kNoteBase = TextStyle(fontSize: 14, height: 1.5);
+
+/// 块与块之间的下间距（改造前 `_kBlockGap`）。
+const double kNoteBlockGap = 10.0;
+
+/// 代码块样式（改造前 `_buildCode` 的 `TextStyle`）。
+const TextStyle kNoteCode = TextStyle(fontFamily: 'monospace', fontSize: 13, height: 1.4);
+
+/// 标题字号：**只有 3 档**（H1=20 / H2=17 / H3~H6=15）。
+///
+/// ⚠️ `test/markdown_render_test.dart` 硬断言了这三个数，改任何一档都会让测试变红
+/// （见设计 §6.6「标题字号本轮不动」）。
+double kNoteHeadingFontSize(int level) => switch (level) {
+      1 => 20.0,
+      2 => 17.0,
+      _ => 15.0,
+    };
+
+/// 标题样式（改造前 `_buildHeading`）。
+TextStyle kNoteHeadingStyle(int level) => kNoteBase.copyWith(
+      fontSize: kNoteHeadingFontSize(level),
+      fontWeight: FontWeight.bold,
+      height: 1.3,
+    );
+
+/// 引用正文样式（改造前 `_buildQuote`）。
+TextStyle kNoteQuoteTextStyle() => kNoteBase.copyWith(color: Colors.grey.shade700);
+
+/// 表格单元格样式（改造前 `_buildTable` 的 13 号）。
+TextStyle kNoteTableCellStyle({bool header = false}) => kNoteBase.copyWith(
+      fontSize: 13,
+      fontWeight: header ? FontWeight.bold : FontWeight.normal,
+    );
+
+/// 行内片段 → `TextSpan` 列表（只读态与编辑态共用同一套 mark 映射）。
+List<InlineSpan> inlineSpansFor(InlineRuns runs, TextStyle base) {
+  final out = <InlineSpan>[];
+  for (final node in runs) {
+    if (node is! TextRun || node.text.isEmpty) continue;
+    out.add(TextSpan(
+      text: node.text,
+      style: richStyleForMarks(node.marks, base, href: node.href),
+    ));
+  }
+  return out;
+}
+
+/// 任务项勾选回调（只读渲染不持有控制器，靠它把点击交回上层）。
+typedef TaskToggleCallback = void Function(Block block, TaskItem item);
+
+// ---------------------------------------------------------------------------
+// 只读渲染（供 markdown_render.dart 兼容 shim 复用）
+// ---------------------------------------------------------------------------
+
+/// 把整篇文档渲染成一列块级 Widget（**只读**，不可编辑）。
+List<Widget> buildReadOnlyDoc(
+  NoteDoc doc, {
+  AssetResolver? resolveAsset,
+  TaskToggleCallback? onToggleTask,
+}) {
+  return <Widget>[
+    for (final block in doc.blocks)
+      buildReadOnlyBlock(
+        block,
+        resolveAsset: resolveAsset,
+        onToggleTask: onToggleTask,
+      ),
+  ];
+}
+
+/// 单个块的只读渲染。
+Widget buildReadOnlyBlock(
+  Block block, {
+  AssetResolver? resolveAsset,
+  TaskToggleCallback? onToggleTask,
+}) {
+  switch (block) {
+    case ParagraphBlock(:final runs):
+      return Padding(
+        padding: const EdgeInsets.only(bottom: kNoteBlockGap),
+        child: _readOnlyLine(runs, kNoteBase),
+      );
+    case HeadingBlock(:final level, :final runs):
+      return Padding(
+        padding: const EdgeInsets.only(bottom: kNoteBlockGap),
+        child: _readOnlyLine(runs, kNoteHeadingStyle(level)),
+      );
+    case QuoteBlock(:final lines):
+      final style = kNoteQuoteTextStyle();
+      return Container(
+        width: double.infinity,
+        margin: const EdgeInsets.only(bottom: kNoteBlockGap),
+        padding: const EdgeInsets.fromLTRB(10, 6, 8, 6),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade100,
+          border: Border(left: BorderSide(color: Colors.grey.shade400, width: 3)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            for (final line in lines) _readOnlyLine(line, style),
+          ],
+        ),
+      );
+    case BulletListBlock(:final items):
+      return _listShell(<Widget>[
+        for (final item in items)
+          _listRow(
+            marker: Text('• ', style: kNoteBase),
+            runs: item.runs,
+            style: kNoteBase,
+          ),
+      ]);
+    case OrderedListBlock(:final start, :final items):
+      return _listShell(<Widget>[
+        for (var i = 0; i < items.length; i++)
+          _listRow(
+            marker: Text('${start + i}. ', style: kNoteBase),
+            runs: items[i].runs,
+            style: kNoteBase,
+          ),
+      ]);
+    case TaskListBlock(:final items):
+      return _listShell(<Widget>[
+        for (final item in items)
+          _taskRow(
+            item: item,
+            runs: item.runs,
+            style: _taskTextStyle(item.checked),
+            onToggle: onToggleTask == null ? null : () => onToggleTask(block, item),
+          ),
+      ]);
+    case CodeBlock(:final language, :final code):
+      return _codeShell(
+        language: language,
+        child: Text(code, style: kNoteCode),
+      );
+    case TableBlock():
+      return Padding(
+        padding: const EdgeInsets.only(bottom: kNoteBlockGap),
+        child: _table(block, null),
+      );
+    case DividerBlock():
+      return const Divider(height: 20, thickness: 1);
+    case ImageBlock(:final assetId, :final alt):
+      return Padding(
+        padding: const EdgeInsets.only(bottom: kNoteBlockGap),
+        child: NoteImageView(
+          assetId: assetId,
+          alt: alt,
+          resolveAsset: resolveAsset,
+        ),
+      );
+    case RawBlock(:final text):
+      return _rawShell(text, null);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 可编辑的块
+// ---------------------------------------------------------------------------
+
+/// 单个块的可编辑渲染：活动行 = `TextField`，其余行 = 只读 Widget。
+class BlockView extends StatelessWidget {
+  const BlockView({
+    super.key,
+    required this.controller,
+    required this.block,
+  });
+
+  final NoteEditorController controller;
+  final Block block;
+
+  @override
+  Widget build(BuildContext context) {
+    switch (block) {
+      case ParagraphBlock(:final runs):
+        return Padding(
+          padding: const EdgeInsets.only(bottom: kNoteBlockGap),
+          child: _line(BlockRef(block.id), runs, kNoteBase),
+        );
+      case HeadingBlock(:final level, :final runs):
+        return Padding(
+          padding: const EdgeInsets.only(bottom: kNoteBlockGap),
+          child: _line(BlockRef(block.id), runs, kNoteHeadingStyle(level)),
+        );
+      case QuoteBlock(:final lines):
+        final style = kNoteQuoteTextStyle();
+        return Container(
+          width: double.infinity,
+          margin: const EdgeInsets.only(bottom: kNoteBlockGap),
+          padding: const EdgeInsets.fromLTRB(10, 6, 8, 6),
+          decoration: BoxDecoration(
+            color: Colors.grey.shade100,
+            border: Border(left: BorderSide(color: Colors.grey.shade400, width: 3)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              for (var i = 0; i < lines.length; i++)
+                _line(quoteLineRef(block.id, i), lines[i], style),
+            ],
+          ),
+        );
+      case BulletListBlock(:final items):
+        return _listShell(<Widget>[
+          for (final item in items)
+            _listRow(
+              marker: Text('• ', style: kNoteBase),
+              runs: item.runs,
+              style: kNoteBase,
+              line: _line(BlockRef(block.id, itemId: item.id), item.runs, kNoteBase),
+            ),
+        ]);
+      case OrderedListBlock(:final start, :final items):
+        return _listShell(<Widget>[
+          for (var i = 0; i < items.length; i++)
+            _listRow(
+              marker: Text('${start + i}. ', style: kNoteBase),
+              runs: items[i].runs,
+              style: kNoteBase,
+              line: _line(
+                BlockRef(block.id, itemId: items[i].id),
+                items[i].runs,
+                kNoteBase,
+              ),
+            ),
+        ]);
+      case TaskListBlock(:final items):
+        return _listShell(<Widget>[
+          for (final item in items)
+            _taskRow(
+              item: item,
+              runs: item.runs,
+              style: _taskTextStyle(item.checked),
+              onToggle: () => controller.toggleTaskItem(
+                BlockRef(block.id, itemId: item.id),
+              ),
+              line: _line(
+                BlockRef(block.id, itemId: item.id),
+                item.runs,
+                _taskTextStyle(item.checked),
+              ),
+            ),
+        ]);
+      case CodeBlock(:final language, :final code):
+        return _codeShell(
+          language: language,
+          child: _line(
+            BlockRef(block.id),
+            code.isEmpty ? const <InlineNode>[] : <InlineNode>[TextRun(code)],
+            kNoteCode,
+            asPlainText: true,
+          ),
+        );
+      case TableBlock():
+        return Padding(
+          padding: const EdgeInsets.only(bottom: kNoteBlockGap),
+          child: _table(block, controller),
+        );
+      case DividerBlock():
+        return const Divider(height: 20, thickness: 1);
+      case ImageBlock(:final assetId, :final alt):
+        return Padding(
+          padding: const EdgeInsets.only(bottom: kNoteBlockGap),
+          child: NoteImageView(
+            assetId: assetId,
+            alt: alt,
+            resolveAsset: controller.resolveAsset,
+          ),
+        );
+      case RawBlock(:final text):
+        return _rawShell(
+          text,
+          _line(
+            BlockRef(block.id),
+            text.isEmpty ? const <InlineNode>[] : <InlineNode>[TextRun(text)],
+            kNoteCode,
+            asPlainText: true,
+          ),
+        );
+    }
+  }
+
+  /// 一行：活动 → 编辑态 `TextField`；否则只读 Widget（可点击定位光标）。
+  Widget _line(
+    BlockRef ref,
+    InlineRuns runs,
+    TextStyle style, {
+    bool asPlainText = false,
+  }) {
+    if (controller.active == ref) {
+      return _editableLine(ref, style, asPlainText: asPlainText);
+    }
+    return _ReadOnlyLine(
+      controller: controller,
+      ref: ref,
+      runs: runs,
+      style: style,
+      asPlainText: asPlainText,
+    );
+  }
+
+  Widget _editableLine(BlockRef ref, TextStyle style, {required bool asPlainText}) {
+    final ctrl = controller.lineControllerFor(ref, base: style);
+    return TextField(
+      controller: ctrl,
+      focusNode: controller.focusNodeFor(ref),
+      style: style,
+      maxLines: null,
+      cursorWidth: 2,
+      cursorHeight: style.fontSize == null ? null : style.fontSize! * 1.15,
+      keyboardType: TextInputType.multiline,
+      textInputAction: TextInputAction.newline,
+      // 只读态是 Text.rich（零内边距），编辑态必须对齐，否则点进去会「跳一下」。
+      decoration: const InputDecoration(
+        isDense: true,
+        border: InputBorder.none,
+        contentPadding: EdgeInsets.zero,
+        hintText: null,
+      ),
+      onChanged: (String value) => controller.onLineChanged(ref, value),
+    );
+  }
+}
+
+/// 一键进入编辑态的只读行：点哪儿就把光标放到哪儿。
+class _ReadOnlyLine extends StatelessWidget {
+  const _ReadOnlyLine({
+    required this.controller,
+    required this.ref,
+    required this.runs,
+    required this.style,
+    this.asPlainText = false,
+  });
+
+  final NoteEditorController controller;
+  final BlockRef ref;
+  final InlineRuns runs;
+  final TextStyle style;
+  final bool asPlainText;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = plainTextOf(runs);
+    if (asPlainText) {
+      // 代码块 / 原文块：必须用 `Text(data)`（测试断言了 `widget.style.fontFamily`），
+      // 且不做任何行内解析。
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (TapDownDetails d) => _focusAt(context, text, d.localPosition, double.infinity),
+        child: Text(
+          text.isEmpty ? ' ' : text,
+          style: style,
+        ),
+      );
+    }
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final width = constraints.hasBoundedWidth
+            ? constraints.maxWidth
+            : MediaQuery.sizeOf(context).width;
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (TapDownDetails d) => _focusAt(context, text, d.localPosition, width),
+          child: text.isEmpty
+              ? SizedBox(
+                  width: double.infinity,
+                  height: style.fontSize == null ? 20 : style.fontSize! * 1.5,
+                )
+              : Text.rich(
+                  TextSpan(style: style, children: inlineSpansFor(runs, style)),
+                ),
+        );
+      },
+    );
+  }
+
+  void _focusAt(BuildContext context, String text, Offset local, double width) {
+    final caret = caretForTap(
+      text: text,
+      style: style,
+      maxWidth: width.isFinite ? width : MediaQuery.sizeOf(context).width,
+      local: local,
+      direction: Directionality.maybeOf(context) ?? TextDirection.ltr,
+    );
+    controller.focusBlock(ref, caret: caret);
+  }
+}
+
+/// 点击位置 → 字符偏移（用 [TextPainter] 自己算，避免为了拿光标位置而引入
+/// 一个永远可见的 `TextField`）。
+int caretForTap({
+  required String text,
+  required TextStyle style,
+  required double maxWidth,
+  required Offset local,
+  TextDirection direction = TextDirection.ltr,
+}) {
+  if (text.isEmpty) return 0;
+  final painter = TextPainter(
+    text: TextSpan(text: text, style: style),
+    textDirection: direction,
+    maxLines: null,
+  );
+  painter.layout(maxWidth: maxWidth.isFinite ? maxWidth : 1048576.0);
+  final pos = painter.getPositionForOffset(local);
+  painter.dispose();
+  return pos.offset.clamp(0, text.length);
+}
+
+// ---------------------------------------------------------------------------
+// 行 / 列表 / 代码 / 表格 / 原文 的共用外观
+// ---------------------------------------------------------------------------
+
+Widget _readOnlyLine(InlineRuns runs, TextStyle style) {
+  final text = plainTextOf(runs);
+  if (text.isEmpty) {
+    return SizedBox(height: style.fontSize == null ? 20 : style.fontSize! * 1.5);
+  }
+  return Text.rich(TextSpan(style: style, children: inlineSpansFor(runs, style)));
+}
+
+Widget _listShell(List<Widget> children) => Padding(
+      padding: const EdgeInsets.only(bottom: kNoteBlockGap),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: children,
+      ),
+    );
+
+/// 列表行：marker + 正文。给了 [line] 就用它当正文（可编辑），否则只读渲染。
+Widget _listRow({
+  required Widget marker,
+  required InlineRuns runs,
+  required TextStyle style,
+  Widget? line,
+}) {
+  return Padding(
+    padding: const EdgeInsets.only(bottom: 2),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        marker,
+        Expanded(child: line ?? _readOnlyLine(runs, style)),
+      ],
+    ),
+  );
+}
+
+TextStyle _taskTextStyle(bool checked) => checked
+    ? kNoteBase.copyWith(
+        decoration: TextDecoration.lineThrough,
+        color: Colors.grey.shade500,
+      )
+    : kNoteBase;
+
+Widget _taskRow({
+  required TaskItem item,
+  required InlineRuns runs,
+  TextStyle style = kNoteBase,
+  VoidCallback? onToggle,
+  Widget? line,
+}) {
+  return Padding(
+    padding: const EdgeInsets.only(bottom: 2),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        SizedBox(
+          width: 26,
+          height: 21,
+          child: Checkbox(
+            value: item.checked,
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            visualDensity: VisualDensity.compact,
+            onChanged: onToggle == null ? null : (_) => onToggle(),
+          ),
+        ),
+        const SizedBox(width: 4),
+        Expanded(child: line ?? _readOnlyLine(runs, style)),
+      ],
+    ),
+  );
+}
+
+Widget _codeShell({required String language, required Widget child}) {
+  return Container(
+    width: double.infinity,
+    margin: const EdgeInsets.only(bottom: kNoteBlockGap),
+    padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+    decoration: BoxDecoration(
+      color: Colors.grey.shade200,
+      borderRadius: BorderRadius.circular(4),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        if (language.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Text(
+              language,
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            ),
+          ),
+        child,
+      ],
+    ),
+  );
+}
+
+Widget _rawShell(String text, Widget? line) {
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: <Widget>[
+      Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        color: Colors.amber.shade100,
+        child: Text(
+          '此块含不支持的格式，按原文编辑',
+          style: TextStyle(fontSize: 11, color: Colors.amber.shade900),
+        ),
+      ),
+      Container(
+        width: double.infinity,
+        margin: const EdgeInsets.only(bottom: kNoteBlockGap),
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade50,
+          border: Border.all(color: Colors.grey.shade300),
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: line ?? Text(text, style: kNoteCode),
+      ),
+    ],
+  );
+}
+
+/// 表格：只读态与编辑态**共用一个 `Table`**（设计 §6.4 的取舍见交付说明）——
+/// 单元格被点中时那一个格子换成 `TextField`，其余仍是 `Text.rich`。
+Widget _table(Block block, NoteEditorController? controller) {
+  if (block is! TableBlock) return const SizedBox.shrink();
+  final rows = block.rows;
+  var columns = block.aligns.length;
+  for (final row in rows) {
+    if (row.length > columns) columns = row.length;
+  }
+  if (columns <= 0) columns = 1;
+
+  return SizedBox(
+    width: double.infinity,
+    child: Table(
+      border: TableBorder.all(color: Colors.grey.shade400, width: 0.5),
+      defaultColumnWidth: const FlexColumnWidth(),
+      columnWidths: <int, TableColumnWidth>{
+        for (var i = 0; i < columns; i++) i: const FlexColumnWidth(1.0),
+      },
+      children: <TableRow>[
+        for (var r = 0; r < rows.length; r++)
+          TableRow(
+            decoration: r == 0 && block.hasHeader
+                ? BoxDecoration(color: Colors.grey.shade200)
+                : null,
+            children: <Widget>[
+              for (var c = 0; c < columns; c++)
+                _cell(
+                  block: block,
+                  controller: controller,
+                  row: r,
+                  col: c,
+                  runs: c < rows[r].length ? rows[r][c] : const <InlineNode>[],
+                  header: r == 0 && block.hasHeader,
+                ),
+            ],
+          ),
+      ],
+    ),
+  );
+}
+
+Widget _cell({
+  required TableBlock block,
+  required NoteEditorController? controller,
+  required int row,
+  required int col,
+  required InlineRuns runs,
+  required bool header,
+}) {
+  final style = kNoteTableCellStyle(header: header);
+  final align = col < block.aligns.length ? block.aligns[col] : TableAlign.none;
+  final textAlign = switch (align) {
+    TableAlign.center => TextAlign.center,
+    TableAlign.right => TextAlign.right,
+    TableAlign.left => TextAlign.left,
+    TableAlign.none => TextAlign.left,
+  };
+  final ref = tableCellRef(block.id, row, col);
+
+  Widget child;
+  if (controller != null && controller.active == ref) {
+    final ctrl = controller.lineControllerFor(ref, base: kNoteTableCellStyle(header: false));
+    child = TextField(
+      controller: ctrl,
+      focusNode: controller.focusNodeFor(ref),
+      style: kNoteTableCellStyle(header: false),
+      maxLines: null,
+      textAlign: textAlign,
+      keyboardType: TextInputType.text,
+      textInputAction: TextInputAction.newline,
+      decoration: const InputDecoration(
+        isDense: true,
+        border: InputBorder.none,
+        contentPadding: EdgeInsets.zero,
+      ),
+      onChanged: (String value) => controller.onLineChanged(ref, value),
+    );
+  } else {
+    final text = plainTextOf(runs);
+    final content = text.isEmpty
+        ? const SizedBox(height: 18)
+        : Text.rich(
+            TextSpan(style: style, children: inlineSpansFor(runs, style)),
+            textAlign: textAlign,
+          );
+    child = controller == null
+        ? content
+        : GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapDown: (TapDownDetails d) => controller.focusBlock(
+              ref,
+              caret: caretForTap(
+                text: text,
+                style: style,
+                maxWidth: 1000,
+                local: d.localPosition,
+              ),
+            ),
+            child: content,
+          );
+  }
+
+  return Padding(
+    padding: const EdgeInsets.fromLTRB(6, 4, 6, 4),
+    child: child,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 图片
+// ---------------------------------------------------------------------------
+
+/// 图片块：`aimindtree-asset://<id>` → 字节 → `Image.memory`。
+///
+/// 缺失 / 未同步 / 解码失败一律降级成「图片未同步」占位块 ——
+/// **绝不让整篇笔记渲染失败**（改造前的语义，必须保留）。
+class NoteImageView extends StatelessWidget {
+  const NoteImageView({
+    super.key,
+    required this.assetId,
+    this.alt = '',
+    this.resolveAsset,
+    this.height = 160,
+  });
+
+  final String assetId;
+  final String alt;
+  final AssetResolver? resolveAsset;
+  final double height;
+
+  @override
+  Widget build(BuildContext context) {
+    final resolver = resolveAsset;
+    if (resolver == null) return _missing(alt);
+    return FutureBuilder<Uint8List?>(
+      future: resolver(assetId),
+      builder: (BuildContext context, AsyncSnapshot<Uint8List?> snap) {
+        if (snap.connectionState != ConnectionState.done) {
+          return _imageShell(
+            const Center(
+              child: Text(
+                '加载中…',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ),
+          );
+        }
+        final bytes = snap.data;
+        if (bytes == null || bytes.isEmpty) return _missing(alt);
+        return Image.memory(
+          bytes,
+          height: height,
+          fit: BoxFit.contain,
+          errorBuilder: (BuildContext _, Object __, StackTrace? ___) => _missing(alt),
+        );
+      },
+    );
+  }
+}
+
+Widget _imageShell(Widget child) => Container(
+      width: 160,
+      padding: const EdgeInsets.all(6),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade300,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: Colors.grey.shade400),
+      ),
+      alignment: Alignment.center,
+      child: child,
+    );
+
+Widget _missing(String alt) => _imageShell(
+      Column(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: <Widget>[
+          Icon(Icons.broken_image, size: 22, color: Colors.grey.shade600),
+          const SizedBox(height: 4),
+          Text(
+            alt.isEmpty ? '图片未同步' : '图片未同步：$alt',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+    );
