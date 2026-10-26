@@ -1247,7 +1247,8 @@ void appendParagraphAndFocus();   void appendTableRow(BlockRef);
 | T4 补丁 | `0e59e96` | 第 ⑧ 条守卫：目录跳转必须真的落到标题块 |
 | T5a 收敛 | `fe3e276` | 控制器块级原语改走 `block_actions`，删掉双实现。`git show --numstat`：controller **+197 / −525**（净 −328），测试 **+54 / −0** |
 | T5c 收尾 | `8230f54` | 删掉控制器里 `_mergeQuoteLineUp` / `_extractQuoteLineAsBlock`（连带 `_makeBlock` / `_idPrefixOf`），委托 `mergeBackward(itemIndex:)` / `setBlockType(itemIndex:)`；修掉 `_liftFromQuote` 残余引用顺序反了（首行被抬出时）。`git show --numstat`：controller +33 / −149，测试 +18 / −0 |
-| 文档回写（doc-only） | `d9bb2e0` / `01e8fe0` / `090f917` / `0f6f488` | 实施结果与偏差回写、测试数表格修正（只保留可复核的阶段）、共享 worktree 的 git 红线与代理坑；**全量 `flutter test` 必须串行化**（并发抢 `build/native_assets/windows/sqlite3.dll` 会报一句 `Flutter failed to delete a file` 后**静默退场**，无失败无报错，极易被读成「全绿」）、测试基线表更新到 883 |
+| T5c 守卫 | `a887c2c` | 补「引用首行 → 标题」端到端守卫：`li == 0` 时残余引用排在**主块之后**（`li > 0` 时相反，方向由阅读顺序决定，两处**刻意不对称**，不要「统一」）。此前只有 `li > 0` 有端到端覆盖 |
+| 文档回写（doc-only） | `d9bb2e0` / `01e8fe0` / `090f917` / `0f6f488` / `eed38a3` / `3d76cf4` | 实施结果与偏差回写、测试数表格修正（只保留可复核的阶段）、共享 worktree 的 git 红线与代理坑；**全量 `flutter test` 必须串行化**（并发抢 `build/native_assets/windows/sqlite3.dll` 会报一句 `Flutter failed to delete a file` 后**静默退场**，无失败无报错，极易被读成「全绿」）、T5a numstat 与「控制器公开面不变」口径、延后项补可执行信号；测试基线表更新到 884 |
 
 ### 2. 测试
 
@@ -1261,8 +1262,9 @@ void appendParagraphAndFocus();   void appendTableRow(BlockRef);
 | T5a | **878**（全绿） |
 | T2b | **882**（全绿） |
 | T5c | **883**（全绿；+1 为 T3 新增的 `引用首行退格：降级成段落，其余行仍留在引用里`） |
+| T5c 守卫 | **884**（全绿；+1 为 `换类型：引用首行抬出后，残余引用排在主块之后（顺序不能反）`） |
 
-闸门：`dart run tool/analyze_inproc.dart` → 155 文件 0 error / 0 warning（3 条既有 `withOpacity` info）；`flutter test` → 883/883（`8230f54`/T5c 后）；L1 字节直通保持（20 条语料逐字节相等 + 端到端「打开不动 → 保存字节相同」用例）。
+闸门（`a887c2c`）：`dart run tool/analyze_inproc.dart` → 155 文件 0 error / 0 warning（3 条既有 `withOpacity` info）；`flutter test` → **884/884**；L1 字节直通保持（20 条语料逐字节相等 + 端到端「打开不动 → 保存字节相同」用例）。
 
 > 注 1（代理坑）：本机 `http_proxy/https_proxy` 会拦住 `flutter_tester` 的本地 WebSocket（报 `Invalid WebSocket upgrade request`），跑测试需先 `env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY flutter test`。计数以最后一行 `+NNN: All tests passed!` 为准，不要读中间的 `+NNN` 进度行（并发跑会重复打印，容易读错）。
 >

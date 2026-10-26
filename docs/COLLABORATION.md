@@ -99,7 +99,7 @@ HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= ALL_PROXY= all_proxy= flutter.
 | analyze 判定 | **error 与 warning 都算失败**；info 允许，但**不得新增**（存量 3 条 `withOpacity` 废弃告警） |
 | test 判定 | 0 失败、0 编译错误；条数 **≥ 基线 + 新增条数** |
 | 门禁跑完 | `git status --porcelain` 应为空 |
-| **基线是移动靶** | 本轮基线 **602 → 670 → 674 → 695 → 878 → 882 → 883**。**不要抄文档里的旧数字**，每次**当场实测**再写进文档 |
+| **基线是移动靶** | 本轮基线 **602 → 670 → 674 → 695 → 878 → 882 → 883 → 884**。**不要抄文档里的旧数字**，每次**当场实测**再写进文档。报数时 **hash 与数字必须同一条命令取**（`echo BEFORE head=$(git rev-parse --short HEAD)` → 测试 → `echo AFTER head=...`），否则会把「B 时刻的用例数」挂到「A 时刻的 hash」上（真实发生过：883 被记到 `924c76a` 头上，实为 882） |
 | **全量 test 必须串行** | 同一 worktree 里并发跑 `flutter test` 会锁 `build/native_assets/windows/sqlite3.dll`，报 `Flutter failed to delete file`，**一条测试都不会执行**（见 §9）。跑之前先确认没有别人的 dart/flutter 进程 |
 
 > 附：`grep -rn "'local-dev'" aimindtree_app/lib` → 必须 **0 命中**；`test/` 里的 **27 处**是合法多设备夹具（刻意模拟多设备），**不许动**。
@@ -128,7 +128,7 @@ HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= ALL_PROXY= all_proxy= flutter.
 
 本机若有 `http_proxy/https_proxy=http://127.0.0.1:9562` 之类代理，会拦住 `flutter_tester` 的本地 WebSocket，报 `Invalid WebSocket upgrade request`（**不是代码问题**）。必须按 §5 显式置空：`HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= ALL_PROXY= all_proxy= flutter test`。
 
-**当前测试基线（2026-10-27 实测）：883/883**（`8230f54`/T5c 后）。每次当场复测，别抄旧数字。
+**当前测试基线（2026-10-27 实测）：884/884**（`a887c2c`/T5c 守卫后）。每次当场复测，别抄旧数字。
 
 判定只看**最后一行** `+NNN: All tests passed!`。中间那些 `+NNN: <同一测试名>` 的重复进度行是并发打印的，不要拿其中某一行当总数。
 
@@ -154,3 +154,28 @@ The flutter tool cannot access the file.
 | 单文件测试也受影响 | 它同样走 `native_assets` 构建；并发时倾向单跑自己那个文件、避开对方的全量窗口 |
 
 > 这条比代理问题（§8）更容易骗人：§8 至少会报 `Invalid WebSocket upgrade request` 这种显式错误，而这条只留下一句"删不掉文件"，随后静默退场。
+
+**想并行：`git worktree add` 在本机不可用（2026-10-27 实测）。** 新 worktree 里 `flutter pub get --offline` 直接失败：
+
+```
+Building with plugins requires symlink support.
+Please enable Developer Mode in your system settings.
+```
+
+Windows 未开「开发者模式」→ 插件 symlink 拿不到权限 → 独立树编译不了。要用这条路必须先开开发者模式，否则只能串行。
+
+---
+
+## 10. 反向验红的正确做法：优先「结构性保证」，别改共享文件
+
+§4 要求「护栏类改动必须证明它会红」。实践中 `e-note-t3` 用了 `git checkout -- <单文件>` 还原被临时改坏的实现——**这是 §1/§7 明令禁止的命令**，本次侥幸无害（当时工作树里只有它自己的文件），但**不能因为没出事就算合规**：窗口内若有别人的未提交改动，会一起被抹掉。
+
+按风险从低到高，正确顺序是：
+
+| 优先级 | 做法 | 说明 |
+| --- | --- | --- |
+| **① 首选** | 让用例**结构上不可能绿** | 类型断言用 `as` 而非 `is`：`doc.blocks[0] as HeadingBlock`，顺序一颠倒立刻 `TypeError`；再配一条序列化字符串断言（`markdown == '# 一\n\n> 二'`）。**不碰实现文件、不开还原窗口** |
+| ② 次选 | 一次性探针文件 | 新建 `test/tmp_*_probe.dart` 写**反向断言**（断言错误顺序），跑它**必须失败**——观察到红即证明正向成立。跑完**立刻删**，确认 `git status` 无 `??` |
+| ③ 最后 | 字节备份还原 | `sha256sum` 记基线 → `cp` 备份 → 改一行 → 只跑该条（`--plain-name`）→ `cp` 还原 → `sha256sum` 必须与基线一致 → `git status` 里该文件不得出现 |
+
+**任何情况下都不许用 `git checkout --` 还原「自己刚改坏的共享文件」**——改用 `cp` 备份还原，或直接用 ① 避免动文件。
