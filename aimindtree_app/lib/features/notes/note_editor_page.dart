@@ -1,17 +1,22 @@
 /// 笔记编辑器页面（T06 业务流）。
 ///
-/// 标题 + Markdown 正文（分屏：左编辑 / 右预览），底部：
+/// 标题 + **所见即所得**正文（T4 接线后已删除「左编辑 / 右预览」双框：
+/// 正文区就是渲染结果，点哪块哪块就地变成输入框，格式化只能走工具栏），底部：
 /// - 保存到 Drift；
 /// - **提取知识点 (T1)** —— 一键跑通 T1 流水线（先选模式：仅知识点 /
 ///   仅要点重点 / 两者都要；走 prompt variant，不是新任务码）；
 /// - **划词提取 (T15)** —— 选中一段正文 → 直接生成知识点，归属本笔记；
 /// - **插入图片**（T05）：选本地图片 → 附件库（base64 唯一权威存储）
-///   → 正文插入 `aimindtree-asset://<id>` 引用 → 随笔记一起同步。
+///   → 正文插入图片块 → 随笔记一起同步。
+///
+/// **数据面不变**：`content_md` 永远是 Markdown 纯文本（同步 / AI / 画布都读它），
+/// 页面只是把这份 Markdown 交给 [NoteEditorController] 双向映射成块模型。
 library;
 
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../../ai/extraction_service.dart';
 import '../../core/result.dart';
@@ -20,10 +25,12 @@ import '../../data/models/knowledge_point.dart';
 import '../../data/models/note_asset.dart';
 import '../../data/repositories/ai_session_repository.dart';
 import '../../features/teacher/teacher_page.dart';
+import 'block_model.dart';
 import 'image_source.dart';
 import 'markdown_actions.dart';
-import 'markdown_render.dart';
 import 'markdown_toolbar.dart';
+import 'note_editor_body.dart';
+import 'note_editor_controller.dart';
 
 /// 划词提取的选中文字上限：超过就截断（提示词与上下文都按「一段」设计）。
 const int kSelectionMaxLength = 2000;
@@ -56,8 +63,12 @@ class NoteEditorPage extends StatefulWidget {
 
 class _NoteEditorPageState extends State<NoteEditorPage> {
   final _titleCtrl = TextEditingController();
-  final _bodyCtrl = TextEditingController();
-  final _bodyFocus = FocusNode();
+
+  /// 正文状态机（T3）：文档 / 焦点 / 选区 / 序列化缓存都在它手里。
+  /// 页面**不再持有** `TextEditingController` / `FocusNode`（一次只有一个活动行，
+  /// 每个行的控制器由控制器注册并统一 dispose）。
+  late final NoteEditorController _controller;
+
   bool _busy = false;
   bool _dirty = false;
   String _status = '';
@@ -80,15 +91,11 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   @override
   void initState() {
     super.initState();
+    _controller = NoteEditorController(resolveAsset: _resolveAssetBytes);
+    _controller.addListener(_onBodyChanged);
     _titleCtrl.addListener(() {
       if (_titleCtrl.text != _lastTitle) {
         _lastTitle = _titleCtrl.text;
-        setState(() => _dirty = true);
-      }
-    });
-    _bodyCtrl.addListener(() {
-      if (_bodyCtrl.text != _lastBody) {
-        _lastBody = _bodyCtrl.text;
         setState(() => _dirty = true);
       }
     });
@@ -97,10 +104,22 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
 
   @override
   void dispose() {
+    _controller.removeListener(_onBodyChanged);
+    _controller.dispose();
     _titleCtrl.dispose();
-    _bodyCtrl.dispose();
-    _bodyFocus.dispose();
     super.dispose();
+  }
+
+  /// 正文变更监听：**只有序列化结果真的变了**才置脏。
+  ///
+  /// 与旧 `_bodyCtrl` 监听同款语义（设计 §7.2）：进出编辑态、移动光标、
+  /// 点目录跳转都只改 `active`，不改 [NoteEditorController.markdown] → 不置脏。
+  void _onBodyChanged() {
+    final md = _controller.markdown;
+    if (md == _lastBody) return;
+    _lastBody = md;
+    if (!mounted) return;
+    setState(() => _dirty = true);
   }
 
   Future<void> _load() async {
@@ -109,12 +128,13 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
           ..limit(1))
         .getSingleOrNull();
     if (row == null) return;
+    // 顺序不能反：**先**同步「上次内容」再喂控制器，否则监听器会误标「●未保存」。
+    _lastTitle = row.title;
+    _lastBody = row.contentMd;
+    _titleCtrl.text = row.title;
+    _controller.setMarkdown(row.contentMd);
+    if (!mounted) return;
     setState(() {
-      // 先把「上次内容」同步成将要赋的值，避免下面赋值触发监听器误标未保存。
-      _lastTitle = row.title;
-      _lastBody = row.contentMd;
-      _titleCtrl.text = row.title;
-      _bodyCtrl.text = row.contentMd;
       _note = Note(
         id: row.id,
         contentMd: row.contentMd,
@@ -210,19 +230,8 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         return;
       }
       final assetId = (res as Success<String>).value;
-      // 4) 插入引用（与工具栏同步动作同一套纯函数 + 写回口径）。
-      final r = insertImage(
-        _bodyCtrl.text,
-        _bodyCtrl.selection,
-        assetId,
-        picked.name,
-      );
-      _bodyCtrl.value = _bodyCtrl.value.copyWith(
-        text: r.text,
-        selection: r.selection,
-        composing: TextRange.empty,
-      );
-      _bodyFocus.requestFocus();
+      // 4) 在活动块之后插入图片块（控制器负责序列化 `![alt](aimindtree-asset://id)`）。
+      _controller.insertImageBlock(assetId, alt: picked.name);
       // 5) 立即保存：引用落库 + reconcile 顺带清理（理论无孤儿）。
       //    保存成功/失败的状态由 _save() 自己写，这里不覆盖。
       await _save();
@@ -233,19 +242,10 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
 
   /// 当前正文选区对应的文字。
   ///
-  /// 不依赖 `TextSelection.textContent`（该 API 并非所有 SDK 版本都有，
-  /// 且无法处理「光标越界」的异常态）：自己按 base/extent 归一化后截取，
-  /// 支持反向选区（先选尾部再往回拖）并把偏移夹取到正文范围内。
-  String _selectionText() {
-    final text = _bodyCtrl.text;
-    final sel = _bodyCtrl.selection;
-    final base = sel.baseOffset < 0 ? 0 : sel.baseOffset;
-    final extent = sel.extentOffset < 0 ? 0 : sel.extentOffset;
-    final start = (base <= extent ? base : extent).clamp(0, text.length);
-    final end = (base <= extent ? extent : base).clamp(0, text.length);
-    if (start >= end) return '';
-    return text.substring(start, end);
-  }
+  /// 改造后选区活在「活动行」里（跨块选区 v1 不支持），读法整体交给
+  /// [NoteEditorController.selectionText]；无活动行 → 空串 → 走原有的
+  /// 「请先在正文中选中要提取的文字」提示。
+  String _selectionText() => _controller.selectionText();
 
   /// 划词提取（T15）：把正文里选中的一段文字直接变成一个知识点。
   ///
@@ -295,6 +295,14 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         _status = '❌ 划词提取失败：${res.message}';
         _snack(res.message);
     }
+  }
+
+  /// AppBar 溢出菜单「复制全文」：把整篇 Markdown 放进剪贴板。
+  ///
+  /// v1 不支持跨块选区（设计 §5.5），所以给跨块搬运留这一条出口。
+  Future<void> _copyAll() async {
+    await Clipboard.setData(ClipboardData(text: _controller.markdown));
+    _snack('已复制全文（Markdown 原文）');
   }
 
   /// 底部提示条（划词提取的结果 / 失败原因）。
@@ -369,7 +377,8 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
 
   Future<String> _save() async {
     final id = _note?.id;
-    final content = _bodyCtrl.text;
+    // 正文取控制器的序列化缓存（未编辑的块走原文直通 → L1 字节相等）。
+    final content = _controller.markdown;
     final title = _titleCtrl.text.trim().isEmpty
         ? content.split('\n').first
         : _titleCtrl.text.trim();
@@ -436,7 +445,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     // variant 走 body 穿透：URL 仍是 /v1/task/T1，服务端按 (T1, variant)
     // 选提示词变体。
     final res = await widget.service.extract(
-      _bodyCtrl.text,
+      _controller.markdown,
       existingNote: _note,
       variant: variant,
     );
@@ -502,19 +511,34 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   }
 
   /// 打开「目录 / 大纲」抽屉：先按当前正文即时抽取标题，再拉开右侧抽屉。
+  ///
+  /// `extractHeadings` 继续复用（`markdown_actions.dart` 不删，它的单测仍是回归网）。
   void _openToc() {
-    setState(() => _tocHeadings = extractHeadings(_bodyCtrl.text));
+    setState(() => _tocHeadings = extractHeadings(_controller.markdown));
     _scaffoldKey.currentState?.openEndDrawer();
   }
 
-  /// 目录项点击：把正文光标跳到对应标题行行首（[MarkdownHeading.offset]
-  /// 已指向行首），并把焦点还给编辑框，便于就地编辑。
+  /// 目录项点击：把光标定位到对应的标题块（标题行首），便于就地编辑。
+  ///
+  /// 抽屉仍用 [MarkdownHeading]（字符偏移那套），但跳转改成「按文本 + 级别
+  /// 找到对应的 [HeadingBlock]」→ 直接 `focusBlock`，不再拿字符偏移去猜。
   void _jumpToHeading(MarkdownHeading h) {
-    final offset = h.offset.clamp(0, _bodyCtrl.text.length);
-    _bodyCtrl.selection = TextSelection.collapsed(offset: offset);
-    // 纯选区跳转不算改动：纠正可能因 selection 变化被监听误标的「未保存」。
-    if (mounted) setState(() => _dirty = false);
-    _bodyFocus.requestFocus();
+    final ref = _refForHeading(h);
+    if (ref == null) return;
+    _controller.focusBlock(ref);
+  }
+
+  /// 目录项 → 块引用：优先「级别 + 文本」全等，退一步只按文本匹配。
+  BlockRef? _refForHeading(MarkdownHeading h) {
+    BlockRef? byTextOnly;
+    for (final block in _controller.doc.blocks) {
+      if (block is! HeadingBlock) continue;
+      final ref = BlockRef(block.id);
+      if (_controller.textOf(ref) != h.title) continue;
+      if (block.level == h.level) return ref;
+      byTextOnly ??= ref;
+    }
+    return byTextOnly;
   }
 
   /// 目录 / 大纲抽屉：按标题级别缩进展示，点击跳转。
@@ -600,6 +624,16 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
             icon: const Icon(Icons.auto_fix_high),
             tooltip: '划词提取',
           ),
+          // 跨块搬运的唯一出口（v1 不支持跨块选区，设计 §5.5 第 4 条）。
+          PopupMenuButton<String>(
+            tooltip: '更多',
+            onSelected: (String value) {
+              if (value == 'copy') _copyAll();
+            },
+            itemBuilder: (BuildContext context) => const <PopupMenuEntry<String>>[
+              PopupMenuItem<String>(value: 'copy', child: Text('复制全文')),
+            ],
+          ),
         ],
       ),
       body: Column(
@@ -618,55 +652,15 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
           ),
           const Divider(height: 1),
           MarkdownToolbar(
-            controller: _bodyCtrl,
-            focusNode: _bodyFocus,
+            controller: _controller,
             onInsertImage: _insertImage,
           ),
+          // 正文主体 = 所见即所得（不再有「左源码 / 右预览」双框）。
+          // NoteEditorBody 内部已监听控制器（AnimatedBuilder），页面不必再套一层。
           Expanded(
-            child: Row(
-              children: [
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.all(8),
-                    child: TextField(
-                      controller: _bodyCtrl,
-                      focusNode: _bodyFocus,
-                      maxLines: null,
-                      expands: true,
-                      keyboardType: TextInputType.multiline,
-                      textAlignVertical: TextAlignVertical.top,
-                      decoration: const InputDecoration(
-                        border: OutlineInputBorder(),
-                        hintText: 'Markdown 原文…\n\n# 标题\n- 列表\n**加粗** *斜体* `行内代码`',
-                        isDense: true,
-                      ),
-                    ),
-                  ),
-                ),
-                const VerticalDivider(width: 1),
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.all(8),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: Colors.grey.shade50,
-                        border: Border.all(color: Colors.grey.shade300),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      padding: const EdgeInsets.all(8),
-                      child: SingleChildScrollView(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: renderMarkdownBlocks(
-                            _bodyCtrl.text,
-                            resolveAsset: _resolveAssetBytes,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+            child: NoteEditorBody(
+              key: const ValueKey<String>('note-body'),
+              controller: _controller,
             ),
           ),
           _buildKpSection(),

@@ -541,14 +541,17 @@ class NoteEditorController extends ChangeNotifier {
   /// 工具栏据此置灰 —— 设计 §5.5 第 2 条）。
   bool get activeSupportsInlineMarks {
     final b = activeBlock;
-    if (b == null) return false;
-    return b is ParagraphBlock ||
-        b is HeadingBlock ||
-        b is QuoteBlock ||
-        b is BulletListBlock ||
-        b is OrderedListBlock ||
-        b is TaskListBlock;
+    return b != null && _supportsInlineMarks(b);
   }
+
+  /// 某个块是否支持行内格式（无活动行时的判据也存在 → 抽成静态）。
+  static bool _supportsInlineMarks(Block b) =>
+      b is ParagraphBlock ||
+      b is HeadingBlock ||
+      b is QuoteBlock ||
+      b is BulletListBlock ||
+      b is OrderedListBlock ||
+      b is TaskListBlock;
 
   /// 当前形状下 [mark] 是否算「已打开」（有选区看全选区，无选区看 pending）。
   bool isMarkOn(InlineMarks mark) {
@@ -676,20 +679,42 @@ class NoteEditorController extends ChangeNotifier {
   /// 无选区：在光标处插入 [label]。
   void setLink(String label, String url) {
     final ref = _active;
-    if (ref == null || !activeSupportsInlineMarks) return;
+    if (ref == null) return;
+    setLinkOn(ref, label, url);
+  }
+
+  /// 给**指定行**挂链接（工具栏「链接」对话框的落点）。
+  ///
+  /// 为什么需要它：对话框会抢走焦点 → [active] 变 null，[setLink] 的 active
+  /// 口径在那一刻拿不到行引用。调用方在弹框**之前**记下 [ref] 与选区区间，
+  /// 确认后用它显式写回（[start] / [end] 为空时退回该行当前选区）。
+  void setLinkOn(BlockRef ref, String label, String url, {int? start, int? end}) {
+    final b = blockOf(ref);
+    if (b == null || !_supportsInlineMarks(b)) return;
     final text = textOf(ref);
     final sel = _lines[ref]?.selection;
-    final a = sel == null || !sel.isValid ? caretOf(ref) : math.min(sel.start, sel.end).clamp(0, text.length);
-    final b = sel == null || !sel.isValid ? a : math.max(sel.start, sel.end).clamp(0, text.length);
-    final word = label.isEmpty ? text.substring(a, b) : label;
-    final marks = a < b ? _marksAt(text, runsOf(ref), a) : _pending;
+    final hasSel = sel != null && sel.isValid && !sel.isCollapsed;
+    final int a;
+    final int bEnd;
+    if (start != null || end != null) {
+      a = (start ?? 0).clamp(0, text.length);
+      bEnd = (end ?? a).clamp(a, text.length);
+    } else if (hasSel) {
+      a = math.min(sel.start, sel.end).clamp(0, text.length);
+      bEnd = math.max(sel.start, sel.end).clamp(0, text.length);
+    } else {
+      a = caretOf(ref).clamp(0, text.length);
+      bEnd = a;
+    }
+    final word = label.isEmpty && a < bEnd ? text.substring(a, bEnd) : label;
+    final marks = a < bEnd ? _marksAt(text, runsOf(ref), a) : _pending;
     final inserted = <InlineNode>[
       TextRun(word, marks: marks - InlineMarks.code, href: url),
     ];
     final next = <InlineNode>[
       ...sliceRuns(runsOf(ref), 0, a),
       ...inserted,
-      ...sliceRuns(runsOf(ref), b, text.length),
+      ...sliceRuns(runsOf(ref), bEnd, text.length),
     ];
     _setRunsFor(ref, next);
     final caret = a + word.length;
@@ -1285,11 +1310,20 @@ class NoteEditorController extends ChangeNotifier {
     if (idx < 0) return;
     final caret = caretOf(ref);
     final runs = runsOf(ref);
-    _replaceRange(idx, 1, <Block>[
-      _makeBlock(target, runs, level: level, id: b.id, gap: b.trailingGap),
-    ]);
+    final created =
+        _makeBlock(target, runs, level: level, id: b.id, gap: b.trailingGap);
+    _replaceRange(idx, 1, <Block>[created]);
     _lines[ref]?.applyRuns(runs);
-    focusBlock(ref, caret: caret);
+    // 换类型后**行引用的形状会变**（段落/标题 ↔ 列表/引用），旧 ref 可能指向
+    // 一个不存在的行 → 块会直接退出编辑态（点完按钮输入框就没了）。
+    _focusFirstLineOf(created, caret: caret);
+  }
+
+  /// 聚焦新块的第一行（按新的行引用形状），光标落在 [caret]。
+  void _focusFirstLineOf(Block block, {int? caret}) {
+    final refs = editableRefsOf(block);
+    if (refs.isEmpty) return;
+    focusBlock(refs.first, caret: caret);
   }
 
   /// 把多行块里的一行拎出来，按 [target] 造成独立块插在原块之后。
@@ -1330,7 +1364,7 @@ class NoteEditorController extends ChangeNotifier {
     } else {
       _replaceRange(idx, 1, <Block>[_withGap(rest, '\n\n'), created]);
     }
-    focusBlock(BlockRef(created.id), caret: caret);
+    _focusFirstLineOf(created, caret: caret);
   }
 
   /// 按类型造一个新块（内容 = [runs]）。

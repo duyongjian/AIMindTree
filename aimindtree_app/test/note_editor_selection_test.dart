@@ -8,6 +8,11 @@
 /// - 三态映射到 **prompt variant**（走 body 穿透，任务码始终是 T1）：
 ///   仅知识点 = 不传（null）/ 仅要点重点 = 'keypoints' / 两者都要 = 'both'；
 /// - 源码守卫：模式弹窗与划词入口的痕迹留在页面里（防回归被摘掉）。
+///
+/// **T4 迁移说明**：正文改造为所见即所得后，全局不再有「第 2 个常驻 TextField」
+/// （`find.byType(TextField).at(1)` 必然失效）—— 正文按块渲染，点哪块哪块才变成
+/// 输入框。所以先把输入动作用 [_enterBody] 收敛成一条「点正文首块 → 写入」的路径，
+/// 断言本身一条不少。
 library;
 
 import 'dart:io';
@@ -105,6 +110,24 @@ class _StubProvider extends AiProvider {
   void dispose() {}
 }
 
+/// 在正文首块里写入 [text]（改造后的「进入编辑态」路径）。
+///
+/// 定位方式（替代旧的 `find.byType(TextField).at(1)`）：
+/// 1. 正文容器有稳定 Key `note-body`（页面里给的 `ValueKey('note-body')`）；
+/// 2. 点它的左上角（内边距 12/8 之后的第一块）→ 该块就地变成 TextField；
+/// 3. 再用容器**内部**唯一的那一个 TextField 写入，避免误命中标题框。
+Future<void> _enterBody(WidgetTester tester, String text) async {
+  final body = find.byKey(const ValueKey<String>('note-body'));
+  expect(body, findsOneWidget);
+  await tester.tapAt(tester.getRect(body).topLeft + const Offset(24, 12));
+  await tester.pumpAndSettle();
+
+  final field = find.descendant(of: body, matching: find.byType(TextField));
+  expect(field, findsOneWidget, reason: '点正文后应当只有被点中的那一块变成输入框');
+  await tester.enterText(field, text);
+  await tester.pumpAndSettle();
+}
+
 void main() {
   late AppDatabase db;
   late _StubProvider stub;
@@ -179,9 +202,7 @@ void main() {
     await tester.pumpAndSettle();
 
     // 先写点正文（否则 _save 出来的笔记是空的，锚点校验会剔除）。
-    final body = find.byType(TextField).at(1);
-    await tester.enterText(body, '导数\n');
-    await tester.pumpAndSettle();
+    await _enterBody(tester, '导数');
 
     await tester.tap(find.byTooltip('提取知识点 (T1)'));
     await tester.pumpAndSettle();
@@ -204,9 +225,7 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    final body = find.byType(TextField).at(1);
-    await tester.enterText(body, '导数\n');
-    await tester.pumpAndSettle();
+    await _enterBody(tester, '导数');
 
     await tester.tap(find.byTooltip('提取知识点 (T1)'));
     await tester.pumpAndSettle();
@@ -225,9 +244,7 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    final body = find.byType(TextField).at(1);
-    await tester.enterText(body, '导数\n');
-    await tester.pumpAndSettle();
+    await _enterBody(tester, '导数');
 
     await tester.tap(find.byTooltip('提取知识点 (T1)'));
     await tester.pumpAndSettle();
