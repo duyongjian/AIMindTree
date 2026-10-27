@@ -97,10 +97,10 @@ echo.
 if errorlevel 1 (
     echo.
     echo [llm_server] exited with error. Common causes:
-    echo   1^) dependencies missing  -> pip install -r llm_server\requirements.txt
-    echo   2^) port 8787 occupied    -> run_llm_server.bat --port 8788
-    echo   3^) config.yaml broken    -> check llm_server\config.yaml
-    echo   4^) llama-server 掉了     -> 看那个最小化窗口的报错（显存不足最常见）
+    echo   1^) dependencies missing  -^> pip install -r llm_server\requirements.txt
+    echo   2^) port 8787 occupied    -^> run_llm_server.bat --port 8788
+    echo   3^) config.yaml broken    -^> check llm_server\config.yaml
+    echo   4^) llama-server 掉了     -^> 看那个最小化窗口的报错（显存不足最常见）
     pause
 )
 
