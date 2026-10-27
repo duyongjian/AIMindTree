@@ -66,7 +66,7 @@ REM
 REM  ---------------- 档位 2 参数依据（逐参数说明，不堆参数）----------------
 REM    与档位 1 相同就不再重复，下面只列**变了的**以及理由：
 REM
-REM    --parallel 1   单 slot 拿到完整 65536 上下文（档1 是 2 x 32768）。
+REM    --parallel 1   单 slot 拿到完整 49152 上下文（档1 每 slot 为 32768）。
 REM                   这是本档最大收益：上下文翻倍而显存零增长（-c 不变）。
 REM                   不这么设的后果：agent 一轮「系统提示 + 多文件 + 工具结果」
 REM                   很容易撑爆 32k，被截断后模型丢掉早期上下文，
@@ -104,14 +104,14 @@ REM                   注意：Qwen3 思维链模式官方推荐 temp 0.6。这里为了确定性
 REM                   和速度降到 0.3；如果发现复杂任务思考退化，把这一行改回
 REM                   0.6 即可，其他不用动。
 REM
-REM    -c 65536       为什么不提到 131072：
+REM    -c 49152       为什么不提到 131072：
 REM                   直觉上上下文越大越好，但这里**不能提**，理由不是爆显存
 REM                   （实测 -c 131072 加载后显存 7919 MiB，和 -c 8192 的
 REM                   7921 MiB 几乎一样，KV 在 host RAM），而是：
 REM                   本机 prefill 只有约 21 tok/s，131072 token 的冷预填要约 100 分钟。
 REM                   给一个「装得下但读不完」的上下文，只会让 agent 更倾向于塞满它，
-REM                   然后每一轮都在等预填。65536 已经是档1 的两倍，够放
-REM                   「系统提示 + 若干文件 + 多轮工具结果」，又把最坏等待压住。
+REM                   然后每一轮都在等预填。49152 是档1 每 slot 的 1.5 倍，够放
+REM                   「系统提示 + 若干文件 + 多轮工具结果」，又把最坏等待压住。降到 49152 是为了省出约 0.5 GB 显存，把 -ngl 由 30 抬到 34，减少留在 CPU 的层数。
 REM
 REM    仍保留 --mmproj：实测去掉 --mmproj 显存 delta = 0 MiB
 REM                   （7923 MiB vs 7923 MiB），保留不花代价，
@@ -120,8 +120,8 @@ REM
 REM  ---------------- 能否合并成一档（本次结论）----------------
 REM    不能合并。两档的冲突点是**同一条 -c 上的零和分配**：
 REM      档1 需要 parallel=2（前台对话 + 后台静默任务并存）；
-REM      档2 需要 parallel=1（单会话要吃满 64k，且 1 slot 实测更快）。
-REM    -c 固定 65536 时，parallel 只能二选一：2x32768 或 1x65536。
+REM      档2 需要 parallel=1（单会话要吃满 48k，且 1 slot 实测更快）。
+REM    -c 一定时 parallel 只能二选一：档1 为 2x32768，档2 为 1x49152。
 REM    同时 reasoning 也必须相反：档1 必须 off（否则 JSON 截断），
 REM    档2 必须 on（否则复杂规划明显变差）。
 REM    硬用一档只能是「parallel=1 + reasoning off + 32k」，等于
@@ -179,14 +179,20 @@ set "COMMON=-m "%MODEL%" --mmproj "%MMPROJ%" --no-mmproj-offload --host %HOST% -
 set "P1_ARGS=-c 65536 -n 8192 -ngl 99 -fa on -ctk q8_0 -ctv q8_0 --jinja --parallel 2 --spec-type draft-mtp --spec-draft-n-max 4 --reasoning off --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.05 --repeat-penalty 1.05"
 REM 档2 的 -ngl 与 -c 必须联动，目标是显存刚好装满、绝不溢出：
 REM 本机实测约 175 MB 每层、共约 48 层；-c 65536 时 KV 约占 2.0 GB，-c 32768 约 1.0 GB。
-REM 计算式：ngl 约等于 （7.5 GB 减 KV） 除以 0.175 GB。-c 65536 取 30，-c 32768 取 37，-c 16384 取 40。
+REM    公式：ngl ≈ (7.5 GB - KV) / 0.175 GB；-c 65536 取 30、-c 49152 取 34、-c 32768 取 37、-c 16384 取 40
 REM 溢出到共享显存会触发 WDDM 页迁移，实测把 prefill 从 175 t/s 打到 21 t/s，比少放几层严重得多。
 REM 实测参考：-ngl 20 时 decode 仅 1.5 至 2.7 t/s；-ngl 99 时 decode 8.1 t/s 但 prefill 崩到 21 t/s。
-REM -t 12 限制 CPU 线程数：只为降风扇噪音与争抢。
+REM    -t 8 / --threads-batch 6  CPU 线程上限（原来 12 会跑满大小核并触发降频）
+REM                  -t 8 = decode（逐 token）线程，6P+8E 混合架构取 6~8 即可
+REM                  --threads-batch 6 = prefill（提示词批处理）线程，agent 长会话峰值 CPU 主要来源
+REM                  -c 与 -ngl 联动：降 -c 省显存 -> 抬 -ngl -> 更少层留在 CPU
+REM                  （-c 65536/ngl 30 留 18 层在 CPU；-c 49152/ngl 34 留 14 层）
+REM                  前提：WorkBuddy 侧声明窗口 ≤ 40000 且压缩正常触发；
+REM                  否则回退 -c 65536 / -ngl 30
 REM COMMON 里的 --keep 8192 是关键：上下文写满触发 shift 时，开头的系统提示与工具定义不会被丢弃。
 REM 这正是超过上下文后报 bad function call 的根因。llama.cpp 不做摘要压缩，长会话需客户端自行压缩历史。
 REM 加载 --mmproj 会让 llama.cpp 禁用 --cache-reuse；图像支持优先，接受此项失效（slot 的 LCP 复用仍在工作）。
-set "P2_ARGS=-c 65536 -n 8192 -ngl 30 -t 12 --threads-batch 12 -fa on -ctk q8_0 -ctv q8_0 --jinja --parallel 1 --spec-type draft-mtp --spec-draft-n-max 4 --reasoning on --reasoning-budget 512 --cache-reuse 256 --temp 0.3 --top-p 0.95 --top-k 20 --min-p 0.05 --repeat-penalty 1.05"
+set "P2_ARGS=-c 49152 -n 8192 -ngl 34 -t 8 --threads-batch 6 -fa on -ctk q8_0 -ctv q8_0 --jinja --parallel 1 --spec-type draft-mtp --spec-draft-n-max 4 --reasoning on --reasoning-budget 512 --cache-reuse 256 --temp 0.3 --top-p 0.95 --top-k 20 --min-p 0.05 --repeat-penalty 1.05"
 
 REM ---------- 档位选择 ----------
 REM 优先级：命令行参数 > 交互菜单。带参数时**完全不弹菜单**，
@@ -204,7 +210,7 @@ echo ============================================================
 echo   llama-server 档位选择
 echo ============================================================
 echo     [1] AIMindTree 提取档   reasoning off / parallel 2 / 每 slot 32k
-echo     [2] Agent 编程规划档    reasoning on+budget / parallel 1 / 单会话 64k
+echo     [2] Agent 编程规划档    reasoning on+budget / parallel 1 / 单会话 48k
 echo.
 echo   15 秒内没有输入将自动选择 [1]（无人值守安全，不会卡住）
 echo.
