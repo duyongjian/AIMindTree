@@ -27,6 +27,7 @@ set "BASE=C:\Users\ASUS\.workbuddy\binaries\python\versions\3.13.12\python.exe"
 set "LLAMA_HOST=127.0.0.1"
 set "LLAMA_PORT=8085"
 set "LAUNCH=%REPO%\scripts\run_llama_server.bat"
+if not defined LLAMA_PROFILE set "LLAMA_PROFILE=1"
 
 REM 清空代理：本机系统代理 127.0.0.1:44166 会把 127.0.0.1 的请求送给代理，
 REM 表现为「本地后端连不上」的假故障（服务端默认 trust_env=False，这里双保险）。
@@ -60,7 +61,7 @@ if not exist "%LAUNCH%" (
     pause
     endlocal & exit /b 1
 )
-start "" /min "%LAUNCH%"
+start "" /min "%LAUNCH%" %LLAMA_PROFILE%
 
 REM 轮询等待 /health 就绪。27B 模型加载 + 首次 CUDA 初始化需要几十秒，
 REM 这里给 60 次 * 3 秒 = 180 秒；磁盘慢时可以调大 _max。
@@ -73,12 +74,14 @@ if not errorlevel 1 goto :llama_ready
 if !_tries! geq !_max! (
     echo [llm_server] 等待 llama-server 就绪超时（180s）。
     echo [llm_server] 请手动运行 scripts\run_llama_server.bat 看报错，或检查：
-    echo     1) %LAUNCH% 里的 LLAMA_DIR / 模型文件名是否正确
-    echo     2) 显存是否被别的程序占满（nvidia-smi）
+    echo     1^) %LAUNCH% 里的 LLAMA_DIR / 模型文件名是否正确
+    echo     2^) 显存是否被别的程序占满（nvidia-smi）
     pause
     endlocal & exit /b 1
 )
-timeout /t 3 /nobreak >nul
+REM 用 ping 制造 3 秒节拍（-n 4 = 首包 + 3 个间隔，约 3 秒）。不用 timeout：其行为依赖 stdin 是否被
+REM 重定向——控制台下完整睡 3 秒，重定向下则立即报「不支持输入重新定向」并返回，两种环境节拍不一致。
+ping -n 4 127.0.0.1 >nul 2>&1
 goto :wait_llama
 
 :llama_ready
@@ -94,10 +97,10 @@ echo.
 if errorlevel 1 (
     echo.
     echo [llm_server] exited with error. Common causes:
-    echo   1) dependencies missing  -> pip install -r llm_server\requirements.txt
-    echo   2) port 8787 occupied    -> run_llm_server.bat --port 8788
-    echo   3) config.yaml broken    -> check llm_server\config.yaml
-    echo   4) llama-server 掉了     -> 看那个最小化窗口的报错（显存不足最常见）
+    echo   1^) dependencies missing  -> pip install -r llm_server\requirements.txt
+    echo   2^) port 8787 occupied    -> run_llm_server.bat --port 8788
+    echo   3^) config.yaml broken    -> check llm_server\config.yaml
+    echo   4^) llama-server 掉了     -> 看那个最小化窗口的报错（显存不足最常见）
     pause
 )
 
