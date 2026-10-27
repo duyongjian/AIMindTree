@@ -177,7 +177,14 @@ REM 但一旦哪天模型文件名或 alias 带空格，不加引号会被拆成两段参数，
 REM llama-server 报的错跟真实原因无关，排查成本很高。
 set "COMMON=-m "%MODEL%" --mmproj "%MMPROJ%" --no-mmproj-offload --host %HOST% --port %PORT% -a "%ALIAS%""
 set "P1_ARGS=-c 65536 -n 8192 -ngl 99 -fa on -ctk q8_0 -ctv q8_0 --jinja --parallel 2 --spec-type draft-mtp --spec-draft-n-max 4 --reasoning off --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.05 --repeat-penalty 1.05"
-set "P2_ARGS=-c 65536 -n 8192 -ngl 99 -fa on -ctk q8_0 -ctv q8_0 --jinja --parallel 1 --spec-type draft-mtp --spec-draft-n-max 4 --reasoning on --reasoning-budget 1024 --cache-reuse 256 --temp 0.3 --top-p 0.95 --top-k 20 --min-p 0.05 --repeat-penalty 1.05"
+REM 档2 的 -ngl 与 -c 必须联动，目标是显存刚好装满、绝不溢出：
+REM 本机实测约 175 MB 每层、共约 48 层；-c 32768 时 KV 约占 1.0 GB，-c 65536 约 2.0 GB。
+REM 计算式：ngl 约等于 （7.5 GB 减 KV） 除以 0.175 GB。-c 32768 取 37，-c 65536 取 32，-c 16384 取 40。
+REM 溢出到共享显存会触发 WDDM 页迁移，实测把 prefill 从 175 t/s 打到 21 t/s，比少放几层严重得多。
+REM 实测参考：-ngl 20 时 decode 仅 1.5 至 2.7 t/s；-ngl 99 时 decode 8.1 t/s 但 prefill 崩到 21 t/s。
+REM -t 12 限制 CPU 线程数：只为降风扇噪音与争抢，37 层在 GPU 时 CPU 只剩约 11 层。
+REM 注意：加载 --mmproj 会让 llama.cpp 报 cache_reuse is not supported by multimodal 并禁用本项的 --cache-reuse。
+set "P2_ARGS=-c 32768 -n 8192 -ngl 37 -t 12 --threads-batch 12 -fa on -ctk q8_0 -ctv q8_0 --jinja --parallel 1 --spec-type draft-mtp --spec-draft-n-max 4 --reasoning on --reasoning-budget 512 --cache-reuse 256 --temp 0.3 --top-p 0.95 --top-k 20 --min-p 0.05 --repeat-penalty 1.05"
 
 REM ---------- 档位选择 ----------
 REM 优先级：命令行参数 > 交互菜单。带参数时**完全不弹菜单**，
