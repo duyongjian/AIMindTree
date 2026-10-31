@@ -67,8 +67,8 @@ class MarkdownToolbar extends StatelessWidget {
   }
 
   Widget _buildBar(BuildContext context) {
-    final Block? block = controller.activeBlock;
-    final bool inlineOk = controller.activeSupportsInlineMarks;
+    final Block? block = controller.toolbarActiveBlock;
+    final bool inlineOk = controller.toolbarSupportsInlineMarks;
     // 换块类型：表格 / 图片 / 分割线没有「由文本直接转换」的语义（控制器也会拒）。
     final bool canConvert =
         block != null && block is! TableBlock && block is! ImageBlock && block is! DividerBlock;
@@ -198,7 +198,7 @@ class MarkdownToolbar extends StatelessWidget {
 
   /// 标题按钮：同一级再点一次回落段落（控制器内部实现 toggle 语义）。
   Widget _headingButton(IconData icon, String tooltip, int level, bool enabled) {
-    final block = controller.activeBlock;
+    final block = controller.toolbarActiveBlock;
     final on = block is HeadingBlock && block.level == level;
     return _toolButton(
       icon: icon,
@@ -267,7 +267,7 @@ class MarkdownToolbar extends StatelessWidget {
   /// `setLink` 的 active 口径那一刻拿不到行引用。这里**先**记下行引用与选区，
   /// 再走 `setLinkOn(ref, …)` 显式指定落点，最后把焦点还给该行。
   Future<void> _openLinkDialog(BuildContext context) async {
-    final ref = controller.active;
+    final ref = controller.activeOrLast;
     if (ref == null) return;
     final sel = controller.selectionOf(ref);
     final a = (sel != null && sel.isValid) ? sel.start : controller.caretOf(ref);

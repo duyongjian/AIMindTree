@@ -354,6 +354,13 @@ void _scheduleDebouncedScan({
   required KnowledgeRepository repo,
   required AiJobService jobs,
 }) {
+  // 仅「自动」触发路径受「自动知识点查重」开关约束：关 → 不跑后台自动扫描。
+  // 手动「查重」按钮（kpDedupRunNow）直接调用 _kpDedupScan、不经过此处，
+  // 因此不受开关影响、始终可用（修复：关掉自动开关后手动按钮失灵）。
+  if (!TreeBehaviorSettings.instance.dedupEnabled) {
+    _log.i('知识点查重：开关「自动知识点查重」已关闭，跳过自动扫描');
+    return;
+  }
   _kpDedupTimer?.cancel();
   _kpDedupTimer = Timer(_kKpDedupDebounce, () {
     _kpDedupTimer = null;
@@ -387,11 +394,6 @@ Future<void> _kpDedupScan({
   required AiJobService jobs,
   void Function()? onNoCandidates,
 }) async {
-  // 受「自动知识点查重」开关控制（E）：关 → 不查重（允许重复，不打扰）。
-  if (!TreeBehaviorSettings.instance.dedupEnabled) {
-    _log.i('知识点查重：开关「自动知识点查重」已关闭，跳过本次扫描');
-    return;
-  }
   if (_kpDedupInFlight) {
     _log.i('知识点查重：已有扫描 / 任务在飞，跳过本轮触发');
     return;

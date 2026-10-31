@@ -98,11 +98,9 @@ class _TeacherPageState extends State<TeacherPage> {
         unawaited(widget.jobs.cancel(running.id));
       },
     );
-    // D：本知识点的后台生成（`kp:{id}:chat` 锁）一落终态就补拉消息。
-    _jobSub = widget.jobs.terminalStream.listen((job) {
-      if (!mounted || job.resourceKey != _chatLockKey) return;
-      unawaited(_reloadMessages());
-    });
+    // D：本知识点的后台生成（`kp:{id}:chat` 锁）一落终态：页面还活着就补拉消息，
+    // 已销毁（离开老师模式）则撤掉会话托盘行（见 [_onChatJobTerminal]）。
+    _jobSub = widget.jobs.terminalStream.listen(_onChatJobTerminal);
     _bootstrap();
   }
 
@@ -395,14 +393,34 @@ class _TeacherPageState extends State<TeacherPage> {
 
   @override
   void dispose() {
-    // 先放锁再拆控件：会话页关掉 = `kp:{id}` 解锁 + 托盘行消失。
-    widget.jobs.releaseInteractive(_sessionTicket);
-    // 页面走了但后台生成还在跑：只断「回填消息」的订阅，任务本身不受影响。
-    _jobSub?.cancel();
-    _jobSub = null;
+    // 仍有关联后台生成（kp:{id}:chat 锁被占）→ 会话行先不撤：改文案为「已退出 ·
+    // 生成中」，等该生成终态时由 _jobSub 撤掉，保证用户退出老师模式后仍能
+    // 在托盘看到后台任务（修复：退出会话界面后任务队列不显示）。
+    if (_sessionTicket.isNotEmpty && widget.jobs.isLocked(_chatLockKey)) {
+      widget.jobs.setInteractiveMessage(_sessionTicket, '老师模式已退出 · 生成中');
+      // _jobSub 保持监听（不在此 cancel），生成终态时撤会话行；未订阅则临时建一个。
+      _jobSub ??= widget.jobs.terminalStream.listen(_onChatJobTerminal);
+    } else {
+      widget.jobs.releaseInteractive(_sessionTicket);
+      _jobSub?.cancel();
+      _jobSub = null;
+    }
     _input.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  /// 后台生成（`kp:{id}:chat`）终态时的统一处理：会话页还活着就补拉消息；
+  /// 已销毁（mounted=false）则撤掉会话托盘行，避免它永远赖着。
+  void _onChatJobTerminal(AiJob job) {
+    if (job.resourceKey != _chatLockKey) return;
+    if (mounted) {
+      unawaited(_reloadMessages());
+    } else {
+      widget.jobs.releaseInteractive(_sessionTicket);
+      _jobSub?.cancel();
+      _jobSub = null;
+    }
   }
 
   @override
