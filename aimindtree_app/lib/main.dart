@@ -77,7 +77,15 @@ class MyApp extends StatelessWidget {
           textDirection: TextDirection.ltr,
           child: Column(
             children: [
-              JobTray(jobs: service.jobs),
+              // 用 Overlay 包一层：JobTray 挂在 Navigator 之上（不被 push 页面盖住），
+              // 但内部 IconButton.tooltip 需要一个 Overlay 祖先来承载悬浮提示层，
+              // 否则抛「No Overlay widget found」（修复：任务队列 tooltip 崩溃）。
+              Overlay(
+                initialEntries: [
+                  OverlayEntry(
+                      builder: (context) => JobTray(jobs: service.jobs)),
+                ],
+              ),
               Expanded(child: child ?? const SizedBox.shrink()),
             ],
           ),

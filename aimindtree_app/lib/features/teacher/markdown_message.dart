@@ -47,12 +47,18 @@ class MarkdownMessage extends StatelessWidget {
       children: <Widget>[
         for (final seg in segs)
           if (seg.isMath)
+            // 块级公式：Math.tex 按公式自然宽度排版、不会自动换行，遇到超宽公式会
+            // 撑破外层 Column 导致「RenderFlex overflowed by N pixels on the right」。
+            // 用横向 SingleChildScrollView 收住宽度（滚动查看），避免溢出。
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 6),
-              child: Math.tex(
-                seg.text,
-                mathStyle: MathStyle.display,
-                textStyle: _mathText,
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Math.tex(
+                  seg.text,
+                  mathStyle: MathStyle.display,
+                  textStyle: _mathText,
+                ),
               ),
             )
           else

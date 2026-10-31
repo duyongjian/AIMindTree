@@ -297,6 +297,21 @@ class NoteEditorController extends ChangeNotifier {
     return ref == null ? null : blockOf(ref);
   }
 
+  /// 工具栏上下文用的「活动块」：失焦后仍回退到**最后编辑过**的块，
+  /// 使桌面端点工具栏时按钮不置灰（否则 `_active` 被清空的瞬间按钮变
+  /// disabled，点击被吞 —— 即桌面端加粗 / 改标题失效的根因之一）。
+  Block? get toolbarActiveBlock {
+    final ref = _active ?? _lastActiveRef;
+    return ref == null ? null : blockOf(ref);
+  }
+
+  /// 工具栏上下文用的「是否支持行内格式」（见 [toolbarActiveBlock]）。
+  bool get toolbarSupportsInlineMarks =>
+      toolbarActiveBlock != null && _supportsInlineMarks(toolbarActiveBlock!);
+
+  /// 活动块或最后编辑过的块（供需要在失焦后仍拿到行引用的入口，如链接对话框）。
+  BlockRef? get activeOrLast => _active ?? _lastActiveRef;
+
   /// 无选区时点工具栏攒下的待生效格式（设计 §6.1「按钮呈按下态」）。
   InlineMarks get pendingMarks => _pending;
 
@@ -314,6 +329,16 @@ class NoteEditorController extends ChangeNotifier {
   String _markdown;
   BlockRef? _active;
   InlineMarks _pending = InlineMarks.none;
+
+  /// 最后一次编辑的块引用：失焦（桌面端点工具栏瞬间）后 [_active] 会被清空，
+  /// 但格式化动作应能回退到它，避免「点了没反应」（桌面端加粗 / 改标题失效修复）。
+  BlockRef? _lastActiveRef;
+
+  /// 失焦前记录的最后有效（非折叠）选区，按块引用存：桌面端点工具栏会让选区
+  /// 塌缩成光标，保住它才能对「刚选中的文字」加格式。
+  final Map<BlockRef, TextSelection> _lastSelectionByRef =
+      <BlockRef, TextSelection>{};
+
   AssetResolver? _resolveAsset;
 
   /// 每行一个 `TextEditingController`（设计 §10.7 第 4 条：由本类统一 dispose）。
@@ -368,6 +393,7 @@ class NoteEditorController extends ChangeNotifier {
   void focusBlock(BlockRef ref, {int? caret}) {
     if (!_isValidRef(ref)) return;
     _active = ref;
+    _lastActiveRef = ref;
     final ctrl = lineControllerFor(ref);
     final c = (caret ?? 0).clamp(0, ctrl.text.length);
     ctrl.selection = TextSelection.collapsed(offset: c);
@@ -452,11 +478,19 @@ class NoteEditorController extends ChangeNotifier {
           if (node.hasFocus) {
             if (_active != ref) {
               _active = ref;
+              _lastActiveRef = ref;
               _notify();
             }
             return;
           }
           if (_active == ref) {
+            // 桌面端点工具栏会让 TextField 失焦且选区塌缩：清 active 前先记下
+            // 最后选区与最后编辑块，供工具栏的加粗 / 改样式在失焦后仍能生效。
+            final sel = _lines[ref]?.selection;
+            if (sel != null && sel.isValid && !sel.isCollapsed) {
+              _lastSelectionByRef[ref] = sel;
+            }
+            _lastActiveRef = ref;
             _active = null;
             _notify();
           }
@@ -563,9 +597,15 @@ class NoteEditorController extends ChangeNotifier {
   bool isMarkOn(InlineMarks mark) {
     final ref = _active;
     if (ref == null) return _pending.has(mark);
-    final text = textOf(ref);
     final sel = _lines[ref]?.selection;
     if (sel == null || !sel.isValid || sel.isCollapsed) return _pending.has(mark);
+    return _isMarkOnWith(mark, ref, sel);
+  }
+
+  /// 对指定 [sel]（而非当前实时选区）判定 [mark] 是否全开；供 [toggleMark]
+  /// 在桌面端点工具栏导致实时选区塌缩后，用失焦前记录的最后选区判定。
+  bool _isMarkOnWith(InlineMarks mark, BlockRef ref, TextSelection sel) {
+    final text = textOf(ref);
     final a = sel.start.clamp(0, text.length);
     final b = sel.end.clamp(0, text.length);
     if (a >= b) return _pending.has(mark);
@@ -651,10 +691,17 @@ class NoteEditorController extends ChangeNotifier {
   /// - 有选区 → 立即对该区间加/取消该 mark（`applyMark`）；
   /// - 无选区 → 只是翻转 [pendingMarks]（后续输入的字符自动带上该样式）。
   void toggleMark(InlineMarks mark) {
-    final ref = _active;
-    if (ref == null || !activeSupportsInlineMarks) return;
+    final ref = _active ?? _lastActiveRef;
+    if (ref == null) return;
+    final blk = blockOf(ref);
+    if (blk == null || !_supportsInlineMarks(blk)) return;
     final text = textOf(ref);
-    final sel = _lines[ref]?.selection;
+    var sel = _lines[ref]?.selection;
+    if (sel == null || !sel.isValid || sel.isCollapsed) {
+      // 桌面端点工具栏瞬间选区塌缩：回退到失焦前记录的最后选区。
+      final last = _lastSelectionByRef[ref];
+      if (last != null && last.isValid && !last.isCollapsed) sel = last;
+    }
     if (sel == null || !sel.isValid || sel.isCollapsed) {
       _pending = _pending.has(mark) ? _pending - mark : _pending | mark;
       _notify();
@@ -663,12 +710,19 @@ class NoteEditorController extends ChangeNotifier {
     final a = math.min(sel.start, sel.end).clamp(0, text.length);
     final b = math.max(sel.start, sel.end).clamp(0, text.length);
     if (a >= b) return;
-    final on = !isMarkOn(mark);
+    final on = !_isMarkOnWith(mark, ref, sel);
     final next = applyMark(runsOf(ref), a, b, mark, on: on);
     _pending = InlineMarks.none;
     _setRunsFor(ref, next);
-    // 保持选区：格式化不应该把用户刚选中的文字取消选中。
-    _lines[ref]?.selection = TextSelection(baseOffset: a, extentOffset: b);
+    // 保活 + 保留选区：把焦点还给这一行，并把选区还原成 [a,b]。
+    // 桌面端点工具栏会令 TextField 失焦、选区塌缩；这里先还原 [a,b]，失焦
+    // 监听就能把 [a,b] 记进 _lastSelectionByRef，用户再点一次仍可切换 / 去格式。
+    // 即便焦点没丢（如单元测试直接连点两次、或键盘快捷键 Ctrl+B），保留的 [a,b]
+    // 选区也让第二次 toggle 能正确识别「已加粗」并去掉格式。
+    focusBlock(ref, caret: b);
+    lineControllerFor(ref).selection = TextSelection(baseOffset: a, extentOffset: b);
+    _notify();
+    _reassertFocusPostFrame(ref, b);
   }
 
   /// 清空待生效格式（点空白 / 换块时用）。
@@ -735,7 +789,7 @@ class NoteEditorController extends ChangeNotifier {
   /// 「同类型再点一次 → 回落段落」的 toggle 语义在这里落地（设计 §6.1）。
   /// 只改类型不改文本 → `caret` 严格不变（设计 §5.6）。
   void convertActiveTo(BlockType type, {int level = 1}) {
-    final ref = _active;
+    final ref = _active ?? _lastActiveRef;
     if (ref == null) return;
     final b = blockOf(ref);
     if (b == null) return;

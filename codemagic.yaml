@@ -1,0 +1,99 @@
+# Codemagic CI/CD configuration for AIMindTree
+# Dashboard: https://codemagic.io/apps (linked to github.com/BOFHTT/AIMindTree, branch: master)
+# Docs: https://docs.codemagic.io/yaml/yaml/
+#
+# 注意：Flutter 工程在仓库子目录 aimindtree_app/ 下，故统一用 working_directory 切到该目录。
+# 触发分支默认为 master（与 Codemagic 仓库设置一致）。
+
+workflows:
+  # ===== 主 CI：拉取依赖 → 静态检查 → 单元测试 =====
+  ci:
+    name: AIMindTree CI
+    max_build_duration: 30
+    instance_type: mac_mini_m2
+    working_directory: aimindtree_app
+    environment:
+      # 与本地开发机一致：Flutter 3.47.2 stable
+      flutter: "3.47.2"
+      xcode: latest
+      cocoapods: default
+      # 如需 Android 签名发布，把签名文件上传到 Codemagic 并在 android_signing 引用：
+      # android_signing:
+      #   - distribution_type: android
+      #     store_file_key: ANDROID_KEYSTORE
+      #     key_alias: upload
+    cache:
+      cache_paths:
+        - ~/.pub-cache
+    scripts:
+      - name: 获取依赖
+        script: flutter pub get
+      - name: 静态分析（门禁：0 error / 0 warning）
+        script: |
+          # 项目自定义门禁：错误与警告都视为失败（基线 4 条 info 允许）。
+          dart tool/analyze_inproc.dart
+      - name: 单元测试
+        script: flutter test --coverage
+    artifacts:
+      - aimindtree_app/coverage/**/*
+    publishing:
+      email:
+        recipients:
+          # TODO: 替换为你的邮箱
+          - your-email@example.com
+        notify:
+          success: false
+          failure: false
+
+  # ===== 构建产物：Android APK（Codemagic 免费 Linux/macOS 实例可直接构建）=====
+  build-android:
+    name: Build Android APK
+    max_build_duration: 30
+    instance_type: mac_mini_m2
+    working_directory: aimindtree_app
+    environment:
+      flutter: "3.47.2"
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: 获取依赖
+        script: flutter pub get
+      - name: 构建 release APK（未签名，可本地 adb install 验证）
+        script: flutter build apk --release
+    artifacts:
+      - aimindtree_app/build/**/outputs/**/*.apk
+    publishing:
+      email:
+        recipients:
+          - your-email@example.com
+        notify:
+          success: false
+          failure: false
+
+  # ===== 其它平台构建示例（按需启用，默认注释）=====
+  # build-web:
+  #   name: Build Web
+  #   max_build_duration: 20
+  #   instance_type: mac_mini_m2
+  #   working_directory: aimindtree_app
+  #   environment:
+  #     flutter: "3.47.2"
+  #   scripts:
+  #     - flutter pub get
+  #     - flutter build web --release
+  #   artifacts:
+  #     - aimindtree_app/build/web/**/*
+  #
+  # build-linux:
+  #   name: Build Linux desktop
+  #   max_build_duration: 30
+  #   instance_type: linux  # Linux 桌面构建需 linux 实例
+  #   working_directory: aimindtree_app
+  #   environment:
+  #     flutter: "3.47.2"
+  #   scripts:
+  #     - flutter pub get
+  #     - flutter build linux --release
+  #   artifacts:
+  #     - aimindtree_app/build/linux/**/release/bundle/**/*
+  #   # 注意：Windows 桌面构建需要 Codemagic Windows 实例（付费/自定义），默认不在免费额度内。
