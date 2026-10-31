@@ -1,11 +1,11 @@
 /// 老师模式页面：widget 层端到端测试。
 ///
 /// 覆盖测试方案：
-/// - T2 二次进入渲染历史讲解（不经内存变量）+ 负对照（软删后不复现）+ 不重复讲解
-/// - T3 全删后重新进入 → 自动新建会话并自动讲解
+/// - T2 打开不自动讲解（问题9）→ 用户点「开始老师讲解」才落库；二次进入从库里读
+/// - T3 全删后重新进入 → 只补建空会话，不自动讲解
 /// - T5 进入后消息流同时呈现「讲解」与「追问」，会话列表只剩 1 条
 /// - T6 ★ 最高优先级：多轮记忆——第 3 轮能引用第 1 轮（含反向证据用例）
-/// - T8 「再讲一次」= 追加，历史讲解不被覆盖
+/// - T8 「生成老师讲解」= 追加，历史讲解不被覆盖
 ///
 /// 假 Provider 只在**第 1 轮的回答**里种下「记忆锚点」，因此「第 3 轮气泡
 /// 复述锚点」严格等价于「第 1 轮内容被注入进第 3 轮的 query」——因果链闭合。
@@ -21,6 +21,7 @@ import 'package:aimindtree_app/data/models/knowledge_point.dart';
 import 'package:aimindtree_app/data/repositories/ai_session_repository.dart';
 import 'package:aimindtree_app/data/repositories/knowledge_repository.dart';
 import 'package:aimindtree_app/features/teacher/teacher_page.dart';
+import 'package:aimindtree_app/features/teacher/teacher_session_controller.dart';
 import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
@@ -177,12 +178,19 @@ void main() {
 
   // ==================== T2 ====================
 
-  testWidgets('T2 二次进入渲染历史讲解（从库里读，不是内存残留）',
+  testWidgets('T2 打开不自动讲解；点「开始老师讲解」才生成，二次进入从库里读',
       (tester) async {
     final fake = _FakeProvider(explainText: '讲解正文XYZ');
 
-    // 第一个实例：补建主会话 + 自动讲解一次
+    // 第一个实例：**空态**，一个 AI 调用都没有（问题9：打开不自动讲解）
     await pumpPage(tester, fake, kpId: 'kp-w2');
+    expect(fake.t6Calls, 0, reason: '打开知识点不得发起任何讲解');
+    expect(find.text(kStartExplainLabel), findsOneWidget); // 引导按钮在
+    expect(find.text('讲解正文XYZ'), findsNothing);
+
+    // 用户点了才生成（不等自动）
+    await tester.tap(find.text(kStartExplainLabel));
+    await tester.pumpAndSettle();
     expect(find.text('讲解正文XYZ'), findsOneWidget); // ①
     expect(fake.t6Calls, 1);
 
@@ -190,18 +198,19 @@ void main() {
     await pumpPage(tester, fake, kpId: 'kp-w2');
     expect(find.text('讲解正文XYZ'), findsOneWidget); // ② 仍渲染
     expect(find.textContaining('暂无讲解'), findsNothing); // ③
-    expect(fake.t6Calls, 1, reason: '主会话已有 assistant 消息，不重复自动讲解'); // ④
+    expect(fake.t6Calls, 1, reason: '已有讲解 → 打开不会再来一次'); // ④
 
     // ⑤ 负对照：把该会话消息全部软删 → 第三次进入讲解不复现
     final list = await sessions.listSessionsForKp('kp-w2');
     await sessions.clearMessages(list.single.id);
     await pumpPage(tester, fake, kpId: 'kp-w2');
     expect(find.text('讲解正文XYZ'), findsNothing);
+    expect(find.text(kStartExplainLabel), findsOneWidget);
   });
 
   // ==================== T3 ====================
 
-  testWidgets('T3 会话被软删后重新进入 → 自动新建会话并自动讲解', (tester) async {
+  testWidgets('T3 会话被软删后重新进入 → 只补建空会话，不自动讲解', (tester) async {
     final old = await sessions.createSessionForKp('kp-w3');
     await sessions.deleteSession(old.id); // 唯一会话被软删
 
@@ -211,11 +220,10 @@ void main() {
     final list = await sessions.listSessionsForKp('kp-w3');
     expect(list, hasLength(1));
     expect(list.single.id, isNot(old.id)); // 新建的不是墓碑行
-    final msgs = await sessions.listMessages(list.single.id);
-    expect(msgs, hasLength(1));
-    expect(msgs.single.modelId, 'dify-t6'); // 自动生成一条讲解
-    expect(msgs.single.content, '自动补讲解');
-    expect(find.text('自动补讲解'), findsOneWidget);
+    expect(await sessions.listMessages(list.single.id), isEmpty); // 空会话
+    expect(fake.t6Calls, 0, reason: '问题9：补建会话不再顺手讲解一次');
+    expect(find.text('自动补讲解'), findsNothing);
+    expect(find.text(kStartExplainLabel), findsOneWidget); // 交给用户点
   });
 
   // ==================== T5 ====================
@@ -242,7 +250,7 @@ void main() {
     final list = await sessions.listSessionsForKp('kp-w5');
     expect(list, hasLength(1));
     expect(list.single.id, c); // explain 没抢走主会话
-    // 已有 assistant 消息 → 不重复自动讲解
+    // 已有 assistant 消息 → 打开不会自动讲解（问题9 之后恒为 0）
     expect(fake.t6Calls, 0);
   });
 
@@ -290,7 +298,7 @@ void main() {
 
   // ==================== T8 ====================
 
-  testWidgets('T8 「再讲一次」= 追加，历史讲解不被覆盖', (tester) async {
+  testWidgets('T8 「生成老师讲解」= 追加，历史讲解不被覆盖', (tester) async {
     final s = await sessions.createSessionForKp('kp-w8', title: '链式法则 讲解');
     await sessions.addMessage(
         sessionId: s.id, role: 'assistant', content: '旧讲解', modelId: 'dify-t6');
@@ -299,7 +307,7 @@ void main() {
     await pumpPage(tester, fake, kpId: 'kp-w8');
     expect(find.text('旧讲解'), findsOneWidget);
 
-    await tester.tap(find.text('再讲一次'));
+    await tester.tap(find.text(kGenerateExplainLabel));
     await tester.pumpAndSettle();
 
     final msgs = await sessions.listMessages(s.id);
@@ -308,10 +316,10 @@ void main() {
     expect(msgs.last.modelId, 'dify-t6'); // ③ 新消息是讲解
     expect(find.text('旧讲解'), findsOneWidget); // ② UI 上仍可见
     expect(find.text('新讲解'), findsOneWidget);
-    expect(find.text('重新生成'), findsNothing); // ⑥ 文案是「再讲一次」
+    expect(find.text('再讲一次'), findsNothing); // ⑥ 旧文案已下线
   });
 
-  testWidgets('T8 断言④ 用户自建会话点「再讲一次」→ 讲解写入该会话（不是主会话）',
+  testWidgets('T8 断言④ 用户自建会话点「生成老师讲解」→ 讲解写入该会话（不是主会话）',
       (tester) async {
     // 主会话先有一条历史讲解
     final primary =
@@ -327,7 +335,7 @@ void main() {
     await tester.tap(find.byTooltip('新建会话'));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('再讲一次'));
+    await tester.tap(find.text(kGenerateExplainLabel));
     await tester.pumpAndSettle();
 
     final list = await sessions.listSessionsForKp('kp-w8b');
@@ -381,7 +389,7 @@ void main() {
   });
 
   testWidgets('R2 面板里点「新建对话」真的新建一条并切过去', (tester) async {
-    // 先有一条带消息的主会话：这样进入时不会触发自动讲解，计数干净。
+    // 先有一条带消息的主会话：进来直接渲染它，不涉及空态与生成。
     final primary =
         await sessions.createSessionForKp('kp-r2', title: '链式法则 讲解');
     await sessions.addMessage(
@@ -406,9 +414,9 @@ void main() {
     final created = after.firstWhere((s) => s.id != primary.id);
     expect(created.deletedAt, isNull);
 
-    // 页面仍在，且当前会话已切到新建的那条（空的非主会话 → 显示这条提示）
+    // 页面仍在，且当前会话已切到新建的那条（空会话 → 显示空态引导）
     expect(find.text('老师模式 · 链式法则'), findsOneWidget);
-    expect(find.text('这个会话还没有内容，问点什么吧'), findsOneWidget);
+    expect(find.text(kEmptyPrimaryGuidance), findsOneWidget);
     expect(find.text('已有讲解'), findsNothing, reason: '已切走，不再渲染主会话的消息');
   });
 

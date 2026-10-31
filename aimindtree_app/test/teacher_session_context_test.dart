@@ -15,9 +15,7 @@ import 'package:aimindtree_app/data/repositories/ai_session_repository.dart';
 import 'package:aimindtree_app/features/shared/session_context.dart';
 import 'package:aimindtree_app/features/shared/session_ui.dart';
 import 'package:aimindtree_app/features/teacher/teacher_session_controller.dart';
-import 'package:aimindtree_app/ai/ai_service.dart';
 import 'package:aimindtree_app/ai/ai_task.dart';
-import 'package:aimindtree_app/ai/ai_task_router.dart';
 import 'package:aimindtree_app/data/models/knowledge_point.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -70,11 +68,10 @@ String _referenceBuildSessionContext(
   return ([header] + kept).join('\n').trimRight();
 }
 
-/// 造一个 controller（buildQuery 只用到 kp / history，不触碰 ai / repo 网络）。
+/// 造一个 controller（buildQuery 只用到 kp / history，不碰库也不碰网络）。
 TeacherSessionController _makeController({String definition = ''}) {
   final db = AppDatabase(NativeDatabase.memory());
   final repo = AiSessionRepository(db);
-  final ai = AiService(router: AiTaskRouter(providers: const {}));
   final kp = KnowledgePoint(
     id: 'kp-ctx',
     name: '链式法则',
@@ -85,7 +82,7 @@ TeacherSessionController _makeController({String definition = ''}) {
     sourceEnd: -1,
     sourceQuote: '来源锚点',
   );
-  return TeacherSessionController(repo: repo, ai: ai, kp: kp);
+  return TeacherSessionController(repo: repo, kp: kp);
 }
 
 void main() {

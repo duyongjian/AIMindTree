@@ -3,8 +3,9 @@
 /// 重构前双 Tab（讲解 T6 / 追问 T5）各持一个会话，重构后：
 /// - 单消息流：所有消息在同一个会话中按 id ASC 排列
 /// - 会话管理：AppBar 图标 → 底部弹层（新建/重命名/清空/删除）
-/// - 自动讲解：主会话不存在时自动补建 + 讲解一次（T1 触发点）
-/// - 「再讲一次」：追加新讲解到当前会话（不覆盖旧讲解）
+/// - **打开不讲解**（问题9）：进页面只补建一条空会话，不发起任何 AI 调用；
+///   要讲解由用户点空态的「开始老师讲解」，不点也行（直接提问即可）。
+/// - 「生成老师讲解」：追加新讲解到当前会话（不覆盖旧讲解）
 /// - L2 注入：每次提问前组装历史快照，确保多轮记忆
 ///
 /// B4 互斥：会话打开期间持 `kp:{id}` 资源锁。
@@ -81,7 +82,6 @@ class _TeacherPageState extends State<TeacherPage> {
     super.initState();
     _controller = TeacherSessionController(
       repo: widget.sessions,
-      ai: widget.ai,
       kp: widget.kp,
     );
     // 会话级持锁：页开即占、页关即放（「同点另开老师模式」在入口处被挡）。
@@ -110,8 +110,8 @@ class _TeacherPageState extends State<TeacherPage> {
   Future<void> _bootstrap() async {
     // ① 合并老数据
     await _controller.mergeLegacy(widget.kp.id);
-    // ② 取主会话
-    final primary = await _controller.ensurePrimarySession(context: context);
+    // ② 取主会话（不存在则补建一条空会话 —— **不讲解**，问题9）
+    final primary = await _controller.ensurePrimarySession();
     // ③ 加载会话列表 + 主会话消息
     final sessions = await widget.sessions.listSessionsForKp(widget.kp.id);
     final msgs = await widget.sessions.listMessages(primary.id);
@@ -124,36 +124,44 @@ class _TeacherPageState extends State<TeacherPage> {
       _sessions = sessions;
       _messages = msgs;
       _mastery = m;
+      // 上次退出页面时讲解还没出完（`kp:{id}:chat` 锁仍被占）：把「生成中」
+      // 态恢复回来。否则空态会再放一个可点的引导按钮，点了只能空转。
+      _askBusy = widget.jobs.isLocked(_chatLockKey);
     });
-
-    // ④ 若主会话为空 → 触发自动讲解（T2 触发点）
-    if (primary.title.isNotEmpty ||
-        msgs.where((x) => x.role == 'assistant').isNotEmpty) {
-      return;
-    }
-    await _generateExplainOnce(sessionId: primary.id);
+    // ④ 到此为止：**不发起任何 AI 调用**。讲解是用户点「开始老师讲解」的事。
   }
 
-  /// 自动讲解 / 「再讲一次」：产出一段讲解并落到 [sessionId] 会话里。
+  /// 产出一段老师讲解并落到 [sessionId]（省略则用当前会话）。
+  ///
+  /// 唯一入口是用户操作：空态「开始老师讲解」与底部「生成老师讲解」。
+  /// 打开页面时**不会**被调用（问题9：不再自动讲解）。
   ///
   /// D：改后台任务，页面销毁不中断 —— 建好 query 后把「读流 + 落库」整体
   /// 交给 [AiJobService.runDetached]，用户中途退出页面（`mounted == false`）
   /// 时回答照样写进库，不再丢。
-  Future<void> _generateExplainOnce({required String sessionId}) async {
-    // 已有一段讲解在生成：本页连点，或上次退出页面后后台任务仍在跑（
-    // 那种情况同一个 `kp:{id}:chat` 锁还被占着，绝不能再开一段）。
-    if (_askBusy || widget.jobs.isLocked(_chatLockKey)) return;
-    final sid = sessionId.isNotEmpty ? sessionId : (_currentSessionId ?? '');
+  Future<void> _generateExplain({String? sessionId}) async {
+    if (_askBusy) return;
+    // 上一次讲解还在后台跑（典型：没出完就退出页面，回来又点了一次）：
+    // 同一把 `kp:{id}:chat` 锁绝不能再开第二段，但也不能静默装没听见。
+    if (widget.jobs.isLocked(_chatLockKey)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('讲解还在后台生成，完成后会自动出现在这里')),
+        );
+      }
+      return;
+    }
+    final sid = sessionId ?? _currentSessionId ?? '';
     if (sid.isEmpty) {
       if (mounted) setState(() => _error = '还没有会话，请先新建一个会话。');
       return;
     }
 
     final history = await widget.sessions.listMessages(sid);
-    // 「讲解」恒走 T6：本方法只有两个调用点（空主会话的自动讲解 / 用户点
-    // 「再讲一次」），两者语义都是「产出一段讲解」，不随会话里是否已有讲解
+    // 「讲解」恒走 T6：本方法虽有两个调用点（空态「开始老师讲解」/ 底部
+    // 「生成老师讲解」），语义都是「产出一段讲解」，不随会话里是否已有讲解
     // 而改变任务码（旧实现走 _taskForSession，会在已有讲解时退化成 T5 追问，
-    // 导致「再讲一次」其实问了一个追问）。
+    // 导致「生成老师讲解」其实问了一个追问）。
     const task = AiTask.t6Explain;
     final query = _controller.buildQuery(
       history: history,
@@ -411,9 +419,11 @@ class _TeacherPageState extends State<TeacherPage> {
   /// 什么都不做（DB 已落库，重开本页的 _bootstrap 会读到）。
   void _onChatJobTerminal(AiJob job) {
     if (job.resourceKey != _chatLockKey) return;
-    if (mounted) {
-      unawaited(_reloadMessages());
-    }
+    if (!mounted) return;
+    // 本页重进后 `_askBusy` 是按锁恢复的（见 _bootstrap），任务落终态就得
+    // 自己解开 —— 那个任务的 finally 属于上一个页面实例，管不到这里。
+    if (_askBusy) setState(() => _askBusy = false);
+    unawaited(_reloadMessages());
   }
 
   @override
@@ -494,7 +504,6 @@ class _TeacherPageState extends State<TeacherPage> {
                 if (confirmed) {
                   final result = await _controller.deleteSession(
                     sessionId: _currentSessionId!,
-                    context: context,
                   );
                   if (!mounted) return;
                   if (result.$1 != null) {
@@ -534,11 +543,45 @@ class _TeacherPageState extends State<TeacherPage> {
           Expanded(
             child: _messages.isEmpty
                 ? Center(
-                    child: Text(
-                      _currentSessionId == _primarySessionId
-                          ? kEmptyPrimaryGuidance
-                          : '这个会话还没有内容，问点什么吧',
-                      style: const TextStyle(color: Colors.grey),
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.school_outlined,
+                              size: 40, color: Colors.grey.shade400),
+                          const SizedBox(height: 12),
+                          Text(
+                            kEmptyPrimaryGuidance,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(color: Colors.grey),
+                          ),
+                          const SizedBox(height: 16),
+                          // 问题9：讲解不再自动来，这一下由用户点。
+                          FilledButton.icon(
+                            onPressed: _askBusy
+                                ? null
+                                : () => _generateExplain(
+                                    sessionId: _currentSessionId),
+                            icon: _askBusy
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2),
+                                  )
+                                : const Icon(Icons.auto_awesome, size: 18),
+                            label: const Text(kStartExplainLabel),
+                          ),
+                          if (_error != null)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 12),
+                              child: Text('错误：$_error',
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(color: Colors.red)),
+                            ),
+                        ],
+                      ),
                     ),
                   )
                 : ListView.builder(
@@ -604,16 +647,18 @@ class _TeacherPageState extends State<TeacherPage> {
                   Align(
                     alignment: Alignment.centerRight,
                     child: TextButton.icon(
-                      onPressed: _askBusy ? null : () => _generateExplainOnce(
-                          sessionId: _currentSessionId ?? ''),
+                      onPressed: _askBusy
+                          ? null
+                          : () => _generateExplain(
+                              sessionId: _currentSessionId),
                       icon: _askBusy
                           ? const SizedBox(
                               width: 14,
                               height: 14,
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
-                          : const Icon(Icons.refresh, size: 16),
-                      label: const Text(kRegenerateLabel),
+                          : const Icon(Icons.auto_awesome_outlined, size: 16),
+                      label: const Text(kGenerateExplainLabel),
                     ),
                   ),
                 ],
@@ -884,9 +929,21 @@ class _SessionManagerSheet extends StatelessWidget {
                         }
                       } else if (value == 'delete') {
                         final isPrimarySession = s.id == primarySessionId;
+                        // 占位符要填**真实的**下一个会话标题：以前填的是字面量
+                        // 「会话列表」，弹出来是「删除后将自动切换到『会话列表』」。
+                        final nextOnes = sessions
+                            .where((x) => x.id != s.id && x.deletedAt == null)
+                            .toList();
+                        final nextTitle = nextOnes.isEmpty
+                            ? ''
+                            : deriveSessionTitle(
+                                storedTitle: nextOnes.first.title,
+                                messages: const <ChatMessage>[],
+                                fallbackTitle: '${kp.name} 讲解',
+                              );
                         final message = isPrimarySession
                             ? kDeletePrimaryConfirmTemplate
-                                .replaceAll('{nextTitle}', '会话列表')
+                                .replaceAll('{nextTitle}', nextTitle)
                             : '连同消息一起删除，不可恢复。';
                         final confirmed = await confirmDialog(
                           context,
@@ -896,7 +953,6 @@ class _SessionManagerSheet extends StatelessWidget {
                         if (confirmed) {
                           final result = await controller.deleteSession(
                             sessionId: s.id,
-                            context: context,
                           );
                           if (context.mounted) {
                             Navigator.pop(context);

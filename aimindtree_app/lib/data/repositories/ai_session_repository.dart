@@ -252,7 +252,7 @@ class AiSessionRepository {
   ///
   /// `type='chat'` 这一条件的作用：合并失败残留的 `explain` 行（id 往往更小）
   /// 不会抢走主会话。
-  /// 无则返回 `null`（调用方决定是否补建 + 是否自动讲解）。
+  /// 无则返回 `null`（调用方决定是否补建；补建出来的是空会话，不讲解）。
   Future<AiSessionRow?> primarySessionForKp(String kpId) async {
     final rows = await (_db.select(_db.aiSessions)
           ..where((t) =>

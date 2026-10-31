@@ -964,7 +964,7 @@ class DetachedTask {
   /// 执行体完结信号（done / failed / canceled 都会 complete，不抛）。
   ///
   /// 给「调用方必须等结果才能继续，但不能因为页面关了就中断」的场景用
-  /// （如老师模式首次自动讲解：页面 `_bootstrap` 要等讲解落库后才渲染）。
+  /// （如老师模式点了「开始老师讲解」后，页面要等讲解落库才刷新消息流）。
   final Completer<void> _done = Completer<void>();
   Future<void> get done => _done.future;
 

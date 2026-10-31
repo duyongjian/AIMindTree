@@ -10,9 +10,7 @@
 /// 全部用内存库 `NativeDatabase.memory()`，不依赖任何 Provider / 真实 LLM。
 library;
 
-import 'package:aimindtree_app/ai/ai_service.dart';
 import 'package:aimindtree_app/ai/ai_task.dart';
-import 'package:aimindtree_app/ai/ai_task_router.dart';
 import 'package:aimindtree_app/core/id.dart';
 import 'package:aimindtree_app/data/db/drift_database.dart';
 import 'package:aimindtree_app/data/models/knowledge_point.dart';
@@ -645,28 +643,36 @@ void main() {
 
   // ==================== 控制器补建主会话（T3 widget 层的仓储侧证据） ====================
 
-  test('控制器 ensurePrimarySession 在无主会话时抛 StateError（无 context）',
-      () async {
-    final kp = _kp('kp-ctrl');
-    final controller = TeacherSessionController(
-      repo: repo,
-      ai: _noopAi(),
-      kp: kp,
-    );
-    // 无主会话且无 context → 明确抛错（调用方须保证传 context）
-    await expectLater(
-      controller.ensurePrimarySession(),
-      throwsA(isA<StateError>()),
-    );
-    // 存在主会话时直接返回
-    final s = await repo.createSessionForKp('kp-ctrl');
+  test('控制器 ensurePrimarySession 只补建空会话，绝不发起讲解（问题9）', () async {
+    final controller = TeacherSessionController(repo: repo, kp: _kp('kp-ctrl'));
+    // 无主会话 → 补建一条空会话。以前这里要 BuildContext，且顺手讲解一次。
+    final s = await controller.ensurePrimarySession();
+    expect(s.kpId, 'kp-ctrl');
+    expect(s.title, isNotEmpty);
+    expect(await repo.listMessages(s.id), isEmpty); // 打开知识点不再自动讲解
+    // 已有主会话 → 原样返回，不重复建
     expect((await controller.ensurePrimarySession()).id, s.id);
+    expect(await repo.listSessionsForKp('kp-ctrl'), hasLength(1));
+  });
+
+  test('deleteSession 删掉最后一条会话 → 补建空会话（不自动讲解）', () async {
+    final a = _ulid(1);
+    await insertSession(id: a, kpId: 'kp-del2', type: 'chat');
+    await insertMessage(
+        id: _ulid(11), sessionId: a, role: 'assistant', content: '旧讲解',
+        modelId: 'dify-t6');
+    final controller = TeacherSessionController(repo: repo, kp: _kp('kp-del2'));
+
+    final r = await controller.deleteSession(sessionId: a);
+    expect(r.$1, isNotNull);
+    expect(r.$1, isNot(a)); // 是新建的一条，不是复活旧会话
+    expect(r.$3, '已新建空会话');
+    expect(await repo.listMessages(r.$1!), isEmpty); // 空会话：等用户点按钮
   });
 
   test('控制器 createUserSession 不自动讲解（纯本地建会话）', () async {
     final kp = _kp('kp-ctrl2');
-    final controller =
-        TeacherSessionController(repo: repo, ai: _noopAi(), kp: kp);
+    final controller = TeacherSessionController(repo: repo, kp: kp);
     final s = await controller.createUserSession();
     expect(s.kpId, 'kp-ctrl2');
     expect(s.type, 'chat');
@@ -681,8 +687,7 @@ void main() {
     await insertMessage(id: _ulid(11), sessionId: b, role: 'user',
         content: '第二会话首问');
     final kp = _kp('kp-del');
-    final controller =
-        TeacherSessionController(repo: repo, ai: _noopAi(), kp: kp);
+    final controller = TeacherSessionController(repo: repo, kp: kp);
 
     final r = await controller.deleteSession(sessionId: a);
     expect(r.$1, b); // 顺延到下一个未删会话
@@ -697,7 +702,7 @@ void main() {
   });
 }
 
-// -------- 辅助：构造 KnowledgePoint / 空 AiService --------
+// -------- 辅助：构造 KnowledgePoint --------
 
 KnowledgePoint _kp(String id) => KnowledgePoint(
       id: id,
@@ -709,6 +714,3 @@ KnowledgePoint _kp(String id) => KnowledgePoint(
       sourceEnd: -1,
       sourceQuote: '原文锚点',
     );
-
-/// 不发起任何网络请求的 AiService（这些用例里不会被调用到）。
-AiService _noopAi() => AiService(router: AiTaskRouter(providers: const {}));
