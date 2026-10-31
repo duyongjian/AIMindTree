@@ -282,6 +282,20 @@ class Homeworks extends Table with SyncMeta {
   /// 题目 JSON：`[{"kpId","kpName","type","question","answer","difficulty"}]`。
   TextColumn get itemsJson =>
       text().named('items_json').withDefault(const Constant('[]'))();
+
+  /// 主关联知识点外键（→ knowledge_points.id）；「进某知识点看其作业」用。
+  /// 一对多：一个知识点下可有多个作业行，批量布置时每行各带一个 [kpId]。
+  TextColumn get kpId => text().named('kp_id').nullable()();
+
+  /// 批量布置聚合键：一次框选布置 N 个知识点共享同一 [batchId]（N 行归类）。
+  TextColumn get batchId => text().named('batch_id').nullable()();
+
+  /// 作业状态：assigned / draft / done（生命周期展示用）。
+  TextColumn get status =>
+      text().named('status').withDefault(const Constant('assigned'))();
+
+  /// 截止时间（可选）。
+  DateTimeColumn get dueAt => dateTime().named('due_at').nullable()();
 }
 
 /// AI 会话（聊天 / 老师模式）。

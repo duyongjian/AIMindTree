@@ -2,8 +2,8 @@
 ///
 /// 锁住两件事：
 /// 1. **本机总览**（[SyncEngine.localOverview]）的口径：只统计
-///    [kSyncTableAllowlist] 的 15 张表，`homeworks`（明确不同步）必须排除，
-///    软删墓碑行照常计数，最大版本取 15 张表的全局最大。
+///    [kSyncTableAllowlist] 的 16 张表（`homeworks` 本轮已纳入同步，必须计入），
+///    软删墓碑行照常计数，最大版本取 16 张表的全局最大。
 /// 2. **服务器总览**（[HttpSyncApi.parseManifest] / [MockSyncApi.fetchManifest]）
 ///    的解析与降级：完整字段正常解析；旧中继只回 `count`（缺 `max_version`）
 ///    时必须回落 0 而不是抛异常——否则设置页整张卡会崩。
@@ -57,7 +57,7 @@ void main() {
   }
 
   group('本机数据总览（SyncEngine.localOverview）', () {
-    test('空库 → 0 条 / 最大版本 0（顺带校验 15 张同步表都真实存在）', () async {
+    test('空库 → 0 条 / 最大版本 0（顺带校验 16 张同步表都真实存在）', () async {
       final o = await engine.localOverview();
       expect(o.count, 0);
       expect(o.maxVersion, 0);
@@ -73,7 +73,7 @@ void main() {
       expect(o.maxVersion, 9, reason: '最大版本跨表取全局最大，不是最后一张表');
     });
 
-    test('homeworks 不在同步白名单 → 不计入总览', () async {
+    test('homeworks 已纳入同步白名单 → 计入总览', () async {
       await insertNote('n1', version: 2);
       await db.into(db.homeworks).insert(HomeworksCompanion(
             id: const Value('h1'),
@@ -84,8 +84,16 @@ void main() {
           ));
 
       final o = await engine.localOverview();
-      expect(o.count, 1, reason: 'homeworks 明确不同步，不能进总览');
-      expect(o.maxVersion, 2, reason: 'homeworks 的 version=99 也不能拉高最大版本');
+      expect(
+        o.count,
+        2,
+        reason: 'notes 1 行 + homeworks 1 行：homeworks 已在 kSyncTableAllowlist 内',
+      );
+      expect(
+        o.maxVersion,
+        99,
+        reason: 'homeworks 纳入同步后，它的 version 也参与全局最大值',
+      );
     });
 
     test('软删墓碑行（deleted_at 非空）仍计入记录数', () async {

@@ -8,7 +8,13 @@
 /// - L2 注入：每次提问前组装历史快照，确保多轮记忆
 ///
 /// B4 互斥：会话打开期间持 `kp:{id}` 资源锁。
+///
+/// D：改后台任务，页面销毁不中断 —— 讲解（T6）与追问（T5）的流式读取 +
+/// 落库整体跑在 [AiJobService.runDetached] 的执行体里（托盘一行可见、
+/// 可取消），用户中途退出页面时回答照样写进库。
 library;
+
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 
@@ -20,6 +26,7 @@ import '../../data/models/knowledge_point.dart';
 import '../../data/repositories/ai_session_repository.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../shared/session_ui.dart';
+import 'markdown_message.dart';
 import 'teacher_session_controller.dart';
 
 class TeacherPage extends StatefulWidget {
@@ -59,6 +66,16 @@ class _TeacherPageState extends State<TeacherPage> {
   /// B4：交互会话 id（持 `kp:{id}` 锁；dispose 时释放）。
   String _sessionTicket = '';
 
+  /// D：当前流式生成的后台任务（取消链路的文案锚点）。
+  ///
+  /// 任务的**执行体**由 [AiJobService] 持有，页面 dispose 不会中断它；
+  /// 这里只留一个句柄，供托盘点「取消」时补一句「正在取消…」。
+  DetachedTask? _running;
+
+  /// D：后台任务终态订阅 —— 生成可能在本页销毁期间跑完，回到本页时把结果
+  /// 补进消息流（否则用户会看到「托盘说已生成、会话里却是空的」）。
+  StreamSubscription<AiJob>? _jobSub;
+
   @override
   void initState() {
     super.initState();
@@ -71,9 +88,26 @@ class _TeacherPageState extends State<TeacherPage> {
     _sessionTicket = widget.jobs.holdInteractive(
       'kp:${widget.kp.id}',
       label: '老师模式：${widget.kp.name}',
+      // D：托盘点本行的 ✕ → **真正把这个知识点的后台生成取消掉**。
+      //     只改文案是不行的：`_running` 是一个 `runDetached` 任务，页面
+      //     自己 `break` 不掉它（读流循环在 service 持有的 Future 里），
+      //     必须走 `cancel()` 才会置 cancelRequested + 触发 interrupt。
+      onCancel: () {
+        final running = _running;
+        if (running == null) return;
+        unawaited(widget.jobs.cancel(running.id));
+      },
     );
+    // D：本知识点的后台生成（`kp:{id}:chat` 锁）一落终态就补拉消息。
+    _jobSub = widget.jobs.terminalStream.listen((job) {
+      if (!mounted || job.resourceKey != _chatLockKey) return;
+      unawaited(_reloadMessages());
+    });
     _bootstrap();
   }
+
+  /// D：老师模式「生成中」任务的资源锁（与会话锁 `kp:{id}` 是两个 key）。
+  String get _chatLockKey => 'kp:${widget.kp.id}:chat';
 
   Future<void> _bootstrap() async {
     // ① 合并老数据
@@ -102,8 +136,22 @@ class _TeacherPageState extends State<TeacherPage> {
     await _generateExplainOnce(sessionId: primary.id);
   }
 
+  /// 自动讲解 / 「再讲一次」：产出一段讲解并落到 [sessionId] 会话里。
+  ///
+  /// D：改后台任务，页面销毁不中断 —— 建好 query 后把「读流 + 落库」整体
+  /// 交给 [AiJobService.runDetached]，用户中途退出页面（`mounted == false`）
+  /// 时回答照样写进库，不再丢。
   Future<void> _generateExplainOnce({required String sessionId}) async {
-    final history = await widget.sessions.listMessages(sessionId);
+    // 已有一段讲解在生成：本页连点，或上次退出页面后后台任务仍在跑（
+    // 那种情况同一个 `kp:{id}:chat` 锁还被占着，绝不能再开一段）。
+    if (_askBusy || widget.jobs.isLocked(_chatLockKey)) return;
+    final sid = sessionId.isNotEmpty ? sessionId : (_currentSessionId ?? '');
+    if (sid.isEmpty) {
+      if (mounted) setState(() => _error = '还没有会话，请先新建一个会话。');
+      return;
+    }
+
+    final history = await widget.sessions.listMessages(sid);
     // 「讲解」恒走 T6：本方法只有两个调用点（空主会话的自动讲解 / 用户点
     // 「再讲一次」），两者语义都是「产出一段讲解」，不随会话里是否已有讲解
     // 而改变任务码（旧实现走 _taskForSession，会在已有讲解时退化成 T5 追问，
@@ -115,37 +163,21 @@ class _TeacherPageState extends State<TeacherPage> {
       currentQuestion: '',
     );
 
-    // 先把「生成中」的气泡状态立起来，再发请求。
+    if (!mounted) return;
+    // 先把「生成中」的气泡状态立起来，再登记后台任务。
     setState(() {
       _askBusy = true;
       _error = null;
     });
-    _ticket('正在生成讲解…');
 
-    final buf = StringBuffer();
-    try {
-      await for (final chunk in widget.ai.chat(task, query)) {
-        if (chunk.delta != null) buf.write(chunk.delta);
-        if (chunk.done) break;
-      }
-      final text = buf.toString().trim();
-      if (text.isNotEmpty) {
-        await widget.sessions.addMessage(
-          sessionId: sessionId,
-          role: 'assistant',
-          content: text,
-          modelId: 'dify-t6',
-        );
-      }
-    } on Object catch (e) {
-      if (!mounted) return;
-      setState(() => _error = _friendlyError(e));
-    } finally {
-      if (!mounted) return;
-      await _reloadMessages();
-      setState(() => _askBusy = false);
-      _ticket('会话进行中');
-    }
+    _startStreamJob(
+      sessionId: sid,
+      task: task,
+      query: query,
+      modelId: 'dify-t6',
+      startMessage: '正在生成讲解…',
+      doneMessage: '讲解已生成',
+    );
   }
 
   Future<void> _send() async {
@@ -154,15 +186,17 @@ class _TeacherPageState extends State<TeacherPage> {
 
     // L2：快照在写入本轮 user 消息之前，确保本轮问题不出现在前文块中
     final historySnapshot = List<ChatMessage>.from(_messages);
+    final sessionId = _currentSessionId!;
 
     setState(() {
       _askBusy = true;
       _error = null;
     });
-    _ticket('正在回答追问…');
+    // 回答改由后台任务产出，本轮不再「等答案才能清输入框」。
+    _input.clear();
 
     await widget.sessions.addMessage(
-      sessionId: _currentSessionId!,
+      sessionId: sessionId,
       role: 'user',
       content: text,
     );
@@ -173,30 +207,17 @@ class _TeacherPageState extends State<TeacherPage> {
       currentQuestion: text,
     );
 
-    final answer = StringBuffer();
-    try {
-      await for (final chunk in widget.ai.chat(AiTask.t5Ask, query)) {
-        if (chunk.delta != null) answer.write(chunk.delta);
-        if (chunk.done) break;
-      }
-    } on Object catch (e) {
-      if (!mounted) return;
-      setState(() => _error = _friendlyError(e));
-    } finally {
-      if (!mounted) return;
-      final finalAnswer = answer.isEmpty ? '(无响应)' : answer.toString();
-      await widget.sessions.addMessage(
-        sessionId: _currentSessionId!,
-        role: 'assistant',
-        content: finalAnswer,
-        modelId: 'dify-t5',
-      );
-      await _reloadMessages();
-      setState(() => _askBusy = false);
-      _ticket('会话进行中');
-    }
+    _startStreamJob(
+      sessionId: sessionId,
+      task: AiTask.t5Ask,
+      query: query,
+      modelId: 'dify-t5',
+      startMessage: '正在回答追问…',
+      doneMessage: '回答已生成',
+      // 旧实现空回答落 `(无响应)`，保留这条语义（它本身是一条有效消息）。
+      emptyFallback: '(无响应)',
+    );
 
-    _input.clear();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) {
         _scroll.animateTo(
@@ -206,6 +227,87 @@ class _TeacherPageState extends State<TeacherPage> {
         );
       }
     });
+  }
+
+  /// 登记一个「流式读 + 落库」的后台任务（讲解 / 追问共用）。
+  ///
+  /// D：改后台任务，页面销毁不中断。执行体内三条铁律：
+  /// - **落库无条件执行**（不再 `if (!mounted)` 包 DB 写）——这正是回答
+  ///   不丢的关键；只有 `setState` 前面才判 `mounted`；
+  /// - **逐块检查取消**：托盘点 ✕ → `isCanceled` 为真 → 下一块即 break，
+  ///   半截回答**不入库**（避免把残缺答案当成完整讲解留在会话里）；
+  /// - **进度节流**：累计 ≥200 字或距上次刷新 >400ms 才刷托盘，否则每块都
+  ///   刷新会让托盘行疯狂抖动。
+  void _startStreamJob({
+    required String sessionId,
+    required AiTask task,
+    required String query,
+    required String modelId,
+    required String startMessage,
+    required String doneMessage,
+    String emptyFallback = '',
+  }) {
+    final bg = widget.jobs.runDetached(
+      // 行名与页级会话行（`老师模式：xxx`）区分开：一个在跑、一个只是开着页。
+      label: '老师模式 · 生成中：${widget.kp.name}',
+      // ⚠️ 页级会话锁是 `kp:{id}`（initState 里占的），这里必须换一个 key，
+      // 否则 `runDetached` 会把同一张锁表里的 key 覆盖掉、自己把自己锁死。
+      resourceKey: _chatLockKey,
+      silent: false,
+      doneMessage: doneMessage,
+      body: (t) async {
+        t.progress(startMessage);
+        final buf = StringBuffer();
+        var flushedChars = 0;
+        var flushedAt = DateTime.now();
+        try {
+          await for (final chunk in widget.ai.chat(task, query)) {
+            // 用户已请求取消：下一块就收工（不必等模型吐完）。
+            if (t.isCanceled) break;
+            if (chunk.delta != null) buf.write(chunk.delta);
+            final now = DateTime.now();
+            if (buf.length - flushedChars >= 200 ||
+                now.difference(flushedAt) > const Duration(milliseconds: 400)) {
+              flushedChars = buf.length;
+              flushedAt = now;
+              t.progress('已生成 ${buf.length} 字');
+            }
+            if (chunk.done) break;
+          }
+          if (t.isCanceled) {
+            t.progress('已取消');
+            return;
+          }
+          var text = buf.toString().trim();
+          if (text.isEmpty && emptyFallback.isNotEmpty) text = emptyFallback;
+          if (text.isNotEmpty) {
+            // 无条件落库：页面已销毁也照写（回答不能因为退出页面而消失）。
+            await widget.sessions.addMessage(
+              sessionId: sessionId,
+              role: 'assistant',
+              content: text,
+              modelId: modelId,
+            );
+          }
+          t.progress('已完成', percent: 1);
+        } on Object catch (e) {
+          if (t.isCanceled) {
+            t.progress('已取消');
+            return;
+          }
+          // 托盘会把终态记成 failed；页面还活着就顺带把原因挂到消息流下方。
+          if (mounted) setState(() => _error = _friendlyError(e));
+          rethrow;
+        } finally {
+          _running = null;
+          if (mounted) {
+            setState(() => _askBusy = false);
+            await _reloadMessages();
+          }
+        }
+      },
+    );
+    _running = bg;
   }
 
   Future<void> _reloadMessages() async {
@@ -295,6 +397,9 @@ class _TeacherPageState extends State<TeacherPage> {
   void dispose() {
     // 先放锁再拆控件：会话页关掉 = `kp:{id}` 解锁 + 托盘行消失。
     widget.jobs.releaseInteractive(_sessionTicket);
+    // 页面走了但后台生成还在跑：只断「回填消息」的订阅，任务本身不受影响。
+    _jobSub?.cancel();
+    _jobSub = null;
     _input.dispose();
     _scroll.dispose();
     super.dispose();
@@ -520,7 +625,12 @@ class _KpHeader extends StatelessWidget {
   Widget build(BuildContext context) => Container(
         width: double.infinity,
         padding: const EdgeInsets.all(12),
-        color: Colors.indigo.shade50,
+        // 去掉原先整条 indigo.shade50 大色块（会话列表上方「一大滩多余颜色」），
+        // 改成安静的浅灰底 + 一条细分隔线，和全 App 视觉一致。
+        decoration: BoxDecoration(
+          color: Colors.grey.shade50,
+          border: Border(bottom: BorderSide(color: Colors.grey.shade300)),
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -604,11 +714,14 @@ class _MessageBubble extends StatelessWidget {
                 color: isUser ? Colors.indigo : Colors.grey.shade200,
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: Text(
-                content,
-                style: TextStyle(
-                    color: isUser ? Colors.white : Colors.black87),
-              ),
+              child: isUser
+                  ? Text(
+                      content,
+                      style: const TextStyle(color: Colors.white),
+                    )
+                  // 老师（助手）回复是 Markdown + LaTeX：渲染成富文本，
+                  // 不再把 `##`/`**`/`$...$` 原样显示成源码。
+                  : MarkdownMessage(data: content),
             ),
           ),
         ],

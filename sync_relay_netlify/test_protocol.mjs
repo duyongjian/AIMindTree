@@ -443,10 +443,34 @@ async function main() {
     let m = (await json(h3(req('GET', '/sync/manifest', undefined, envV)))).data;
     check('首次 push（base_version=5）→ max_version=6', m.count === 1 && m.max_version === 6);
 
-    // 覆盖同 key：max(既有 6, 声明 1)+1 = 7 → count 不变、版本继续爬。
-    await json(h3(req('POST', '/sync/push', { device_id: 'dV', envelopes: [env('k1', 1)] }, envV)));
+    // 覆盖同 key：客户端基于既有版本 6 重新上传（声明 base_version=6）→ 7。
+    await json(h3(req('POST', '/sync/push', { device_id: 'dV', envelopes: [env('k1', 6)] }, envV)));
     m = (await json(h3(req('GET', '/sync/manifest', undefined, envV)))).data;
     check('覆盖同 key 后 count 仍 1 / max_version=7', m.count === 1 && m.max_version === 7);
+  }
+
+  // 33) 防陈旧覆盖：声明版本落后时不覆盖云端较新内容、不递增版本（与 EO 23a 对称）
+  {
+    const store4 = makeMemoryStore();
+    const h4 = (r) => handleFetch(r, store4, {});
+    const { data: reg } = await json(h4(req('POST', '/auth/register', { username: 'stl', password: 'stalewq7731' })));
+    const envS = { Authorization: 'Bearer ' + reg.token };
+    // devA 先推 n-stale（声明 base_version=2 → 服务端 3，内容 new）。
+    await json(h4(req('POST', '/sync/push', {
+      device_id: 'devA',
+      envelopes: [{ device_id: 'devA', entity_table: 'notes', entity_id: 'n-stale', op: 'upsert', payload: { title: 'new' }, base_version: 2, updated_at: '2026-06-01T00:00:00Z', deleted_at: null }],
+    }, envS)));
+    // devB 用落后的 base_version=1 推同一 key（过期本地副本，内容 OLD）。
+    const r = await json(h4(req('POST', '/sync/push', {
+      device_id: 'devB',
+      envelopes: [{ device_id: 'devB', entity_table: 'notes', entity_id: 'n-stale', op: 'upsert', payload: { title: 'OLD' }, base_version: 1, updated_at: '2024-01-01T00:00:00Z', deleted_at: null }],
+    }, envS)));
+    check('陈旧 push 回写服务端权威版本 3', r.data.versions && r.data.versions['notes:n-stale'] === 3);
+    const m2 = (await json(h4(req('GET', '/sync/manifest', undefined, envS)))).data;
+    check('陈旧 push 不递增版本（保持 3）', m2.count === 1 && m2.max_version === 3);
+    const pull = (await json(h4(req('POST', '/sync/pull', { device_id: 'devB', since: null }, envS)))).data;
+    const s = pull.envelopes.find((e) => e.entity_id === 'n-stale');
+    check('云端较新内容 new 未被陈旧 push 覆盖', s && s.payload.title === 'new');
   }
 
   console.log(`\nNetlify 中继协议测试：通过 ${pass}，失败 ${fail}`);

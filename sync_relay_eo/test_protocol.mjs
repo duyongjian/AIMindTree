@@ -153,14 +153,14 @@ async function get(env, reqPath, token) {
   return call(env, { method: 'GET', path: reqPath, token: token || '' });
 }
 
-function mkEnvId(entityTable, entityId, device, payload) {
+function mkEnvId(entityTable, entityId, device, payload, baseVersion = 1) {
   return {
     device_id: device,
     entity_table: entityTable,
     entity_id: entityId,
     op: 'upsert',
     payload,
-    base_version: 1,
+    base_version: baseVersion,
     updated_at: '2024-10-23T00:00:00.000Z',
     deleted_at: null,
   };
@@ -317,16 +317,18 @@ async function run() {
   let pushTime1b;
   {
     await sleep(15); // 确保 server_time 与上一批不同（毫秒）
+    // 第二次 push 声明 base_version=2（模拟设备已 adoption 服务端版本 2 后
+    // 再推更新）；声明版本 >= 既有 → 覆盖内容并递增到 3。
     const r = await post(
       env,
       '/sync/push',
-      { device_id: 'd1', envelopes: [mkEnvId('notes', 'n1', 'd1', { title: 'A-updated' })] },
+      { device_id: 'd1', envelopes: [mkEnvId('notes', 'n1', 'd1', { title: 'A-updated' }, 2)] },
       aliceToken
     );
     pushTime1b = r.body.server_time;
     const manifest = await get(env, '/sync/manifest', aliceToken);
     assert(manifest.body.count === 2, '覆盖同 key 后 count 仍为 2');
-    // 覆盖会再次递增该实体版本：max(既有 2, 声明 1)+1 = 3。
+    // 覆盖递增该实体版本：max(既有 2, 声明 2)+1 = 3。
     assert(manifest.body.max_version === 3, '覆盖同 key 后 max_version 递增到 3');
 
     const pull = await post(env, '/sync/pull', { device_id: 'd1', since: null }, aliceToken);
@@ -494,7 +496,8 @@ async function run() {
     const token = reg.body.token;
     const dottedId = 'a.b$c/d_e';
     await post(fresh, '/sync/push', { device_id: 'd1', envelopes: [mkEnvId('notes', dottedId, 'd1', { v: 1 })] }, token);
-    await post(fresh, '/sync/push', { device_id: 'd1', envelopes: [mkEnvId('notes', dottedId, 'd1', { v: 2 })] }, token);
+    // 第二次声明 base_version=2（设备已 adoption 后推更新）→ 覆盖并递增到 3。
+    await post(fresh, '/sync/push', { device_id: 'd1', envelopes: [mkEnvId('notes', dottedId, 'd1', { v: 2 }, 2)] }, token);
     const manifest = await get(fresh, '/sync/manifest', token);
     assert(manifest.body.count === 1, '带特殊字符的 entity_id 覆盖而非新增');
     // 推了两次（base_version=1 → 2 → 3）：版本继续递增，count 不变。
@@ -502,6 +505,33 @@ async function run() {
     const pull = await post(fresh, '/sync/pull', { device_id: 'd1', since: null }, token);
     assert(pull.body.envelopes[0].entity_id === dottedId, 'entity_id 原样返回给 App');
     assert(pull.body.envelopes[0].payload.v === 2, '特殊字符 id 下 upsert 仍覆盖最新态');
+  }
+
+  // --- 23a) 防陈旧覆盖：声明版本落后时不覆盖云端较新内容、不递增版本 ---
+  {
+    const fresh = makeEnv();
+    const reg = await post(fresh, '/auth/register', { username: 'stale', password: 'stalewq7731' }, '');
+    const token = reg.body.token;
+    // devA 先推 n-stale（声明 base_version=2 → 服务端 3，内容为 new）。
+    await post(fresh, '/sync/push', {
+      device_id: 'devA',
+      envelopes: [mkEnvId('notes', 'n-stale', 'devA', { title: 'new' }, 2)],
+    }, token);
+    // devB 用落后的 base_version=1 推同一 key（过期本地副本，内容为 OLD）。
+    const r = await post(fresh, '/sync/push', {
+      device_id: 'devB',
+      envelopes: [{
+        device_id: 'devB', entity_table: 'notes', entity_id: 'n-stale',
+        op: 'upsert', payload: { title: 'OLD' },
+        base_version: 1, updated_at: '2024-01-01T00:00:00.000Z', deleted_at: null,
+      }],
+    }, token);
+    assert(r.body.versions['notes:n-stale'] === 3, '陈旧 push 回写服务端权威版本 3');
+    const manifest = await get(fresh, '/sync/manifest', token);
+    assert(manifest.body.max_version === 3, '陈旧 push 不递增版本（保持 3）');
+    const pull = await post(fresh, '/sync/pull', { device_id: 'devB', since: null }, token);
+    const s = pull.body.envelopes.find((e) => e.entity_id === 'n-stale');
+    assert(s.payload.title === 'new', '云端较新内容 new 未被陈旧 push 覆盖');
   }
 
   // --- 23b) 同一批 push 里重复的 key 只留一条（批内 upsert）---

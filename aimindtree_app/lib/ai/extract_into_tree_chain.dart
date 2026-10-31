@@ -21,6 +21,7 @@ import '../data/db/drift_database.dart';
 import '../data/models/knowledge_point.dart';
 import '../data/models/knowledge_tree.dart';
 import '../data/repositories/knowledge_repository.dart';
+import '../features/settings/tree_behavior_settings.dart';
 
 /// 复合链提交结果。
 enum ChainOutcome {
@@ -145,7 +146,15 @@ class ExtractIntoTreeChain {
     job1.doneMessage = '已加入「${tree.name}」：$added 个知识点，正在自动连线…';
     onRefresh(tree);
 
-    // 第二段：T3 自动连线（同锁，链式提交）。
+    // 第二段：T3 自动连线（同锁，链式提交）。受「自动连线」开关控制（E）：
+    // 关 → 只入库、不自动连线（满足「默认只查重、不自动连线」）。
+    if (!TreeBehaviorSettings.instance.autoLinkEnabled) {
+      job1.doneMessage =
+          '已加入「${tree.name}」：$added 个知识点（自动连线已关闭）';
+      service.jobs.releaseLock('tree:${tree.id}');
+      onRefresh(tree);
+      return;
+    }
     final inputs = await auto.linkInputsFor(tree.id);
     if (inputs == null) {
       service.jobs.releaseLock('tree:${tree.id}');

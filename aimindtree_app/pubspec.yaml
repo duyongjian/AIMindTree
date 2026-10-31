@@ -45,6 +45,9 @@ dependencies:
   # 图片本体存 note_assets.data_base64（唯一权威存储），磁盘不做缓存。
   crypto: ^3.0.6
   file_picker: ^10.3.7
+  flutter_markdown: ^0.7.7+1
+  flutter_math_fork: ^0.7.4
+  markdown: ^7.3.1
 
 dev_dependencies:
   flutter_test:

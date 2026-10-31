@@ -29,6 +29,8 @@ import '../../data/models/kp_group.dart';
 import '../../data/repositories/group_repository.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
+import '../homework/homework_history_page.dart';
+import '../homework/homework_page.dart';
 import 'kp_dedup.dart';
 import 'kp_group_manage_sheet.dart';
 import 'kp_sort.dart';
@@ -426,6 +428,73 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
     );
   }
 
+  /// 「作业历史」按钮：打开全局作业历史（不传 kpId / canvasId = 全部作业）。
+  Future<void> _openHomeworkHistory() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => HomeworkHistoryPage(
+          ai: widget.service.ai,
+          db: widget.db,
+          jobs: widget.service.jobs,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    await _reload();
+  }
+
+  /// 条目菜单「作业记录」：只看该知识点的作业（kpId 优先级高于 canvasId）。
+  Future<void> _openKpHomeworkHistory(KnowledgePoint kp) async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => HomeworkHistoryPage(
+          ai: widget.service.ai,
+          db: widget.db,
+          jobs: widget.service.jobs,
+          kpId: kp.id,
+          title: '${kp.name} · 作业',
+        ),
+      ),
+    );
+    if (!mounted) return;
+    await _reload();
+  }
+
+  /// 条目菜单「布置作业」：以该知识点为唯一薄弱点进入作业页。
+  ///
+  /// 作业必归属一棵知识树（`homeworks.canvas_id` 非空列），所以先查该知识点
+  /// 所在的**第一棵**树（[KnowledgeRepository.canvasIdForKp]）；不在任何树里
+  /// 就传空串（作业页仍可手动出题，不阻断）。
+  Future<void> _assignHomework(KnowledgePoint kp) async {
+    final String? canvasId = await _repo.canvasIdForKp(kp.id);
+    if (!mounted) return;
+    if (canvasId == null) {
+      // 不在任何树里 = 没有 canvas 归属：作业仍能建（canvas_id 空串），但只会
+      // 出现在「作业记录」里，不会出现在某棵树的作业历史里。先说清楚。
+      _toast('该知识点还没加入任何知识树，这份作业只会出现在「作业记录」里');
+    }
+    // 同一个知识点的「布置作业」会话已开着 → 挡（不静默失败，与画布同口径）。
+    final lockKey = 'homework:new:${canvasId ?? ''}';
+    if (widget.service.jobs.isLocked(lockKey)) {
+      _toast('该知识点的「布置作业」已打开，完成后再试');
+      widget.service.jobs.requestExpandTray();
+      return;
+    }
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => HomeworkPage(
+          ai: widget.service.ai,
+          db: widget.db,
+          canvasId: canvasId ?? '',
+          points: <KnowledgePoint>[kp],
+          jobs: widget.service.jobs,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    await _reload();
+  }
+
   /// 删除（影响面预览，PRD §4.1）。
   Future<void> _confirmDelete(KnowledgePoint kp) async {
     final impacts = await _trees.treesContaining([kp.id]);
@@ -744,6 +813,11 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
             ),
           ] else ...[
             IconButton(
+              onPressed: _openHomeworkHistory,
+              icon: const Icon(Icons.assignment_outlined),
+              tooltip: '作业历史',
+            ),
+            IconButton(
               onPressed: _runKpDedup,
               icon: const Icon(Icons.merge_type),
               tooltip: '知识点查重去重',
@@ -1021,6 +1095,10 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
                                     _showEditDialog(kp);
                                   case 'tree':
                                     _showAddToTreeDialog(kp);
+                                  case 'homework':
+                                    _assignHomework(kp);
+                                  case 'homeworkHistory':
+                                    _openKpHomeworkHistory(kp);
                                   case 'teach':
                                     _onTap(kp);
                                   case 'delete':
@@ -1043,6 +1121,14 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
                                 const PopupMenuItem(
                                   value: 'tree',
                                   child: Text('加入知识树'),
+                                ),
+                                const PopupMenuItem(
+                                  value: 'homework',
+                                  child: Text('布置作业'),
+                                ),
+                                const PopupMenuItem(
+                                  value: 'homeworkHistory',
+                                  child: Text('作业记录'),
                                 ),
                                 const PopupMenuItem(
                                   value: 'teach',

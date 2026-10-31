@@ -23,6 +23,7 @@ import '../../data/sync/sync_outbox.dart';
 import '../../data/sync/sync_scheduler.dart';
 import '../../data/sync/sync_status.dart';
 import 'ai_service_status_section.dart';
+import 'tree_behavior_section.dart';
 import 'sync_settings_section.dart';
 
 // ⚠️ 已迁至管理后台（llm_server/static/）—— 整段注释保留，勿删。
@@ -139,6 +140,8 @@ class SettingsPageState extends State<SettingsPage> {
           syncConfig: widget.syncConfig,
           secretStore: widget.secretStore,
         ),
+        // ★ E 模块：知识树行为（双开关：自动查重 / 自动连线）。
+        const TreeBehaviorSection(),
         const Padding(
           padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
           child: Text(

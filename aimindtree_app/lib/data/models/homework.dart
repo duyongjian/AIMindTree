@@ -21,6 +21,11 @@ class Homework {
     required this.title,
     required this.kpIds,
     required this.items,
+    required this.updatedAt,
+    this.kpId,
+    this.batchId,
+    this.status = 'assigned',
+    this.dueAt,
   });
 
   final String id;
@@ -35,10 +40,29 @@ class Homework {
 
   final List<HomeworkItem> items;
 
+  /// 主关联知识点外键（→ knowledge_points.id）；批量布置时每行各带一个。
+  final String? kpId;
+
+  /// 批量布置聚合键：一次框选布置 N 个知识点共享同一 batch_id。
+  final String? batchId;
+
+  /// 作业状态：assigned / draft / done。
+  final String status;
+
+  /// 截止时间（可选）。
+  final DateTime? dueAt;
+
+  /// 最后更新时间（= 表的 `updated_at`，历史页排序与「今天 / 昨天」分组用）。
+  final DateTime updatedAt;
+
   Homework copyWith({
     String? title,
     List<String>? kpIds,
     List<HomeworkItem>? items,
+    String? kpId,
+    String? batchId,
+    String? status,
+    DateTime? dueAt,
   }) =>
       Homework(
         id: id,
@@ -46,6 +70,11 @@ class Homework {
         title: title ?? this.title,
         kpIds: kpIds ?? this.kpIds,
         items: items ?? this.items,
+        updatedAt: updatedAt, // copyWith 不改时间，由仓储层 bump
+        kpId: kpId ?? this.kpId,
+        batchId: batchId ?? this.batchId,
+        status: status ?? this.status,
+        dueAt: dueAt ?? this.dueAt,
       );
 
   /// 未删掉的题数量（用户可以在生成后删题）。

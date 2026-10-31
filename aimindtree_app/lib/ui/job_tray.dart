@@ -4,7 +4,8 @@
 ///   不挡内容；
 /// - **展开态**：每个 job 一行——label、百分比 / 阶段文案、已用时间、取消按钮、
 ///   所占资源锁徽标（让用户知道「为什么某个按钮点不了」）；交互会话（老师
-///   模式 / 作业出题，B4）也登记为行，但无取消按钮（由页面自行中断）；
+///   模式 / 作业出题，B4）、后台任务（D：离开页面继续跑）同样登记为行；
+///   在途一律可取消，失败行给「重试 + 移除」两个动作；
 /// - **终态**：done → SnackBar 摘要 + 3s 后自动折叠；failed → 红条 + 重试；
 ///   canceled → 直接从托盘消失；``silent`` 任务（如对话检测）只留托盘行，
 ///   终态不弹 SnackBar。
@@ -68,10 +69,13 @@ class JobTrayState extends State<JobTray> {
         messenger.showSnackBar(SnackBar(
           content: Text('「${job.label}」失败：${job.errorMessage ?? job.message}'),
           duration: const Duration(seconds: 6),
-          action: SnackBarAction(
-            label: '重试',
-            onPressed: () => widget.jobs.retry(job.id),
-          ),
+          // 交互会话 / 后台任务重试不了（执行体不在队列里）→ 不给假按钮。
+          action: (job.detached || job.interactive)
+              ? null
+              : SnackBarAction(
+                  label: '重试',
+                  onPressed: () => widget.jobs.retry(job.id),
+                ),
         ));
       case AiJobStatus.canceled:
         break; // 用户自己取消的，不打扰
@@ -101,9 +105,10 @@ class JobTrayState extends State<JobTray> {
   @override
   Widget build(BuildContext context) {
     final active = widget.jobs.activeJobs;
+    // 失败行不再只显示 3 条（用户报「看不见全部 / 消失了」）：全列，靠展开区
+    // 自身的 260px 上限滚动兜住。
     final failed = widget.jobs.recentJobs
         .where((j) => j.status == AiJobStatus.failed)
-        .take(3)
         .toList();
     if (active.isEmpty && failed.isEmpty) return const SizedBox.shrink();
 
@@ -159,20 +164,21 @@ class JobTrayState extends State<JobTray> {
               ),
             ),
           ),
-          // ---- 4px 总进度条（不确定态用动画）----
-          SizedBox(
-            height: 4,
-            child: overall == null
-                ? LinearProgressIndicator(
-                    minHeight: 4,
-                    valueColor: AlwaysStoppedAnimation<Color>(colorScheme.primary),
-                  )
-                : LinearProgressIndicator(
-                    minHeight: 4,
-                    value: overall,
-                    valueColor: AlwaysStoppedAnimation<Color>(colorScheme.primary),
-                  ),
-          ),
+          // ---- 4px 总进度条（只有失败行时不画进度，画了就是「正在跑」的假象）----
+          if (active.isNotEmpty)
+            SizedBox(
+              height: 4,
+              child: overall == null
+                  ? LinearProgressIndicator(
+                      minHeight: 4,
+                      valueColor: AlwaysStoppedAnimation<Color>(colorScheme.primary),
+                    )
+                  : LinearProgressIndicator(
+                      minHeight: 4,
+                      value: overall,
+                      valueColor: AlwaysStoppedAnimation<Color>(colorScheme.primary),
+                    ),
+            ),
           // ---- 展开态：每 job 一行 ----
           if (_expanded)
             ConstrainedBox(
@@ -228,7 +234,7 @@ class JobTrayState extends State<JobTray> {
                             ?.copyWith(fontWeight: FontWeight.w600),
                       ),
                     ),
-                    Text('${job.elapsedText}', style: theme.textTheme.bodySmall),
+                    Text(job.elapsedText, style: theme.textTheme.bodySmall),
                   ],
                 ),
                 const SizedBox(height: 2),
@@ -285,21 +291,32 @@ class JobTrayState extends State<JobTray> {
             ),
           ),
           const SizedBox(width: 8),
-          // 交互会话（老师模式 / 作业出题）由页面自行中断，不给取消按钮。
-          if (job.isActive && !job.interactive)
+          // 在途任务一律可取消：队列任务走服务端 cancel；交互会话与后台任务
+          // 走页面 / 执行体自己注册的中断回调（B4 + D）。
+          if (job.isActive)
             IconButton(
-              tooltip: '取消',
+              tooltip: job.interactive ? '结束会话' : '取消任务',
               visualDensity: VisualDensity.compact,
               icon: const Icon(Icons.close, size: 18),
               onPressed: () => widget.jobs.cancel(job.id),
             ),
-          if (isFailed)
+          if (isFailed) ...[
+            // 后台任务 / 交互会话没有可重放的服务端任务 → 只给「移除」。
+            if (!job.detached && !job.interactive)
+              IconButton(
+                tooltip: '重试',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.refresh, size: 18),
+                onPressed: () => widget.jobs.retry(job.id),
+              ),
+            // 失败但不想重试 → 移除这条红行（否则会一直赖在托盘里）。
             IconButton(
-              tooltip: '重试',
+              tooltip: '移除',
               visualDensity: VisualDensity.compact,
-              icon: const Icon(Icons.refresh, size: 18),
-              onPressed: () => widget.jobs.retry(job.id),
+              icon: const Icon(Icons.delete_outline, size: 18),
+              onPressed: () => widget.jobs.dismiss(job.id),
             ),
+          ],
         ],
       ),
     );

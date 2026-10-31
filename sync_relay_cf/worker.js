@@ -235,8 +235,6 @@ async function handlePush(request, env, ownerId) {
     );
     const batch = [];
     for (const e of envelopes) {
-      // 服务端权威版本：max(既有服务端版本, 客户端声明基准版本) + 1，
-      // 保证服务端存储的版本恒为最大，消除 pull 时的版本歧义。
       let existing = 0;
       const row = await env.DB.prepare(
         'SELECT base_version FROM sync_envelopes ' +
@@ -245,23 +243,34 @@ async function handlePush(request, env, ownerId) {
         .bind(ownerId, e.entity_table, e.entity_id)
         .first();
       if (row && row.base_version != null) existing = Number(row.base_version) || 0;
-      const newVer = Math.max(existing, parseInt(e.base_version, 10) || 0) + 1;
-      versions[`${e.entity_table}:${e.entity_id}`] = newVer;
-
-      batch.push(
-        stmt.bind(
-          ownerId,
-          e.entity_table,
-          e.entity_id,
-          e.device_id,
-          e.op,
-          e.payload == null ? null : JSON.stringify(e.payload),
-          newVer,
-          e.updated_at,
-          e.deleted_at,
-          serverTime
-        )
-      );
+      const incoming = parseInt(e.base_version, 10) || 0;
+      // 防陈旧覆盖：客户端声明版本 >= 服务端现有版本才接受其 payload 并递增；
+      // 若声明版本落后（说明它推的是过期本地副本，常见於「上传」时对未拉取过
+      // 的设备做全量快照重推），则保留服务端现有内容与版本、不写入也不递增，
+      // 避免把云端较新内容翻回旧内容。App 端 saveNote 每次编辑都会 bump 本地
+      // 版本，正常上行不会触发此分支。回写的 versions 仍取服务端权威版本，让
+      // 客户端 adoption 对齐、不被卡死。
+      if (incoming >= existing) {
+        const newVer = Math.max(existing, incoming) + 1;
+        versions[`${e.entity_table}:${e.entity_id}`] = newVer;
+        batch.push(
+          stmt.bind(
+            ownerId,
+            e.entity_table,
+            e.entity_id,
+            e.device_id,
+            e.op,
+            e.payload == null ? null : JSON.stringify(e.payload),
+            newVer,
+            e.updated_at,
+            e.deleted_at,
+            serverTime
+          )
+        );
+      } else {
+        versions[`${e.entity_table}:${e.entity_id}`] = existing;
+        // 跳过 INSERT：保留服务端现有 payload / server_time（不覆盖、不递增）。
+      }
     }
     await env.DB.batch(batch);
   }

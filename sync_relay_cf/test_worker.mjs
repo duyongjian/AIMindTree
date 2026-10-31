@@ -313,10 +313,14 @@ async function run() {
 
   // 10) INSERT OR REPLACE 覆盖同 key（仍属 Alice 名下）
   {
-    await post('/sync/push', { device_id: 'd1', envelopes: [mkEnv('notes', 'n1', 'd1', { title: 'A-updated' })] }, env, aliceToken);
+    // 基于既有版本 2 重新上传（声明 base_version=2）→ 服务端递增到 3。
+    await post('/sync/push', {
+      device_id: 'd1',
+      envelopes: [{ device_id: 'd1', entity_table: 'notes', entity_id: 'n1', op: 'upsert', payload: { title: 'A-updated' }, base_version: 2, updated_at: '2024-10-23T00:00:00.000Z', deleted_at: null }],
+    }, env, aliceToken);
     const manifest = await json(await get('/sync/manifest', env, aliceToken));
     assert(manifest.body.count === 2, '覆盖同 key 后 count 仍为 2');
-    // 覆盖会再次递增该实体版本：max(既有 2, 声明 1)+1 = 3 → 命名空间最大版本 3。
+    // 覆盖会再次递增该实体版本：max(既有 2, 声明 2)+1 = 3 → 命名空间最大版本 3。
     assert(manifest.body.max_version === 3, '覆盖同 key 后 max_version 递增到 3');
     const pull = await json(await post('/sync/pull', { device_id: 'd1', since: null }, env, aliceToken));
     const n1 = pull.body.envelopes.find((e) => e.entity_id === 'n1');

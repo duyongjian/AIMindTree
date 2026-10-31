@@ -80,7 +80,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   /// 最近一次「测试连接」的结果；null 表示还没测过。
   String? _testResult;
 
-  /// 本机同步数据总览（15 张同步表的行数 / 最大版本）；null = 还没查过。
+  /// 本机同步数据总览（16 张同步表的行数 / 最大版本）；null = 还没查过。
   SyncOverview? _localOverview;
 
   /// 服务器数据总览；null = 没取到（未登录 / 没地址 / 网络失败 / 旧中继）。
@@ -133,7 +133,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     await Future.wait([_loadLocalOverview(), _loadServerManifest()]);
   }
 
-  /// 本机总览：走 [SyncEngine.localOverview]（15 张同步表的聚合查询）。
+  /// 本机总览：走 [SyncEngine.localOverview]（16 张同步表的聚合查询）。
   ///
   /// 本地库查询理论上不会失败，但仍兜底——设置页不能因为一次查询异常整页崩。
   Future<void> _loadLocalOverview() async {

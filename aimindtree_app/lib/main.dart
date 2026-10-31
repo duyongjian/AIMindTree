@@ -18,8 +18,10 @@ import 'features/knowledge/kp_dedup.dart';
 import 'features/knowledge/knowledge_manage_page.dart';
 import 'features/notes/delete_note_dialog.dart';
 import 'features/notes/note_editor_page.dart';
+import 'features/notes/note_recycle_bin_page.dart';
 import 'features/teacher/teacher_page.dart';
 import 'features/settings/settings_page.dart';
+import 'features/settings/tree_behavior_settings.dart';
 import 'ui/job_tray.dart';
 
 void main() async {
@@ -29,6 +31,8 @@ void main() async {
   await initSystemProxy();
   final (service, db, router, settings, sync) =
       await ExtractionService.bootstrap();
+  // 载入知识树行为偏好（查重 / 连线开关），内存态随后即准确，供各判定点同步读。
+  await TreeBehaviorSettings.instance.load();
   runApp(MyApp(
     service: service,
     db: db,
@@ -64,6 +68,20 @@ class MyApp extends StatelessWidget {
         // 靠它弹对话窗（见 features/knowledge/kp_dedup.dart）。
         navigatorKey: kGlobalNavigatorKey,
         theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.indigo),
+        // ★任务托盘提到 Navigator **之上**：托盘原本挂在 AppShell 的 body 里，
+        //   任何 push 出来的页面（老师模式 / 布置作业 / 作业历史 / 回收站）都会
+        //   整屏盖住它 —— 用户因此「看不见正在跑 / 排队中的 AI 任务」。
+        //   现在它是一层常驻顶栏：无任务时高度 0 完全不占位，有任务时把所有页面
+        //   一起下推（不遮挡任何内容，也不吃点击）。
+        builder: (context, child) => Directionality(
+          textDirection: TextDirection.ltr,
+          child: Column(
+            children: [
+              JobTray(jobs: service.jobs),
+              Expanded(child: child ?? const SizedBox.shrink()),
+            ],
+          ),
+        ),
         home: AppShell(
           service: service,
           db: db,
@@ -186,13 +204,9 @@ class _AppShellState extends State<AppShell> {
       ),
     ];
     return Scaffold(
-      // 任务托盘置顶（方案 §5.2）：折叠 4px 细条不挡内容，5 Tab 常驻可见。
-      body: Column(
-        children: [
-          JobTray(jobs: widget.service.jobs),
-          Expanded(child: IndexedStack(index: _index, children: pages)),
-        ],
-      ),
+      // 任务托盘已上移到 MaterialApp.builder（见 AIMindTreeApp.build）：
+      // 挂在壳的 body 里会被 push 出来的页面整屏盖住。
+      body: IndexedStack(index: _index, children: pages),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: (i) {
@@ -283,6 +297,12 @@ class NotesListPage extends StatefulWidget {
 class NotesListPageState extends State<NotesListPage> {
   List<Note> _notes = <Note>[];
 
+  /// 搜索关键词（标题 + 正文，不区分大小写）。
+  String _query = '';
+
+  /// 是否处于搜索框展开态（AppBar 标题换成搜索输入框）。
+  bool _searching = false;
+
   /// P1-2：多选删除模式。
   bool _selectionMode = false;
   Set<String> _selected = <String>{};
@@ -310,8 +330,16 @@ class NotesListPageState extends State<NotesListPage> {
             ))
         .toList()
       ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    // 内存过滤（搜索）：不新增 SQL，过滤逻辑只在本页。
+    List<Note> result = notes;
+    if (_query.trim().isNotEmpty) {
+      final q = _query.trim().toLowerCase();
+      result = notes.where((n) =>
+        n.title.toLowerCase().contains(q) ||
+        n.contentMd.toLowerCase().contains(q)).toList();
+    }
     if (!mounted) return;
-    setState(() => _notes = notes);
+    setState(() => _notes = result);
   }
 
   Future<void> _openEditor({String? id}) async {
@@ -530,7 +558,20 @@ class NotesListPageState extends State<NotesListPage> {
       appBar: AppBar(
         title: _selectionMode
             ? Text('已选 ${_selected.length} 篇')
-            : const Text('笔记'),
+            : _searching
+                ? TextField(
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                      hintText: '搜索标题或正文',
+                      border: InputBorder.none,
+                      isDense: true,
+                    ),
+                    onChanged: (v) {
+                      setState(() => _query = v);
+                      _reload();
+                    },
+                  )
+                : const Text('笔记'),
         leading: _selectionMode
             ? IconButton(
                 onPressed: _exitSelection,
@@ -551,6 +592,36 @@ class NotesListPageState extends State<NotesListPage> {
               tooltip: '删除所选',
             ),
           ] else ...[
+            // 搜索：展开搜索框时显示「关闭」，否则显示「搜索」入口。
+            if (_searching)
+              IconButton(
+                onPressed: () {
+                  setState(() {
+                    _searching = false;
+                    _query = '';
+                  });
+                  _reload();
+                },
+                icon: const Icon(Icons.close),
+                tooltip: '退出搜索',
+              )
+            else
+              IconButton(
+                onPressed: () => setState(() => _searching = true),
+                icon: const Icon(Icons.search),
+                tooltip: '搜索',
+              ),
+            // 回收站：进入笔记回收站（恢复 / 彻底删除软删的笔记）。
+            IconButton(
+              onPressed: () async {
+                await Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => NoteRecycleBinPage(repo: widget.service.repo),
+                ));
+                await _reload();
+              },
+              icon: const Icon(Icons.delete_outline),
+              tooltip: '回收站',
+            ),
             // 批量删除入口（任务 E）：多选原本只能长按进入，这里补一个
             // 常驻可见的图标，删除语义与单篇删除均不变。
             IconButton(

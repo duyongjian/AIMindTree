@@ -56,6 +56,17 @@ AiTaskResult aiTaskResultFromJob(Map<String, dynamic> result) {
   );
 }
 
+/// 任务被用户取消（[DetachedTask.throwIfCanceled] 抛出）。
+///
+/// 执行体一律**不要**捕获它当作失败：`_runDetachedBody` 会看
+/// `job.cancelRequested` 把它归类成 canceled 而非 failed。
+class TaskCanceledException implements Exception {
+  const TaskCanceledException();
+
+  @override
+  String toString() => '任务已取消';
+}
+
 enum AiJobStatus { queued, running, done, failed, canceled;
 
   bool get isActive => this == AiJobStatus.queued || this == AiJobStatus.running;
@@ -83,6 +94,7 @@ class AiJob {
     this.keepLockOnDone = false,
     this.silent = false,
     this.interactive = false,
+    this.detached = false,
     this.doneMessage,
     this.onDone,
     this.onError,
@@ -118,8 +130,17 @@ class AiJob {
   final bool silent;
 
   /// true = 交互通道会话（B4：T6/T7/T8 流式，不走队列）合成的托盘行：
-  /// 无服务端 id、不可取消/重试，锁随会话页生命周期持有。
+  /// 无服务端 id、锁随会话页生命周期持有。「取消」由页面注册的
+  /// [interrupt] 处理（页面已销毁时取消是空操作，锁随页面释放）。
   final bool interactive;
+
+  /// true = App 侧执行体的后台任务（[AiJobService.runDetached] 登记）：
+  /// 无服务端 id，取消靠 [DetachedTask.isCanceled] 让执行体自己收尾，
+  /// 结果由执行体写库 —— **页面销毁不影响它跑完**。
+  final bool detached;
+
+  /// 托盘「取消」调用的中断回调（交互会话 / 后台任务用；队列任务走服务端）。
+  VoidCallback? interrupt;
 
   /// App 侧回调（页面还活着就刷新；页面已销毁则只进托盘）。
   final void Function(AiJob)? onDone;
@@ -299,12 +320,32 @@ class AiJobService {
     return job;
   }
 
-  /// 取消任务（queued 即消；running 在服务端检查点生效，UI 已明示）。
-  /// 交互会话（interactive）由页面自行中断，不走服务端取消。
+  /// 取消任务。三种通道分开走：
+  ///
+  /// - **队列任务**：`POST /v1/jobs/{id}/cancel`，running 在服务端检查点生效；
+  /// - **交互会话 / 后台任务**：无服务端 id，置 `cancelRequested` 并回调
+  ///   [AiJob.interrupt]（流式循环逐块检查、后台执行体自己收尾）；
+  /// - **已终态（含失败可重试）**：直接 [dismiss] 从托盘历史移除 —— 用户要的
+  ///   「失败任务也要能取消」就是这一步，否则那条红行永远赖着。
   Future<void> cancel(String jobId) async {
-    final job = _jobs[jobId];
-    if (job == null || !job.isActive) return;
-    if (job.interactive) return;
+    final job = _jobs[jobId] ?? _findRecent(jobId);
+    if (job == null) return;
+    if (!job.isActive) {
+      dismiss(jobId);
+      return;
+    }
+    if (job.interactive || job.detached) {
+      job.cancelRequested = true;
+      job.message = '正在取消…';
+      try {
+        job.interrupt?.call();
+      } on Object catch (e) {
+        _log.w('中断回调异常（$jobId）：$e');
+      }
+      // 执行体可能已经跑完（取消太晚）→ 让它自己的收尾逻辑走终态。
+      _notify();
+      return;
+    }
     try {
       final json = await _post('/v1/jobs/$jobId/cancel', const <String, dynamic>{});
       job.applyJson(json);
@@ -315,10 +356,31 @@ class AiJobService {
     }
   }
 
-  /// 用原参数（含原回调）重新提交。交互会话无服务端任务，不重试。
+  /// 把一条**已终态**任务从托盘历史里彻底移除（失败红条的「知道了」）。
+  ///
+  /// 在途任务不走这里（先 [cancel]），避免执行体成孤儿继续跑却看不见。
+  void dismiss(String jobId) {
+    final job = _jobs[jobId];
+    if (job != null && job.isActive) return;
+    _timers.remove(jobId)?.cancel();
+    _failCount.remove(jobId);
+    _recent.removeWhere((j) => j.id == jobId);
+    _jobs.remove(jobId);
+    if (job != null &&
+        job.resourceKey.isNotEmpty &&
+        _locks[job.resourceKey] == jobId) {
+      _locks.remove(job.resourceKey);
+    }
+    _notify();
+  }
+
+  /// 用原参数（含原回调）重新提交。
+  ///
+  /// 交互会话与后台任务**不可重试**：前者没有服务端任务，后者的执行体是闭包、
+  /// 出了 `runDetached` 就没了 —— 重试只能由调用方重新发起。
   Future<AiJob?> retry(String jobId) async {
     final old = _jobs[jobId] ?? _findRecent(jobId);
-    if (old == null || old.interactive) return null;
+    if (old == null || old.interactive || old.detached) return null;
     return submit(
       task: old.taskCode,
       resourceKey: old.resourceKey,
@@ -351,7 +413,11 @@ class AiJobService {
   /// 如「同点重复开老师模式」）；② 合成一个 running 态的 [AiJob]
   /// （``interactive=true``）进托盘，全局可见「会话在进行、占了哪个锁、
   /// 已进行多久」。返回会话 id（[releaseInteractive] 用）。
-  String holdInteractive(String resourceKey, {required String label}) {
+  String holdInteractive(
+    String resourceKey, {
+    required String label,
+    VoidCallback? onCancel,
+  }) {
     final key = resourceKey.trim();
     if (key.isEmpty) return '';
     final id = 'ix-$_uuid()';
@@ -365,7 +431,8 @@ class AiJobService {
       interactive: true,
     )
       ..status = AiJobStatus.running
-      ..message = '会话进行中';
+      ..message = '会话进行中'
+      ..interrupt = onCancel;
     _notify();
     return id;
   }
@@ -389,6 +456,84 @@ class AiJobService {
   void releaseLock(String resourceKey) {
     _locks.remove(resourceKey.trim());
     _notify();
+  }
+
+  // ==================== 后台任务（页面销毁不中断） ====================
+
+  /// 登记一个**App 侧执行体**的后台任务，立即返回 [DetachedTask]。
+  ///
+  /// 三条边界：
+  /// - **不随页面销毁中断**：[body] 的 Future 由本服务持有，页面 `dispose`
+  ///   只影响 UI；终态副作用一律写在 body 内（写库 / 落消息），**禁止碰
+  ///   `BuildContext`**——页面可能已经没了；
+  /// - **托盘可见**：登记即进 `activeJobs`（与队列任务同列），进度经
+  ///   [DetachedTask.progress] 刷新，取消经 [cancel] → `interrupt`；
+  /// - **不占服务端 job**：`/v1/jobs` 里查不到它，冷启动对账也不收养，
+  ///   所以 App 被杀 = 任务丢失（可接受：结果本来就随下次重跑重建）。
+  ///
+  /// [resourceKey] 非空则占锁（与队列任务同一张锁表，[isLocked] 据此互斥）。
+  DetachedTask runDetached({
+    required String label,
+    String resourceKey = '',
+    bool silent = false,
+    String? doneMessage,
+    required Future<void> Function(DetachedTask task) body,
+  }) {
+    final key = resourceKey.trim();
+    final job = AiJob(
+      id: 'bg-$_uuid()',
+      taskCode: 'BACKGROUND',
+      label: label,
+      resourceKey: key,
+      silent: silent,
+      detached: true,
+      doneMessage: doneMessage,
+    )
+      ..status = AiJobStatus.running
+      ..startedAt = DateTime.now()
+      ..message = '进行中…';
+    _jobs[job.id] = job;
+    if (key.isNotEmpty) _locks[key] = job.id;
+    final task = DetachedTask._(this, job);
+    job.interrupt = task._interruptFromTray;
+    _notify();
+    _log.i('已登记后台任务 ${job.id}（$label）');
+    unawaited(_runDetachedBody(task, body));
+    return task;
+  }
+
+  Future<void> _runDetachedBody(
+    DetachedTask task,
+    Future<void> Function(DetachedTask task) body,
+  ) async {
+    final job = task.job;
+    try {
+      await body(task);
+      if (job.cancelRequested) {
+        job.status = AiJobStatus.canceled;
+        job.message = '已取消';
+      } else {
+        job.status = AiJobStatus.done;
+        job.percent = 1;
+        job.message = job.doneMessage ?? '已完成';
+      }
+    } on Object catch (e, s) {
+      if (job.cancelRequested) {
+        job.status = AiJobStatus.canceled;
+        job.message = '已取消';
+      } else {
+        _log.e('后台任务失败（${job.id}）', error: e, stackTrace: s);
+        job.status = AiJobStatus.failed;
+        job.errorCode = 'background_error';
+        job.errorMessage = e.toString();
+        job.retryable = true;
+        job.message = '失败';
+      }
+    } finally {
+      // 先叫醒等待方再走终态广播：等的人要的是「可以继续了」。
+      if (!task._done.isCompleted) task._done.complete();
+    }
+    _onTerminal(job);
   }
 
   // ==================== 查询 ====================
@@ -620,3 +765,64 @@ class AiJobService {
     revision.dispose();
   }
 }
+
+/// 后台任务句柄（[AiJobService.runDetached] 返回）。
+///
+/// 执行体的唯一契约：**先查 [isCanceled] 再干活**；流式循环逐块检查，
+/// 用户点托盘「取消」后下一块就退出，别硬跑完。
+class DetachedTask {
+  DetachedTask._(this._service, this.job);
+
+  final AiJobService _service;
+  final AiJob job;
+
+  /// 执行体完结信号（done / failed / canceled 都会 complete，不抛）。
+  ///
+  /// 给「调用方必须等结果才能继续，但不能因为页面关了就中断」的场景用
+  /// （如老师模式首次自动讲解：页面 `_bootstrap` 要等讲解落库后才渲染）。
+  final Completer<void> _done = Completer<void>();
+  Future<void> get done => _done.future;
+
+  /// 执行体自己注册的「立刻中断」回调（如 `sub.cancel()`），可空。
+  VoidCallback? _interruptExtra;
+
+  String get id => job.id;
+
+  /// 用户已请求取消（托盘「取消」或服务侧 cancel）。
+  bool get isCanceled =>
+      job.cancelRequested || job.status == AiJobStatus.canceled;
+
+  /// 上报进度（托盘每帧可见）。[percent] 0..1，null = 不确定态。
+  void progress(
+    String message, {
+    double? percent,
+    int? stageIndex,
+    int? stageTotal,
+  }) {
+    job.message = message;
+    if (percent != null) job.percent = percent.clamp(0.0, 1.0);
+    if (stageIndex != null) job.stageIndex = stageIndex;
+    if (stageTotal != null) job.stageTotal = stageTotal;
+    _service._notify();
+  }
+
+  /// 覆盖终态摘要（如「已生成 3 份作业」）。
+  void setDoneMessage(String message) => job.doneMessage = message;
+
+  /// 注册「立刻中断」回调（流式任务传 `() => sub.cancel()` 最灵）。
+  ///
+  /// 取消优先走这个（不必等下一块数据到达）；不注册就只能等循环检查
+  /// [isCanceled]，模型长时间不出字时会有延迟。
+  void setInterrupt(VoidCallback? cb) => _interruptExtra = cb;
+
+  /// 取消即抛（执行体里让取消走异常快速退出这几层嵌套时用）。
+  void throwIfCanceled() {
+    if (isCanceled) throw const TaskCanceledException();
+  }
+
+  void _interruptFromTray() {
+    job.cancelRequested = true;
+    _interruptExtra?.call();
+  }
+}
+

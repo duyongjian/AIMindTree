@@ -18,6 +18,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../ai/ai_job_service.dart' show kAiJobQueueEnabled, AiJob;
+import '../settings/tree_behavior_settings.dart';
 import '../../ai/ai_task.dart';
 import '../../ai/auto_graph_service.dart';
 import '../../ai/extract_into_tree_chain.dart';
@@ -30,13 +31,13 @@ import '../../canvas/render/tree_canvas.dart';
 import '../../core/id.dart';
 import '../../core/result.dart';
 import '../../data/db/drift_database.dart';
-import '../../data/models/homework.dart';
 import '../../data/models/knowledge_point.dart';
 import '../../data/models/knowledge_tree.dart';
 import '../../data/models/suggested_prerequisite.dart';
-import '../../data/repositories/homework_repository.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
+import '../notes/note_editor_page.dart';
+import '../../features/homework/homework_history_page.dart';
 import '../../features/homework/homework_page.dart';
 import '../../features/knowledge/kp_dedup.dart' show kpDedupSchedule;
 import '../../data/models/canvas_content.dart';
@@ -102,10 +103,6 @@ class CanvasPageState extends State<CanvasPage> {
 
   /// ★2.0.0：画布视口中心对应的场景坐标（建卡时定位到可视区中央）。
   Offset _viewportCenter = Offset.zero;
-
-  /// 作业仓储（落库 + 历史）。
-  late final HomeworkRepository _homeworks =
-      HomeworkRepository(widget.db, deviceId: DeviceId.orEmpty);
 
   /// 「重新布局」计数器，改变它会强制重建 [TreeCanvas] 让布局重跑。
   int _relayoutVersion = 0;
@@ -473,6 +470,17 @@ class CanvasPageState extends State<CanvasPage> {
                   decoration: const InputDecoration(labelText: '内容 / 摘要'),
                   maxLines: 4,
                 ),
+                if (isNoteCard && linkedNoteId != null) ...[
+                  const SizedBox(height: 12),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      icon: const Icon(Icons.open_in_new, size: 18),
+                      label: const Text('打开笔记'),
+                      onPressed: () => Navigator.of(ctx).pop('open_note'),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -534,6 +542,23 @@ class CanvasPageState extends State<CanvasPage> {
         }),
         (e, _) => _toast('保存卡片失败：$e'),
       );
+    }
+    if (action == 'open_note') {
+      final id = linkedNoteId;
+      titleCtl.dispose();
+      bodyCtl.dispose();
+      if (id != null && mounted) {
+        // 覆盖式 push：CanvasPage 在 IndexedStack 常驻，pop 后自动回到知识树
+        // （Tab3）且画布状态保留，不会跳去笔记 Tab。
+        await Navigator.of(context).push<bool>(MaterialPageRoute(
+          builder: (_) => NoteEditorPage(
+            service: widget.service,
+            db: widget.db,
+            noteId: id,
+          ),
+        ));
+      }
+      return;
     }
     titleCtl.dispose();
     bodyCtl.dispose();
@@ -1514,6 +1539,8 @@ class CanvasPageState extends State<CanvasPage> {
   Future<void> _autoLink() async {
     final tree = _selectedTree;
     if (tree == null) return;
+    // 受「自动连线」开关控制（E）：关 → 不自动建立边（满足默认只查重、不连线）。
+    if (!TreeBehaviorSettings.instance.autoLinkEnabled) return;
     if (!kAiJobQueueEnabled) {
       await _autoLinkSync(tree);
       return;
@@ -1605,6 +1632,8 @@ class CanvasPageState extends State<CanvasPage> {
   Future<void> _autoLinkSelected() async {
     final tree = _selectedTree;
     if (tree == null) return;
+    // 受「自动连线」开关控制（E）：关 → 不自动建立边。
+    if (!TreeBehaviorSettings.instance.autoLinkEnabled) return;
     if (_selectedKpIds.length < 2) {
       _toast('请先框选至少 2 个知识点（先开「框选模式」）再局部连线');
       return;
@@ -2140,7 +2169,8 @@ class CanvasPageState extends State<CanvasPage> {
           TextButton.icon(
             onPressed: n == 0 ? null : _openHomeworkPage,
             icon: const Icon(Icons.assignment, size: 16),
-            label: const Text('布置作业'),
+            // Q7：一次选 N 个点 = N 份独立作业，按钮文案说清楚。
+            label: Text(n > 1 ? '批量布置作业（$n 份）' : '布置作业'),
           ),
           TextButton.icon(
             onPressed: _showHomeworkHistory,
@@ -2207,132 +2237,22 @@ class CanvasPageState extends State<CanvasPage> {
     setState(() => _homeworkMode = false);
   }
 
-  /// 历史作业列表（BottomSheet）：打开可编辑，也可删除。
+  /// 作业历史：改为独立页面（可搜索 / 筛选 / 按知识点分类），见 [HomeworkHistoryPage]。
+  ///
+  /// 旧实现是画布内的 BottomSheet，只能平铺列表、不能搜不能筛，已下线。
   Future<void> _showHomeworkHistory() async {
     final tree = _selectedTree;
     if (tree == null) return;
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) => _homeworkHistorySheet(tree.id),
-    );
+    await Navigator.of(context).push<bool>(MaterialPageRoute(
+      builder: (_) => HomeworkHistoryPage(
+        ai: widget.service.ai,
+        db: widget.db,
+        jobs: widget.service.jobs,
+        canvasId: tree.id,
+        title: "${tree.name} · 作业历史",
+      ),
+    ));
   }
-
-  Widget _homeworkHistorySheet(String canvasId) => FutureBuilder<List<Homework>>(
-        future: _homeworks.listByCanvas(canvasId),
-        builder: (ctx, snap) {
-          if (!snap.hasData) {
-            return const SizedBox(
-              height: 120,
-              child: Center(child: CircularProgressIndicator()),
-            );
-          }
-          final list = snap.data!;
-          return SizedBox(
-            height: MediaQuery.of(ctx).size.height * 0.7,
-            child: Column(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  color: Colors.grey.shade100,
-                  child: Row(
-                    children: [
-                      const Icon(Icons.history, size: 18),
-                      const SizedBox(width: 8),
-                      Text('作业历史（${list.length}）',
-                          style: const TextStyle(fontWeight: FontWeight.bold)),
-                    ],
-                  ),
-                ),
-                Expanded(
-                  child: list.isEmpty
-                      ? const Center(
-                          child: Text('还没有布置过作业。',
-                              style: TextStyle(color: Colors.grey)))
-                      : ListView(
-                          children: [
-                            for (final hw in list)
-                              ListTile(
-                                leading:
-                                    const Icon(Icons.assignment_outlined),
-                                title: Text(hw.title.isEmpty
-                                    ? '(未命名)'
-                                    : hw.title),
-                                subtitle: Text(
-                                  '${hw.itemCount} 题',
-                                  style: const TextStyle(fontSize: 12),
-                                ),
-                                trailing: IconButton(
-                                  icon: const Icon(Icons.delete_outline,
-                                      color: Colors.red),
-                                  tooltip: '删除作业',
-                                  onPressed: () async {
-                                    final ok = await showDialog<bool>(
-                                      context: ctx,
-                                      builder: (d) => AlertDialog(
-                                        title: const Text('删除作业'),
-                                        content: const Text(
-                                            '删除后将从历史中移除，确定？'),
-                                        actions: [
-                                          TextButton(
-                                            onPressed: () =>
-                                                Navigator.pop(d, false),
-                                            child: const Text('取消'),
-                                          ),
-                                          TextButton(
-                                            onPressed: () =>
-                                                Navigator.pop(d, true),
-                                            child: const Text('删除',
-                                                style: TextStyle(
-                                                    color: Colors.red)),
-                                          ),
-                                        ],
-                                      ),
-                                    );
-                                    if (ok == true) {
-                                      await _homeworks.softDelete(hw.id);
-                                      if (!mounted) return;
-                                      Navigator.of(ctx).pop();
-                                      _showHomeworkHistory();
-                                    }
-                                  },
-                                ),
-                onTap: () async {
-                  // 用作业记录的 kpIds 重新取知识点作为出题上下文。
-                  final pts =
-                      await _repo.pointsByIds(hw.kpIds);
-                  if (!mounted) return;
-                  Navigator.of(ctx).pop();
-                  // B4：同一作业的编辑会话已开着 → 挡（不静默失败）。
-                  if (widget.service.jobs.isLocked('homework:${hw.id}')) {
-                    _toast('该作业的编辑会话已打开，完成后再试');
-                    widget.service.jobs.requestExpandTray();
-                    return;
-                  }
-                  await Navigator.of(context)
-                      .push<bool>(MaterialPageRoute(
-                    builder: (_) => HomeworkPage(
-                      ai: widget.service.ai,
-                      db: widget.db,
-                      canvasId: canvasId,
-                      points: pts,
-                      existingId: hw.id,
-                      jobs: widget.service.jobs,
-                    ),
-                  ));
-                                  if (!mounted) return;
-                                  setState(() => _homeworkMode = false);
-                                },
-                              ),
-                          ],
-                        ),
-                ),
-              ],
-            ),
-          );
-        },
-      );
-
 
   /// 建议结果 BottomSheet（改版）：
   /// - 每条建议可勾选，用户决定「补充多少进去树」；
@@ -2842,6 +2762,8 @@ class CanvasPageState extends State<CanvasPage> {
   /// 同步阻塞路径的「T3 连线」封装：带进度对话框跑 [_auto.autoLink]，返回连线文案。
   Future<String?> Function() _syncLinkConnect(KnowledgeTree tree) {
     return () async {
+      // 受「自动连线」开关控制（E）：关 → 不自动连线（补前置路径 3/4）。
+      if (!TreeBehaviorSettings.instance.autoLinkEnabled) return '';
       final loading = showDialog<void>(
         context: context,
         barrierDismissible: false,
@@ -3196,14 +3118,26 @@ class CanvasPageState extends State<CanvasPage> {
             // 原「自动布局」仅改 label；其 onTap 实为 _autoLink（T3 前置连线）。
             label: '自动连线',
             enabled: hasTree,
-            onTap: _autoLink,
+            onTap: () {
+              if (!TreeBehaviorSettings.instance.autoLinkEnabled) {
+                _toast('自动连线已关闭：请在「设置 → 知识树行为」中开启');
+                return;
+              }
+              _autoLink();
+            },
           ),
           _toolbarMenuItem(
             icon: Icons.hub_outlined,
             label: '局部连线',
             // 少于 2 个点无从连线（需至少 2 个框选知识点）。
             enabled: hasTree && _selectedKpIds.length >= 2,
-            onTap: _autoLinkSelected,
+            onTap: () {
+              if (!TreeBehaviorSettings.instance.autoLinkEnabled) {
+                _toast('自动连线已关闭：请在「设置 → 知识树行为」中开启');
+                return;
+              }
+              _autoLinkSelected();
+            },
           ),
         ],
       ),
@@ -3221,7 +3155,9 @@ class CanvasPageState extends State<CanvasPage> {
           ),
           _toolbarMenuItem(
             icon: Icons.assignment,
-            label: '布置作业',
+            label: _selectedKpIds.length > 1
+                ? '批量布置作业（${_selectedKpIds.length} 份）'
+                : '布置作业',
             // 与作业模式条内的「布置作业」一致：未框选薄弱点时禁用。
             enabled: hasTree && _selectedKpIds.isNotEmpty,
             onTap: _openHomeworkPage,

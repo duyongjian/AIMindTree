@@ -47,8 +47,17 @@ final List<_LegacySeed> kLegacySeeds = <_LegacySeed>[
   _LegacySeed('kp-legacy-b', kLegacyUpdatedAtSecond),
 ];
 
-/// 把一个 v5 库打回 **v4 形态**的步骤（v4 的 knowledge_points 没有
-/// pinned / created_at，且当时还没有 note_assets 表）。
+/// 把一个 v7 库打回 **v4 形态**的步骤（v4 的 knowledge_points 没有
+/// pinned / created_at，当时还没有 note_assets 表，homeworks 也还没有
+/// kp_id / batch_id / status / due_at 四列）。
+///
+/// ⚠️ **降级夹具的维护规则**：后续每加一段迁移，只要里面用了
+/// `m.addColumn(...)`，就必须在本列表里把对应的列「退回去」——
+/// drift 的 `addColumn` 发的是裸 `ALTER TABLE ... ADD COLUMN`，**没有**
+/// `IF NOT EXISTS`；而 `createTable` 发的是 `CREATE TABLE IF NOT EXISTS`，
+/// 所以「新建表」那类迁移不用在这里处理，「加列」那类必须处理。
+/// 漏了的话，重开库跑迁移会直接炸 `duplicate column name: xxx`
+/// （v6→v7 给 homeworks 加 4 列时就是这样被抓住的）。
 ///
 /// 最后一步把 `PRAGMA user_version` 退回 4 —— 这就是 drift 的 schemaVersion
 /// 落点，也是唯一可靠的「让 AppDatabase 真跑 onUpgrade」的入口
@@ -87,6 +96,23 @@ SELECT
 FROM knowledge_points''',
   'DROP TABLE knowledge_points',
   'ALTER TABLE knowledge_points_v4 RENAME TO knowledge_points',
+  // v6→v7 给 homeworks 加了 kp_id / batch_id / status / due_at 四列。
+  // 这里把 homeworks 退回 v6 形态（= v3 建表时的 9 列），否则 `from < 7`
+  // 的 addColumn 会撞 `duplicate column name: kp_id`。
+  'DROP TABLE IF EXISTS homeworks',
+  '''
+CREATE TABLE homeworks (
+  id TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  updated_at INTEGER NOT NULL,
+  device_id TEXT NOT NULL,
+  deleted_at INTEGER NULL,
+  canvas_id TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  kp_ids_json TEXT NOT NULL DEFAULT '[]',
+  items_json TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (id)
+)''',
   'PRAGMA user_version = 4',
 ];
 
@@ -293,6 +319,29 @@ void main() {
       expect(assets, hasLength(1));
       expect(assets.single.id, 'asset-after-migration');
       expect(assets.single.bytes, 8);
+
+      // ★ v6→v7：homeworks 补的 4 列真的加上了。
+      //   直接插一行新数据，靠「列默认值 / 可空」把四列都验一遍——
+      //   只查 PRAGMA 列名不够，默认值写错（比如 status 没有 'assigned'）
+      //   照样会绿。
+      await migrated.into(migrated.homeworks).insert(
+            HomeworksCompanion.insert(
+              id: 'hw-after-migration',
+              canvasId: 'tree-legacy',
+              updatedAt: DateTime.utc(2025, 1, 1),
+              deviceId: 'legacy-device',
+            ),
+          );
+      final hw = await (migrated.select(migrated.homeworks)
+            ..where((t) => t.id.equals('hw-after-migration')))
+          .getSingle();
+      expect(hw.status, 'assigned',
+          reason: 'v6→v7 的 status 列默认值必须是 assigned');
+      expect(hw.kpId, isNull, reason: 'kp_id 可空，历史行不应被塞值');
+      expect(hw.batchId, isNull, reason: 'batch_id 可空');
+      expect(hw.dueAt, isNull, reason: 'due_at 可空');
+      expect(hw.title, '', reason: '迁移不能改动旧列的默认值');
+      expect(hw.itemsJson, '[]', reason: '迁移不能改动旧列的默认值');
     });
   });
 

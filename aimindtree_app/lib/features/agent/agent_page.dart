@@ -13,6 +13,8 @@
 /// 4. 会话管理（H）：一个「会话」= 一行 kpId 为空的 ai_session，消息落
 ///    ai_messages；标题运行时派生（首条 user 消息 / 时间），重命名写现有
 ///    title 列。AI 不可用时历史会话照样能看。
+/// 5. 后台可见（D）：一轮问答期间在托盘挂一行「AI 助手：回答中」（可取消）；
+///    回答最终答案无条件落库，页面切走 / 销毁也不丢。
 library;
 
 import 'dart:convert';
@@ -249,6 +251,16 @@ class AgentPageState extends State<AgentPage> {
   /// 输入栏上方的瞬态状态（思考中 / 正在查某个工具）。
   String _status = '';
 
+  /// D：用户已在托盘点了「取消」——流式循环逐块检查它，看到就收工。
+  ///
+  /// 本页的问答是「模型 → 工具 → 用户逐项批准 → 再问」的多轮循环，中途要弹
+  /// 审批框，**不能**整段搬进 `runDetached`；因此只把这一轮登记成托盘里的
+  /// 交互会话行（可见 + 可取消），取消语义靠这个标记 + 循环检查实现。
+  bool _cancelRequested = false;
+
+  /// D：本轮问答的托盘会话 id（空 = 没在问答；`releaseInteractive` 用）。
+  String _sessionTicket = '';
+
   @override
   void initState() {
     super.initState();
@@ -424,10 +436,68 @@ class AgentPageState extends State<AgentPage> {
 
   // ===================== 问答 =====================
 
+  /// 发送一轮问答（D：整轮在托盘可见 + 可取消）。
+  ///
+  /// 只做三件事：拦空 / 忙、占一行托盘交互会话、把重活交给 [_runTurn]。
+  /// `finally` 保证托盘行在**任何**返回路径（[_runTurn] 内多处提前 return）
+  /// 上都被撤掉，不会留一条永远「进行中」的幽灵行。
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _busy) return;
-    await _ensureSession();
+    // 先立忙碌态再 await：同一帧连点两次不会双开一轮（否则两条托盘会话行的
+    // id 会互相覆盖，前一条永远不被释放）。
+    setState(() => _busy = true);
+    _cancelRequested = false;
+    _sessionTicket = '';
+    try {
+      await _ensureSession();
+      _sessionTicket = widget.service.jobs.holdInteractive(
+        'agent:chat',
+        label: 'AI 助手：回答中',
+        onCancel: () {
+          // 托盘点 ✕ → 置标记 + 换文案；下一块数据到达 / 下一轮开始时即退出。
+          _cancelRequested = true;
+          widget.service.jobs.setInteractiveMessage(_sessionTicket, '正在取消…');
+        },
+      );
+      await _runTurn(text);
+    } on Object catch (e) {
+      // 兜底：任何未预期异常都要把轮次收干净（托盘行 finally 释放）。
+      _log.w('问答异常：$e');
+      if (mounted) {
+        setState(() {
+          _error = _friendlyError(e);
+          _busy = false;
+          _status = '';
+        });
+      }
+    } finally {
+      widget.service.jobs.releaseInteractive(_sessionTicket);
+      _sessionTicket = '';
+      _cancelRequested = false;
+    }
+  }
+
+  /// 取消收尾：清忙碌态。半截回答**不落库**（已入库的用户消息保留）。
+  void _abortCanceled() {
+    _cancelRequested = false;
+    if (mounted) {
+      setState(() {
+        _busy = false;
+        _status = '';
+      });
+    }
+  }
+
+  /// 一轮问答的执行体：工具循环 + 收尾作答。
+  ///
+  /// 托盘会话的占位 / 释放与取消标记的复位由调用方 [_send] 负责。
+  Future<void> _runTurn(String text) async {
+    // 页面在 `_ensureSession` 的 await 期间被销毁：用户消息照样落库，只不刷 UI。
+    if (!mounted) {
+      await _persistMessage('user', text);
+      return;
+    }
     setState(() {
       _busy = true;
       _error = null;
@@ -451,6 +521,13 @@ class AgentPageState extends State<AgentPage> {
     );
     final toolLog = StringBuffer();
     for (var round = 1; round <= kAgentToolMaxRounds; round++) {
+      // 取消（托盘 ✕）：不再开始新一轮。
+      if (_cancelRequested) {
+        _abortCanceled();
+        return;
+      }
+      widget.service.jobs
+          .setInteractiveMessage(_sessionTicket, '第 $round 轮：正在思考…');
       final buf = StringBuffer();
       var convId = _conversationId;
       try {
@@ -464,6 +541,8 @@ class AgentPageState extends State<AgentPage> {
           ),
           conversationId: _conversationId,
         )) {
+          // 取消即停收：本轮的半截文本随后被整体丢弃（不上屏、不入库）。
+          if (_cancelRequested) break;
           if (c.conversationId != null) convId = c.conversationId;
           if (c.delta != null) buf.write(c.delta);
         }
@@ -477,6 +556,10 @@ class AgentPageState extends State<AgentPage> {
         return;
       }
       _conversationId = convId;
+      if (_cancelRequested) {
+        _abortCanceled();
+        return;
+      }
 
       final call = AgentToolset.parseCall(buf.toString());
       if (call == null) {
@@ -489,6 +572,8 @@ class AgentPageState extends State<AgentPage> {
       if (_tools.findWrite(call.name) == null) {
         if (!mounted) return;
         setState(() => _status = '🔧 正在查询知识库（${call.name}）…');
+        widget.service.jobs
+            .setInteractiveMessage(_sessionTicket, '正在执行工具…');
         final result = await _tools.dispatch(call.name, call.args);
         toolLog.writeln('【第 $round 轮工具调用】${call.name} ${jsonEncode(call.args)}');
         toolLog.writeln('【第 $round 轮工具结果】$result');
@@ -535,8 +620,15 @@ class AgentPageState extends State<AgentPage> {
 
       // 弹审批清单，逐项勾选；返回空 = 用户全部拒绝。
       setState(() => _status = '⏳ 等待你确认操作…');
+      widget.service.jobs
+          .setInteractiveMessage(_sessionTicket, '等待你确认操作…');
       final approved = await _requestApproval([plan]);
       if (!mounted) return;
+      // 审批框开着时用户也点了托盘 ✕ → 一行都不写，直接收工。
+      if (_cancelRequested) {
+        _abortCanceled();
+        return;
+      }
       if (approved.isEmpty) {
         toolLog.writeln('【写入】用户拒绝了操作：${call.name}');
         setState(() {
@@ -568,6 +660,12 @@ class AgentPageState extends State<AgentPage> {
 
     // 轮数用尽：最后再问一次，明确禁止工具、基于已有结果直接作答；
     // 这一轮的输出一律当最终答案（即使形状像工具调用也不再执行）。
+    if (_cancelRequested) {
+      _abortCanceled();
+      return;
+    }
+    widget.service.jobs
+        .setInteractiveMessage(_sessionTicket, '正在整理最终回答…');
     final buf = StringBuffer();
     try {
       await for (final c in widget.service.ai.chat(
@@ -581,6 +679,8 @@ class AgentPageState extends State<AgentPage> {
         ),
         conversationId: _conversationId,
       )) {
+        // 取消即停收（半截最终回答不入库）。
+        if (_cancelRequested) break;
         if (c.delta != null) buf.write(c.delta);
       }
     } on Object catch (e) {
@@ -590,6 +690,11 @@ class AgentPageState extends State<AgentPage> {
         _busy = false;
         _status = '';
       });
+      return;
+    }
+    // 取消时不落半截回答（用户消息已在开头入库，保留）。
+    if (_cancelRequested) {
+      _abortCanceled();
       return;
     }
     await _finishWithAnswer(buf.toString());
@@ -710,7 +815,12 @@ class AgentPageState extends State<AgentPage> {
   }
 
   /// 收尾：落最终答案（持久化）+ 跑每轮检测。
+  ///
+  /// D：改后台任务，页面销毁不中断 —— 落库**无条件**执行（用户切走 / 退出
+  /// 页面后回答不能丢），只有 UI 副作用（setState / 滚动 / 检测）才判
+  /// `mounted`。
   Future<void> _finishWithAnswer(String answer) async {
+    await _persistMessage('assistant', answer);
     if (!mounted) return;
     setState(() {
       _history = [..._history, _Msg(role: 'assistant', content: answer)];
@@ -718,7 +828,6 @@ class AgentPageState extends State<AgentPage> {
       _status = '';
     });
     _scrollToEnd();
-    await _persistMessage('assistant', answer);
 
     // 每轮回答后自动检测薄弱点 / 需要的知识点。
     await _runDetection();

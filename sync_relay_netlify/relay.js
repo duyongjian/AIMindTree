@@ -334,38 +334,59 @@ async function handlePush(request, store, ownerId) {
   const serverTime = nowIso();
   // 服务端权威版本号映射：`<entity_table>:<entity_id>` → 新分配的版本。
   const versions = {};
+  // 本批开始前各键的权威版本（每个 key 只从存储读一次，作为陈旧覆盖判定基准）；
+  // running 记录本批内该键已分配到的版本，供同一批次内同键多 envelope 链式递增。
+  const authStart = {};
+  const running = {};
 
   for (const e of envelopes) {
     const key = envelopeKey(ownerId, String(e.entity_table), String(e.entity_id));
-    // 服务端权威版本：max(既有服务端版本, 客户端声明基准版本) + 1，
-    // 保证服务端存储的版本恒为最大，消除 pull 时的版本歧义。
-    let existing = 0;
-    const raw = await store.get(key);
-    if (raw) {
-      try {
-        const rec = JSON.parse(raw);
-        if (rec && rec.base_version != null) existing = Number(rec.base_version) || 0;
-      } catch {
-        // 坏记录：按 0 处理。
+    const k2 = `${e.entity_table}:${e.entity_id}`;
+    if (authStart[k2] === undefined) {
+      let ex = 0;
+      const raw = await store.get(key);
+      if (raw) {
+        try {
+          const rec = JSON.parse(raw);
+          if (rec && rec.base_version != null) ex = Number(rec.base_version) || 0;
+        } catch {
+          // 坏记录：按 0 处理。
+        }
       }
+      authStart[k2] = ex;
+      running[k2] = ex;
     }
-    const newVer = Math.max(existing, parseInt(e.base_version, 10) || 0) + 1;
-    versions[`${e.entity_table}:${e.entity_id}`] = newVer;
+    const incoming = parseInt(e.base_version, 10) || 0;
+    // 防陈旧覆盖：客户端声明版本 >= 本批开始前服务端权威版本才接受其 payload
+    // 并递增；若声明版本落后（过期本地副本，常见于「上传」对未拉取设备做全量
+    // 重推），则保留服务端现有内容与版本、不写入也不递增，避免把云端较新内容
+    // 翻回旧内容。App 端 saveNote 每次编辑都会 bump 本地版本，正常上行不触发
+    // 此分支。同一批次内同键多条 envelope 视为同一设备有序编辑，依次覆盖（最后
+    // 一条胜出），因此判定基准用 batch 开始前的权威版本而非批内运行版本。回写的
+    // versions 取服务端权威版本，让客户端 adoption 对齐、不被卡死。
+    if (incoming >= authStart[k2]) {
+      const newVer = Math.max(running[k2], incoming) + 1;
+      running[k2] = newVer;
+      versions[k2] = newVer;
 
-    await store.set(
-      key,
-      JSON.stringify({
-        device_id: e.device_id,
-        entity_table: e.entity_table,
-        entity_id: e.entity_id,
-        op: e.op,
-        payload: e.payload == null ? null : JSON.stringify(e.payload),
-        base_version: newVer,
-        updated_at: e.updated_at,
-        deleted_at: e.deleted_at,
-        server_time: serverTime,
-      }),
-    );
+      await store.set(
+        key,
+        JSON.stringify({
+          device_id: e.device_id,
+          entity_table: e.entity_table,
+          entity_id: e.entity_id,
+          op: e.op,
+          payload: e.payload == null ? null : JSON.stringify(e.payload),
+          base_version: newVer,
+          updated_at: e.updated_at,
+          deleted_at: e.deleted_at,
+          server_time: serverTime,
+        }),
+      );
+    } else {
+      versions[k2] = authStart[k2];
+      // 跳过写入：保留服务端现有 payload / server_time（不覆盖、不递增）。
+    }
   }
 
   return jsonResponse({

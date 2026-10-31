@@ -1072,19 +1072,40 @@ class NoteEditorController extends ChangeNotifier {
 
     // 行引用的形状可能变了（段落/标题 ↔ 列表/引用）：旧 ref 还有效就原地不动
     // （caret 严格不变），否则聚焦新块的第一行 —— 否则输入框会直接消失。
+    BlockRef? targetRef;
     if (_isValidRef(ref)) {
-      focusBlock(ref, caret: caret);
-      return;
+      targetRef = ref;
+    } else {
+      final created = _blockById(b.id);
+      if (created != null) {
+        final refs = editableRefsOf(created);
+        if (refs.isNotEmpty) targetRef = refs.first;
+      }
     }
-    final created = _blockById(b.id);
-    if (created != null) _focusFirstLineOf(created, caret: caret);
+
+    // 立即聚焦 + 下一帧兜底。工具栏的按钮是 focusable 的 `IconButton`，被点击后会把
+    // 焦点抢到按钮上，触发焦点监听（见 [focusNodeFor] 失焦分支，第 ~459 行）把
+    // `_active` 清成 null —— 于是刚转成的标题 / 列表变成只读、工具栏所有类型按钮置灰，
+    // 用户「选不中、变不了样式」（即本 bug）。这里先把焦点还给这一行，再安排下一帧
+    // 重新聚焦，覆盖任何被工具栏抢走焦点的情况，保证该块始终可编辑、工具栏保持启用。
+    if (targetRef != null) focusBlock(targetRef, caret: caret);
+    _reassertFocusPostFrame(targetRef, caret);
   }
 
-  /// 聚焦新块的第一行（按新的行引用形状），光标落在 [caret]。
-  void _focusFirstLineOf(Block block, {int? caret}) {
-    final refs = editableRefsOf(block);
-    if (refs.isEmpty) return;
-    focusBlock(refs.first, caret: caret);
+  /// 下一帧把焦点重新还给 [ref]（[caret] 字符偏移）。
+  ///
+  /// 只作为 [focusBlock] 之后的兜底：换块类型 / 插入块等动作若因工具栏按钮抢焦点
+  /// 而丢了 `_active`，下一帧这里强制把焦点还给编辑器这一行，保证它始终可编辑、
+  /// 工具栏保持启用。若用户在这期间主动切到了**别的**块（`_active` 变成了不同的
+  /// 引用），则不强行抢回。
+  void _reassertFocusPostFrame(BlockRef? ref, int caret) {
+    if (ref == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_disposed) return;
+      // 用户已主动切换到了别的块 → 不抢回焦点。
+      if (_active != null && _active != ref) return;
+      focusBlock(ref, caret: caret);
+    });
   }
 
   // ===== 块树操作（内部） =====

@@ -40,7 +40,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase([QueryExecutor? executor]) : super(executor ?? _openConnection());
 
   @override
-  int get schemaVersion => 6;
+  int get schemaVersion => 7;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -76,6 +76,15 @@ class AppDatabase extends _$AppDatabase {
           if (from < 6) {
             await m.createTable(canvasCards);
             await m.createTable(canvasStrokes);
+          }
+          // v6 → v7（Phase 1 地基）：homeworks 表补 4 列（知识点外键 / 批量键 /
+          // 状态 / 截止时间），支撑作业与知识点关联 + 批量布置。
+          // 均为可空或带默认，addColumn 自动回填历史行（status 默认 'assigned'）。
+          if (from < 7) {
+            await m.addColumn(homeworks, homeworks.kpId);
+            await m.addColumn(homeworks, homeworks.batchId);
+            await m.addColumn(homeworks, homeworks.status);
+            await m.addColumn(homeworks, homeworks.dueAt);
           }
         },
       );

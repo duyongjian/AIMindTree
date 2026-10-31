@@ -13,6 +13,7 @@
 /// 页面只是把这份 Markdown 交给 [NoteEditorController] 双向映射成块模型。
 library;
 
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -71,6 +72,8 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
 
   bool _busy = false;
   bool _dirty = false;
+  bool _saving = false;
+  Timer? _autoSaveTimer;
   String _status = '';
   Note? _note;
 
@@ -97,6 +100,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
       if (_titleCtrl.text != _lastTitle) {
         _lastTitle = _titleCtrl.text;
         setState(() => _dirty = true);
+        _scheduleAutoSave();
       }
     });
     if (widget.noteId != null) _load();
@@ -104,10 +108,28 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
 
   @override
   void dispose() {
+    _autoSaveTimer?.cancel();
+    // 离开页面时若仍有未保存改动，做一次兜底落库（fire-and-forget）：
+    // _save 内部所有 setState 都带 mounted 守卫，dispose 后调用不会抛。
+    if (_dirty) {
+      _autoSaveTimer?.cancel();
+      _save();
+    }
     _controller.removeListener(_onBodyChanged);
     _controller.dispose();
     _titleCtrl.dispose();
     super.dispose();
+  }
+
+  /// 自动保存：编辑停手 800ms 后落库一次（不干扰手动保存 / 提取 / 插图片
+  /// 等显式保存）。保存中或已 dispose 则跳过。
+  void _scheduleAutoSave() {
+    if (_busy) return; // 显式保存（手动保存 / 提取 / 插图片）进行中时不抢
+    _autoSaveTimer?.cancel();
+    _autoSaveTimer = Timer(const Duration(milliseconds: 800), () async {
+      if (_saving || _busy || !mounted) return;
+      await _save();
+    });
   }
 
   /// 正文变更监听：**只有序列化结果真的变了**才置脏。
@@ -120,6 +142,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     _lastBody = md;
     if (!mounted) return;
     setState(() => _dirty = true);
+    _scheduleAutoSave();
   }
 
   Future<void> _load() async {
@@ -376,44 +399,60 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   }
 
   Future<String> _save() async {
-    final id = _note?.id;
-    // 正文取控制器的序列化缓存（未编辑的块走原文直通 → L1 字节相等）。
-    final content = _controller.markdown;
-    final title = _titleCtrl.text.trim().isEmpty
-        ? content.split('\n').first
-        : _titleCtrl.text.trim();
-    final note = (id == null)
-        ? Note(
-            contentMd: content,
-            title: title,
-            // 同步设备号：必须与仓库内其它写入路径同源（每台设备唯一），
-            // 否则本机上传的行会被 pull 的自回声过滤误判为「本机自己上传的」。
-            deviceId: widget.service.repo.deviceId,
-          )
-        : _note!.copyWith(
-            title: title,
-            contentMd: content,
-          );
-    final res = await widget.service.repo.saveNote(note);
-    if (res is Success<Note>) {
-      setState(() {
-        _note = res.value;
-        _dirty = false;
-        _status = '已保存';
-      });
-      // 孤儿附件清理（T05）：正文引用是图片归属的唯一权威来源——
-      // 用户删掉某行 `![...](aimindtree-asset://id)` 后，对应附件在本次
-      // 保存时物理回收（删除意图经 hardDeleteNoteAssets 告诉同步对端）。
-      // 只在这里做：画布「补前置」等其它保存路径不编排图片引用，
-      // 误跑 reconcile 会把别人笔记里的插图删掉。
-      await widget.service.assets.reconcileForNote(
-        res.value.id,
-        extractAssetIds(content),
-      );
-      return res.value.id;
+    if (_saving) return _note?.id ?? '';
+    _saving = true;
+    try {
+      final id = _note?.id;
+      // 正文取控制器的序列化缓存（未编辑的块走原文直通 → L1 字节相等）。
+      final content = _controller.markdown;
+      final title = _titleCtrl.text.trim().isEmpty
+          ? content.split('\n').first
+          : _titleCtrl.text.trim();
+      final note = (id == null)
+          ? Note(
+              contentMd: content,
+              title: title,
+              // 同步设备号：必须与仓库内其它写入路径同源（每台设备唯一），
+              // 否则本机上传的行会被 pull 的自回声过滤误判为「本机自己上传的」。
+              deviceId: widget.service.repo.deviceId,
+            )
+          : _note!.copyWith(
+              title: title,
+              contentMd: content,
+            );
+      final res = await widget.service.repo.saveNote(note);
+      if (res is Success<Note>) {
+        // 所有 setState 带 mounted 守卫：dispose 后调用也不会抛。
+        if (mounted) {
+          setState(() {
+            _note = res.value;
+            _dirty = false;
+            _status = '已保存';
+          });
+        }
+        // 同步「上次内容」：自动保存循环里，_lastBody/_lastTitle 必须等于
+        // 当前正文/标题，否则监听器会误标 ●未保存（L1 红线）。用保存时
+        // 已捕获的 content / 标题，绝不回头碰可能已 dispose 的控制器。
+        _lastBody = content;
+        _lastTitle = _titleCtrl.text;
+        // 孤儿附件清理（T05）：正文引用是图片归属的唯一权威来源——
+        // 用户删掉某行 `![...](aimindtree-asset://id)` 后，对应附件在本次
+        // 保存时物理回收（删除意图经 hardDeleteNoteAssets 告诉同步对端）。
+        // 只在这里做：画布「补前置」等其它保存路径不编排图片引用，
+        // 误跑 reconcile 会把别人笔记里的插图删掉。
+        await widget.service.assets.reconcileForNote(
+          res.value.id,
+          extractAssetIds(content),
+        );
+        return res.value.id;
+      }
+      if (mounted) {
+        setState(() => _status = '保存失败：${(res as Failure<Note>).message}');
+      }
+      return '';
+    } finally {
+      _saving = false;
     }
-    setState(() => _status = '保存失败：${(res as Failure<Note>).message}');
-    return '';
   }
 
   Future<void> _onSave() async {

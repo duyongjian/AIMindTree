@@ -244,3 +244,23 @@ Map<String, dynamic> canvasStrokeRowToMap(CanvasStrokeRow r) => {
       'device_id': r.deviceId,
       'deleted_at': r.deletedAt,
     };
+
+/// homeworks 行 → payload。
+///
+/// ⚠️ `kp_ids_json` / `items_json` 是**整段 JSON 字符串**（薄弱点快照 / 题目
+/// 列表），同步层只搬运不解析——编解码属于 `HomeworkRepository` 的职责。
+Map<String, dynamic> homeworkRowToMap(HomeworkRow r) => {
+      'id': r.id,
+      'version': r.version,
+      'updated_at': r.updatedAt,
+      'device_id': r.deviceId,
+      'deleted_at': r.deletedAt,
+      'canvas_id': r.canvasId,
+      'title': r.title,
+      'kp_ids_json': r.kpIdsJson,
+      'items_json': r.itemsJson,
+      'kp_id': r.kpId,
+      'batch_id': r.batchId,
+      'status': r.status,
+      'due_at': r.dueAt,
+    };

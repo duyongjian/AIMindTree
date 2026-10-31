@@ -7,6 +7,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../ai/ai_job_service.dart';
 import '../../ai/ai_service.dart';
 import '../../ai/ai_task.dart';
 import '../../data/db/drift_database.dart' show AiSessionRow;
@@ -65,11 +66,22 @@ class TeacherSessionController {
     required this.repo,
     required this.ai,
     required this.kp,
+    this.jobs,
   });
 
   final AiSessionRepository repo;
   final AiService ai;
   final KnowledgePoint kp;
+
+  /// 任务队列（可空：单测与早期装配走同步兜底路径）。
+  ///
+  /// 非空时「首次自动讲解」改登记 [AiJobService.runDetached]：托盘可见、
+  /// 可取消，且**页面退出不中断**（讲解照样落库）。
+  final AiJobService? jobs;
+
+  /// 自动讲解占用的资源锁（与老师模式页内「讲解 / 追问」任务同一把：
+  /// 首次讲解还没出完时，用户点「再讲一次」会被 `isLocked` 挡掉）。
+  String get chatLockKey => 'kp:${kp.id}:chat';
 
   /// 拼装一次对话的 query（T5 追问 / T6 讲解 / 「再讲一次」共用）。
   ///
@@ -134,18 +146,89 @@ class TeacherSessionController {
   }
 
   /// 新建主会话并立即自动讲解一次。
+  ///
+  /// D：如果装配了任务队列 [jobs]，讲解改走后台任务 —— 托盘可见、可取消，
+  /// 且**页面退出不中断**（讲解照样落库）。这里仍然 `await` 它跑完：调用方
+  /// （老师模式 `_bootstrap`）要等讲解落库后才渲染消息列表，否则用户会先看到
+  /// 一个空会话。等的是任务本身，页面销毁不会取消任务。
   Future<AiSessionRow> createPrimarySessionWithExplain({
     required BuildContext context,
     required VoidCallback onGenerated,
   }) async {
     final session = await repo.createSessionForKp(
         kp.id, title: '${kp.name} 讲解');
-    await _generateExplainOnce(
-      context: context,
-      sessionId: session.id,
-      onGenerated: onGenerated,
-    );
+    final service = jobs;
+    if (service == null) {
+      // 无队列（单测 / 早期装配）→ 保持原来的同步路径。
+      await _generateExplainOnce(
+        context: context,
+        sessionId: session.id,
+        onGenerated: onGenerated,
+      );
+      return session;
+    }
+    final task = _startExplainJob(service, sessionId: session.id);
+    try {
+      await task.done;
+    } on Object {
+      // done 不抛；这里只是防御性兜底。
+    }
+    onGenerated();
     return session;
+  }
+
+  /// 把「首次自动讲解」登记成后台任务（读流 + 落库）。
+  DetachedTask _startExplainJob(
+    AiJobService service, {
+    required String sessionId,
+  }) {
+    return service.runDetached(
+      label: '老师模式 · 首次讲解：${kp.name}',
+      resourceKey: chatLockKey,
+      doneMessage: '讲解已生成',
+      body: (t) async {
+        t.progress('正在生成讲解…');
+        final history = await repo.listMessages(sessionId);
+        final query = buildQuery(
+          history: history,
+          task: AiTask.t6Explain,
+          currentQuestion: '',
+        );
+        final buf = StringBuffer();
+        var flushed = 0;
+        try {
+          await for (final chunk in ai.chat(AiTask.t6Explain, query)) {
+            if (t.isCanceled) break;
+            final delta = chunk.delta;
+            if (delta != null) buf.write(delta);
+            if (buf.length - flushed >= 200) {
+              flushed = buf.length;
+              t.progress('已生成 ${buf.length} 字');
+            }
+            if (chunk.done) break;
+          }
+        } on Object catch (e) {
+          // 讲解失败不阻断会话使用；托盘记 failed，UI 侧另行处理错误条。
+          debugPrint('老师模式自动讲解失败: $e');
+          rethrow;
+        }
+        if (t.isCanceled) {
+          t.progress('已取消');
+          return;
+        }
+        final text = buf.toString().trim();
+        if (text.isNotEmpty) {
+          // 无条件落库：页面已经关掉也照写（这正是「回答不再丢」的关键）。
+          await repo.addMessage(
+            sessionId: sessionId,
+            role: 'assistant',
+            content: text,
+            modelId: 'dify-t6',
+          );
+        }
+        t.progress('已完成', percent: 1);
+      },
+    );
   }
 
   /// 合并该 KP 下的老数据（explain → chat）。

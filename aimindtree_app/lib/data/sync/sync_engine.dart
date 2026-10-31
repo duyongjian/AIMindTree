@@ -3,15 +3,16 @@
 /// 推送：读 outbox pending → 批量走 SyncApi → markPushed / markFailed
 /// 拉取：走 SyncApi.pullSince → 自回声过滤 → 逐行 LWW merge → 更新 last_pulled_at
 ///
-/// 表覆盖范围（15 张带 SyncMeta 的表，见 [kSyncTableAllowlist]）：
+/// 表覆盖范围（16 张带 SyncMeta 的表，见 [kSyncTableAllowlist]）：
 /// notebooks / notes / knowledge_points / prerequisite_edges / mastery_records /
 /// cards / canvases / canvas_nodes / canvas_edges / ai_sessions / ai_messages /
 /// kp_groups / note_assets（后两张为 v5 新增）/
-/// canvas_cards / canvas_strokes（后两张为 ★2.0.0 新增）。
+/// canvas_cards / canvas_strokes（后两张为 ★2.0.0 新增）/
+/// homeworks（作业：本表已带 SyncMeta，纳入同步后作业可跨设备）。
 ///
-/// 故意不同步 4 张：`ai_providers`（密钥引用本地化，跨设备命名空间不一致）、
+/// 故意不同步 3 张：`ai_providers`（密钥引用本地化，跨设备命名空间不一致）、
 /// `ai_task_routes`（依赖 ai_providers，单独同步无意义）、
-/// `homeworks`（一次性草稿，无跨设备价值）、`sync_outbox`（发件箱自身）。
+/// `sync_outbox`（发件箱自身）。
 /// 将来要同步它们需先加 SyncMeta mixin + schemaVersion 迁移。
 ///
 /// LWW 规则（MEMORY.md "Append-only 排序陷阱" 同源）：
@@ -39,7 +40,7 @@ import 'sync_types.dart';
 /// 表名白名单校验，新增表名会让**整批** push 失败 → outbox 全标 failed。
 ///
 /// 真机跨设备同步报 4xx 时，把下面 `'kp_groups'` / `'note_assets'` 两行
-/// 注释掉即可秒回退：这两张表不再上行，其余 11 张表与本地功能不受影响。
+/// 注释掉即可秒回退：这两张表不再上行，其余 14 张表与本地功能不受影响。
 ///
 /// 白名单只作用于 **push**（上行）：不上行 ≠ 不下行，远端若仍有这些表的
 /// 历史数据，pull 下来照样能被本地 `_upsertLocal` 消费。
@@ -59,6 +60,7 @@ const Set<String> kSyncTableAllowlist = <String>{
   'note_assets',
   'canvas_cards',
   'canvas_strokes',
+  'homeworks',
 };
 
 /// 单批 push 的**字节预算** / 单条 envelope 的**硬上限**——按后端取值。
@@ -100,10 +102,10 @@ class PushReport {
 /// 本地同步数据的**总览**（设置页「数据版本」卡的本机一侧）。
 ///
 /// ⚠️ 口径说明（必须与服务端 [SyncManifest] 的口径一起读）：
-/// - [count] 是 [kSyncTableAllowlist] 15 张表的**总行数**，含软删（tombstone）
+/// - [count] 是 [kSyncTableAllowlist] 16 张表的**总行数**，含软删（tombstone）
 ///   行——本地删除是软删（`deleted_at` 非空但行还在），服务端也存墓碑，两边
-///   都算进去才可比；`homeworks` 等 4 张不同步的表**不在**统计范围内；
-/// - [maxVersion] 是 15 张表里最大的 `version`。它是**逐实体修订号**，不是
+///   都算进去才可比；`ai_providers` 等 3 张不同步的表**不在**统计范围内；
+/// - [maxVersion] 是 16 张表里最大的 `version`。它是**逐实体修订号**，不是
 ///   全局 generation：每个实体各自从 1 起算，且每次「上传」都会跑全量
 ///   `pushAll`，服务端对**未变化的行**也做 `max(既有, 声明) + 1`，所以服务
 ///   端版本会一路爬升、本机与服务器的数字**不必然相等**。本视图只回答
@@ -111,10 +113,10 @@ class PushReport {
 class SyncOverview {
   const SyncOverview({required this.count, required this.maxVersion});
 
-  /// 15 张同步表的总行数（含墓碑）。
+  /// 16 张同步表的总行数（含墓碑）。
   final int count;
 
-  /// 15 张同步表里最大的 `version`（无任何行时为 0）。
+  /// 16 张同步表里最大的 `version`（无任何行时为 0）。
   final int maxVersion;
 }
 
@@ -337,7 +339,7 @@ SyncEngine({
 
   // ============ Push：全量快照 ============
 
-  /// 全量快照推送：把 [kSyncTableAllowlist] 里 15 张表的**所有现存行**当作
+  /// 全量快照推送：把 [kSyncTableAllowlist] 里 16 张表的**所有现存行**当作
   /// upsert 推上去，与 outbox 是否为空无关。
   ///
   /// 为什么必须要有它：outbox 是**增量发件箱**，只记录「接线之后经仓储写入」
@@ -542,6 +544,12 @@ SyncEngine({
               ..limit(limit, offset: offset))
             .get();
         return rows.map(canvasStrokeRowToMap).toList();
+      case 'homeworks':
+        final rows = await (_db.select(_db.homeworks)
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(limit, offset: offset))
+            .get();
+        return rows.map(homeworkRowToMap).toList();
       default:
         _log.w('pushAll 遇到未知表 $table，跳过');
         return const <Map<String, dynamic>>[];
@@ -651,13 +659,13 @@ SyncEngine({
 
   // ============ 本地总览（设置页「数据版本」卡）============
 
-  /// 统计本机同步范围（[kSyncTableAllowlist] 的 15 张表）的记录数与最大版本。
+  /// 统计本机同步范围（[kSyncTableAllowlist] 的 16 张表）的记录数与最大版本。
   ///
   /// 为什么单独提供：设置页要显示「本机 vs 服务器」的总览，但**不让 UI 直接
   /// 写 SQL**——表名清单的唯一真相源是 [kSyncTableAllowlist]，写死在 UI 里会
   /// 在加表/减表时静默失配。
   ///
-  /// 实现是 15 次 `SELECT COUNT(*), MAX(version)`（每表一次，走索引/全表扫但
+  /// 实现是 16 次 `SELECT COUNT(*), MAX(version)`（每表一次，走索引/全表扫但
   /// 不读 payload，因此 [note_assets] 的 `data_base64` 不会被拉进内存）。
   /// 表名来自编译期常量，不是用户输入 → 无注入面。
   Future<SyncOverview> localOverview() async {
@@ -799,6 +807,9 @@ SyncEngine({
       case 'canvas_strokes':
         final r = await (_db.select(_db.canvasStrokes)..where((t) => t.id.equals(id))).getSingleOrNull();
         return r == null ? null : canvasStrokeRowToMap(r);
+      case 'homeworks':
+        final r = await (_db.select(_db.homeworks)..where((t) => t.id.equals(id))).getSingleOrNull();
+        return r == null ? null : homeworkRowToMap(r);
       default:
         _log.w('未知表 $table，跳过读 local');
         return null;
@@ -892,6 +903,10 @@ SyncEngine({
         await (_db.update(_db.canvasStrokes)..where((t) => t.id.equals(id)))
             .write(CanvasStrokesCompanion(version: Value(version)));
         break;
+      case 'homeworks':
+        await (_db.update(_db.homeworks)..where((t) => t.id.equals(id)))
+            .write(HomeworksCompanion(version: Value(version)));
+        break;
       default:
         _log.w('adoptServerVersions 遇到未知表 $table，跳过');
     }
@@ -975,6 +990,9 @@ SyncEngine({
       case 'canvas_strokes':
         await _db.into(_db.canvasStrokes).insert(_canvasStrokeFromMap(p), mode: InsertMode.insertOrReplace);
         break;
+      case 'homeworks':
+        await _db.into(_db.homeworks).insert(_homeworkFromMap(p), mode: InsertMode.insertOrReplace);
+        break;
       default:
         _log.w('未知表 $table，跳过 insert');
     }
@@ -1026,6 +1044,9 @@ SyncEngine({
         break;
       case 'canvas_strokes':
         await (_db.delete(_db.canvasStrokes)..where((t) => t.id.equals(id))).go();
+        break;
+      case 'homeworks':
+        await (_db.delete(_db.homeworks)..where((t) => t.id.equals(id))).go();
         break;
       default:
         _log.w('未知表 $table，跳过 delete');
@@ -1328,6 +1349,34 @@ SyncEngine({
         tokens: Value((p['tokens'] as num?)?.toInt()),
         latencyMs: Value((p['latency_ms'] as num?)?.toInt()),
         modelId: Value(p['model_id'] as String?),
+        updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
+        version: Value((p['version'] as num?)?.toInt() ?? 1),
+        deviceId: Value((p['device_id'] as String?) ?? deviceId),
+        deletedAt: Value(_dt(p['deleted_at'])),
+      );
+
+  // ============ Homeworks ============
+  //
+  // ⚠️ `kp_ids_json` / `items_json` 整段搬运，同步层不解析
+  // （薄弱点快照与题目的编解码归 HomeworkRepository）。
+
+  /// homeworks payload → Companion（pull 落库）。
+  ///
+  /// ⚠️ fallback 对着 `tables.dart` 的 `withDefault` 抄：`status` 默认是
+  /// **`'assigned'`**（不是 ''、不是 'draft'）——抄错会让对端每次 pull 把
+  /// 作业状态刷成空值。`items_json` / `kp_ids_json` 默认 `'[]'`（抄成 '' 会丢题）。
+  /// `due_at` / `deleted_at` / `updated_at` 是 DateTime 列，必须走 `_dt()`：
+  /// pull 的 payload 已过 JSON 往返，DateTime 会变成 ISO 字符串。
+  HomeworksCompanion _homeworkFromMap(Map<String, dynamic> p) => HomeworksCompanion(
+        id: Value(p['id'] as String),
+        canvasId: Value((p['canvas_id'] as String?) ?? ''),
+        title: Value((p['title'] as String?) ?? ''),
+        kpIdsJson: Value((p['kp_ids_json'] as String?) ?? '[]'),
+        itemsJson: Value((p['items_json'] as String?) ?? '[]'),
+        kpId: Value(p['kp_id'] as String?),
+        batchId: Value(p['batch_id'] as String?),
+        status: Value((p['status'] as String?) ?? 'assigned'),
+        dueAt: Value(_dt(p['due_at'])),
         updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),

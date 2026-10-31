@@ -1,4 +1,4 @@
-/// 同步 payload **键集对齐护栏**（15 张表）。
+/// 同步 payload **键集对齐护栏**（16 张表）。
 ///
 /// 为什么需要这个护栏：同步 payload 是**按键名**存的 JSON。
 /// `sync_row_map.dart` 少写一个键（或 `sync_engine.dart` 的 `*FromMap`
@@ -6,7 +6,7 @@
 /// 上无声丢失，且不报错**。这是最难发现的一类 bug，只能靠断言挡住。
 ///
 /// 本文件四道防线：
-/// 1. **契约层**：[kSyncTableKeys] 是 15 张表 payload 键集的唯一真相源，
+/// 1. **契约层**：[kSyncTableKeys] 是 16 张表 payload 键集的唯一真相源，
 ///    任何一处增删键都必须同步改这里（否则测试红）。
 /// 2. **drift 真值层**（第四腿）：用 `PRAGMA table_info` 从**真实数据库**读出
 ///    每张表的列集，断言「真实列集 − 显式排除集 == 契约键集」。
@@ -36,7 +36,7 @@ import 'package:aimindtree_app/data/sync/sync_types.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// 13 张同步表的 payload 键集契约（**唯一真相源**）。
+/// 16 张同步表的 payload 键集契约（**唯一真相源**）。
 ///
 /// 键名一律是 drift 的 **snake_case 列名**，逐字取自 drift 生成产物
 /// `lib/data/db/drift_database.g.dart`（`*Companion.custom` 的列名）。
@@ -239,6 +239,23 @@ const Map<String, Set<String>> kSyncTableKeys = <String, Set<String>>{
     'device_id',
     'deleted_at',
   },
+  // 本轮纳入同步：作业（原「一次性草稿、不跨设备」，现要求跨设备可见）。
+  'homeworks': <String>{
+    'id',
+    'version',
+    'updated_at',
+    'device_id',
+    'deleted_at',
+    'canvas_id',
+    'title',
+    // 薄弱点快照 / 题目列表：整段 JSON 字符串，同步层不拆开解析。
+    'kp_ids_json',
+    'items_json',
+    'kp_id',
+    'batch_id',
+    'status',
+    'due_at',
+  },
 };
 
 /// 表名 → (写侧 `*RowToMap` 函数名, 读侧 `*FromMap` 函数名)。
@@ -259,6 +276,7 @@ const Map<String, (String, String)> kSyncTableAdapters =
   'note_assets': ('noteAssetRowToMap', '_noteAssetFromMap'),
   'canvas_cards': ('canvasCardRowToMap', '_canvasCardFromMap'),
   'canvas_strokes': ('canvasStrokeRowToMap', '_canvasStrokeFromMap'),
+  'homeworks': ('homeworkRowToMap', '_homeworkFromMap'),
 };
 
 /// **显式排除**的列：存在于 drift，但**有意不上行**（不写进 payload）。
@@ -962,12 +980,54 @@ final List<_KeyProbe> _probes = <_KeyProbe>[
       };
     },
   ),
+  _KeyProbe(
+    table: 'homeworks',
+    id: 'probe-homework',
+    payload: <String, Object?>{
+      'id': 'probe-homework',
+      // 归属知识树：列无默认值（必填），探测值刻意非空。
+      'canvas_id': 'probe-canvas',
+      // 标题默认 ''，探测值必须异值。
+      'title': 'probe-title',
+      // 薄弱点快照默认 '[]'，探测值必须异值。
+      'kp_ids_json': '["probe-kp"]',
+      // 题目列表默认 '[]'，探测值必须异值（抄成 '' 会丢题）。
+      'items_json': '[{"probe":1}]',
+      // 两列可空、默认 null，探测值刻意非 null。
+      'kp_id': 'probe-kp',
+      'batch_id': 'probe-batch',
+      // ⚠️ `status` 的列默认是 **'assigned'**（不是 ''），探测值刻意取 'done'。
+      'status': 'done',
+      // 截止时间：可空 DateTime 列，用一个与 updated_at 不同的固定时刻。
+      'due_at': _probeCreatedAt,
+      'deleted_at': _probeDeletedAt,
+    },
+    read: (db, id) async {
+      final r = await (db.select(db.homeworks)..where((t) => t.id.equals(id)))
+          .getSingle();
+      return <String, Object?>{
+        'id': r.id,
+        'version': r.version,
+        'updated_at': r.updatedAt,
+        'device_id': r.deviceId,
+        'deleted_at': r.deletedAt,
+        'canvas_id': r.canvasId,
+        'title': r.title,
+        'kp_ids_json': r.kpIdsJson,
+        'items_json': r.itemsJson,
+        'kp_id': r.kpId,
+        'batch_id': r.batchId,
+        'status': r.status,
+        'due_at': r.dueAt,
+      };
+    },
+  ),
 ];
 
 void main() {
   group('契约：kSyncTableKeys', () {
-    test('覆盖 15 张同步表，且与 kSyncTableAllowlist 一致', () {
-      expect(kSyncTableKeys.length, 15);
+    test('覆盖 16 张同步表，且与 kSyncTableAllowlist 一致', () {
+      expect(kSyncTableKeys.length, 16);
       expect(
         kSyncTableKeys.keys.toSet(),
         kSyncTableAllowlist,
@@ -981,6 +1041,20 @@ void main() {
         expect(kSyncTableAdapters.containsKey(table), isTrue,
             reason: '$table 缺少 adapter 映射');
       }
+    });
+
+    // ⚠️ 这条是给「闭环落库」那一组堵洞的：闭环用例是 `for (final probe in
+    // _probes)` 循环，**契约里有表、_probes 里没探针**时会静默跳过该表 →
+    // `_upsertLocal` / `_deleteLocal` / `_updateLocalVersion` 的分支写错也全绿。
+    test('每张契约表都有落库探针（否则闭环用例会静默跳过该表）', () {
+      expect(
+        _probes.map((p) => p.table).toSet(),
+        kSyncTableKeys.keys.toSet(),
+        reason: '_probes 与 kSyncTableKeys 的表集必须一致：'
+            '契约有表但 _probes 没探针 → 闭环落库用例静默跳过它，'
+            '写错 switch 分支也不会红',
+      );
+      expect(_probes.length, kSyncTableKeys.length);
     });
   });
 
@@ -1141,7 +1215,7 @@ void main() {
           _locate('lib/data/sync/sync_engine.dart').readAsStringSync());
     });
 
-    test('扫描器确实抽到了 15 对 adapter（防止正则悄悄失效）', () {
+    test('扫描器确实抽到了 16 对 adapter（防止正则悄悄失效）', () {
       for (final entry in kSyncTableAdapters.entries) {
         expect(writeKeys.containsKey(entry.value.$1), isTrue,
             reason: 'sync_row_map.dart 里找不到 ${entry.value.$1}');

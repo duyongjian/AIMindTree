@@ -159,6 +159,19 @@ class SyncOutboxWriter {
         toMap: noteAssetRowToMap,
       );
 
+  /// 作业 upsert（homeworks）。
+  ///
+  /// ⚠️ `kp_ids_json` / `items_json` 是整段 JSON 字符串，同步层原样搬运、不解析。
+  /// 位置/尺寸无关：作业没有画布坐标，只有内容字段。
+  Future<void> upsertHomework(String id) => _upsert(
+        table: 'homeworks',
+        id: id,
+        load: () =>
+            (_db.select(_db.homeworks)..where((t) => t.id.equals(id)))
+                .getSingleOrNull(),
+        toMap: homeworkRowToMap,
+      );
+
   // ============ 软删（墓碑）============
 
   /// 笔记墓碑（软删：行仍在本地，deleted_at 非空）。
@@ -200,6 +213,20 @@ class SyncOutboxWriter {
         load: () => (_db.select(_db.noteAssets)..where((t) => t.id.equals(id)))
             .getSingleOrNull(),
         toMap: noteAssetRowToMap,
+      );
+
+  /// 作业墓碑（软删：行仍在本地，deleted_at 非空）。
+  ///
+  /// ⚠️ 必须用墓碑而不是硬删：`HomeworkRepository.softDelete` 只写
+  /// `deleted_at`，行**还留在本地表里**——走 `_hardDelete` 的话 payload 里的
+  /// 墓碑时间会是「现在」，与本地行的真实 `deleted_at` 不一致。
+  Future<void> tombstoneHomework(String id) => _tombstone(
+        table: 'homeworks',
+        id: id,
+        load: () =>
+            (_db.select(_db.homeworks)..where((t) => t.id.equals(id)))
+                .getSingleOrNull(),
+        toMap: homeworkRowToMap,
       );
 
   // ============ 硬删（行已从本地消失）============

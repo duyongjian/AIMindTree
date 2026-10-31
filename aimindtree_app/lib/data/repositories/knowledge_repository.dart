@@ -102,21 +102,34 @@ class KnowledgeRepository {
   /// 保存（upsert）一条笔记。
   Future<Result<Note>> saveNote(Note note) async {
     try {
+      // 必须 bump 版本 + 刷新 updated_at：否则编辑后的行与旧版本号 / 时间戳
+      // 同值，接收方 LWW 在 `==` 平局分支里会判成「keep local」，导致
+      // 「一端改了、另一端拉取没变化」（见 sync_engine._compare）。删除 /
+      // 恢复路径都做了 version+1，这里必须与它们口径一致。读现有行取当前
+      // version；新笔记（无现有行）从 1 起算，与 Note 默认 version 一致。
+      final existing = await (_db.select(_db.notes)
+            ..where((t) => t.id.equals(note.id)))
+          .getSingleOrNull();
+      final now = DateTime.now().toUtc();
+      final toSave = note.copyWith(
+        version: (existing?.version ?? 0) + 1,
+        updatedAt: now,
+      );
       await _db
           .into(_db.notes)
           .insertOnConflictUpdate(NotesCompanion(
-            id: Value(note.id),
-            notebookId: Value(note.notebookId),
-            title: Value(note.title),
-            contentMd: Value(note.contentMd),
-            contentHash: Value(note.contentHash),
-            updatedAt: Value(note.updatedAt),
-            version: Value(note.version),
-            deviceId: Value(note.deviceId),
-            deletedAt: Value(note.deletedAt),
+            id: Value(toSave.id),
+            notebookId: Value(toSave.notebookId),
+            title: Value(toSave.title),
+            contentMd: Value(toSave.contentMd),
+            contentHash: Value(toSave.contentHash),
+            updatedAt: Value(toSave.updatedAt),
+            version: Value(toSave.version),
+            deviceId: Value(toSave.deviceId),
+            deletedAt: Value(toSave.deletedAt),
           ));
-      await _sync.upsertNote(note.id);
-      return Success(note);
+      await _sync.upsertNote(toSave.id);
+      return Success(toSave);
     } on Object catch (e, s) {
       _log.e('保存笔记失败', error: e, stackTrace: s);
       return Failure(e, s);
@@ -944,6 +957,26 @@ class KnowledgeRepository {
     return rows.map(_kpFromRow).toList();
   }
 
+  /// 取该知识点所在的**第一棵**知识树 id，供作业归属（`homeworks.canvas_id`）用。
+  ///
+  /// 一个知识点可能同时出现在多棵树里，而作业只认**一棵**。为了**可复现**，
+  /// 这里按 `canvas_id` 升序取第一条成员关系（不加排序时 drift 返回的是物理
+  /// 行序，同一知识点两次调用可能落到不同的树，作业的归属就飘了）。
+  /// 只认未软删的成员行（`deleted_at IS NULL`）。不在任何树里返回 null，
+  /// 调用方需自行回退（作业页允许空 `canvasId`，仍可手动出题）。
+  Future<String?> canvasIdForKp(String kpId) async {
+    if (kpId.isEmpty) return null;
+    final row = await (_db.select(_db.canvasNodes)
+          ..where((t) =>
+              t.targetType.equals('kp') &
+              t.targetId.equals(kpId) &
+              t.deletedAt.isNull())
+          ..orderBy([(t) => OrderingTerm.asc(t.canvasId)])
+          ..limit(1))
+        .getSingleOrNull();
+    return row?.canvasId;
+  }
+
   /// 全部未删除笔记（按更新时间倒序）。
   ///
   /// 软删铁律：`deletedAt` 非空的必须滤掉（与 main.dart / canvas_page 的
@@ -966,6 +999,133 @@ class KnowledgeRepository {
             ))
         .toList()
       ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+  }
+
+  // ============ 笔记回收站（软删墓碑的可见面）============
+
+  /// 笔记行 → 领域模型（与 [listNotes] 的映射保持一致）。
+  Note _noteFromRow(NoteRow r) => Note(
+        id: r.id,
+        notebookId: r.notebookId,
+        title: r.title,
+        contentMd: r.contentMd,
+        contentHash: r.contentHash,
+        updatedAt: r.updatedAt,
+        version: r.version,
+        deviceId: r.deviceId,
+        deletedAt: r.deletedAt,
+      );
+
+  /// 回收站列表：**已软删**（墓碑）的笔记，按删除时间倒序。
+  ///
+  /// 软删铁律的例外入口（与 [deletedKnowledgePoints] 同口径）：常规读路径
+  /// （[listNotes]）过滤 `deleted_at IS NULL`，墓碑行不可见；只有这里把墓碑行
+  /// 单独捞出来展示，供用户在笔记回收站里「恢复」或「彻底删除」。
+  ///
+  /// 注意：这里返回的是**墓碑行本身**（`deletedAt` 非空），调用方不能把它
+  /// 混进任何常规列表。
+  Future<List<Note>> deletedNotes() async {
+    final rows = await (_db.select(_db.notes)
+          ..where((t) => t.deletedAt.isNotNull())
+          ..orderBy([(t) => OrderingTerm.desc(t.deletedAt)]))
+        .get();
+    return rows.map(_noteFromRow).toList();
+  }
+
+  /// 恢复一个被软删的笔记（回收站 → 常规列表）。
+  ///
+  /// 墓碑行 `deleted_at` 置空、`version++`、`updated_at` 刷新；恢复后它重新
+  /// 出现在 [listNotes] 等常规读路径里。上行同步入队一条 upsert（与
+  /// [restoreKnowledgePoint] 同口径），让恢复跨设备传播。
+  Future<Result<Note>> restoreNote(String noteId) async {
+    try {
+      final row = await (_db.select(_db.notes)
+            ..where((t) => t.id.equals(noteId)))
+          .getSingleOrNull();
+      if (row == null) {
+        return Failure(StateError('笔记不存在'));
+      }
+      if (row.deletedAt == null) {
+        // 已经在常规列表里：幂等返回，不重复写库、也不重复入队。
+        return Success(_noteFromRow(row));
+      }
+      await (_db.update(_db.notes)..where((t) => t.id.equals(noteId))).write(
+        NotesCompanion(
+          deletedAt: const Value<DateTime?>(null),
+          updatedAt: Value(DateTime.now().toUtc()),
+          version: Value(row.version + 1),
+        ),
+      );
+      // 上行同步：恢复 = 一条 upsert（payload 是恢复后该行的最终态）。
+      await _sync.upsertNote(noteId);
+      final restored = await (_db.select(_db.notes)
+            ..where((t) => t.id.equals(noteId)))
+          .getSingleOrNull();
+      if (restored == null) {
+        return Failure(StateError('恢复后读取笔记失败'));
+      }
+      _log.i('恢复笔记 $noteId（墓碑置空，version=${restored.version}）');
+      return Success(_noteFromRow(restored));
+    } on Object catch (e, s) {
+      _log.e('恢复笔记失败', error: e, stackTrace: s);
+      return Failure(e, s);
+    }
+  }
+
+  /// 彻底删除一个笔记（回收站 → 消失，**不可恢复**）。
+  ///
+  /// 与 [deleteNote]（软删墓碑，可恢复）不同，这里把墓碑行**物理删除**，
+  /// 并清掉该笔记的附件行（`note_assets`）。
+  ///
+  /// ⚠️ 同步缺口：当前 [SyncOutboxWriter] 只提供 `upsertNote`，**没有**
+  /// `hardDeleteNotes`；因此这里只做**本地**物理删除，跨设备回收待同步层补齐
+  /// （见下方 `TODO(sync)`）。不级联知识点：它们在 [deleteNote] 软删时已按
+  /// `deletePoints` 决定硬删或保留，此处回收站只对付笔记本体。
+  Future<Result<void>> purgeNote(String noteId) async {
+    try {
+      final row = await (_db.select(_db.notes)
+            ..where((t) => t.id.equals(noteId)))
+          .getSingleOrNull();
+      if (row == null) {
+        // 已经彻底没了：幂等返回。
+        return const Success<void>(null);
+      }
+      // 彻底删除 = 比墓碑更新的状态：先把 version 顶上去再删，使删除意图
+      // 在跨设备同步时严格晚于墓碑（一旦同步层补齐 notes 物理删除入队）。
+      final now = DateTime.now().toUtc();
+      await (_db.update(_db.notes)..where((t) => t.id.equals(noteId))).write(
+        NotesCompanion(
+          version: Value(row.version + 1),
+          updatedAt: Value(now),
+        ),
+      );
+      // 硬删：附件行 + 笔记墓碑行本身。
+      await (_db.delete(_db.noteAssets)
+            ..where((t) => t.noteId.equals(noteId)))
+          .go();
+      await (_db.delete(_db.notes)..where((t) => t.id.equals(noteId))).go();
+      // TODO(sync): enqueue notes hard-delete when sync writer adds hardDeleteNotes.
+      // 目前 SyncOutboxWriter 仅有 upsertNote / hardDeleteNoteAssets，没有
+      // hardDeleteNotes，跨设备回收待同步层补齐。
+      _log.i('彻底删除笔记 $noteId（物理删除，不可恢复）');
+      return const Success<void>(null);
+    } on Object catch (e, s) {
+      _log.e('彻底删除笔记失败', error: e, stackTrace: s);
+      return Failure<void>(e, s);
+    }
+  }
+
+  /// 批量彻底删除（回收站「清空」）。
+  ///
+  /// 数据面 = [purgeNote] 的单条逻辑循环执行。单条失败不阻断其余，返回
+  /// 成功处理的条数；不存在的 id 按幂等计为成功（与单条口径一致）。
+  Future<Result<int>> purgeNotes(List<String> ids) async {
+    var deleted = 0;
+    for (final id in ids) {
+      final res = await purgeNote(id);
+      if (res is Success<void>) deleted += 1;
+    }
+    return Success<int>(deleted);
   }
 
   Future<Note?> getNote(String id) async {

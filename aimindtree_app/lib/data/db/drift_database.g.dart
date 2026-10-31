@@ -8383,6 +8383,45 @@ class $HomeworksTable extends Homeworks
     requiredDuringInsert: false,
     defaultValue: const Constant('[]'),
   );
+  static const VerificationMeta _kpIdMeta = const VerificationMeta('kpId');
+  @override
+  late final GeneratedColumn<String> kpId = GeneratedColumn<String>(
+    'kp_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _batchIdMeta = const VerificationMeta(
+    'batchId',
+  );
+  @override
+  late final GeneratedColumn<String> batchId = GeneratedColumn<String>(
+    'batch_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _statusMeta = const VerificationMeta('status');
+  @override
+  late final GeneratedColumn<String> status = GeneratedColumn<String>(
+    'status',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('assigned'),
+  );
+  static const VerificationMeta _dueAtMeta = const VerificationMeta('dueAt');
+  @override
+  late final GeneratedColumn<DateTime> dueAt = GeneratedColumn<DateTime>(
+    'due_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -8394,6 +8433,10 @@ class $HomeworksTable extends Homeworks
     title,
     kpIdsJson,
     itemsJson,
+    kpId,
+    batchId,
+    status,
+    dueAt,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -8466,6 +8509,30 @@ class $HomeworksTable extends Homeworks
         itemsJson.isAcceptableOrUnknown(data['items_json']!, _itemsJsonMeta),
       );
     }
+    if (data.containsKey('kp_id')) {
+      context.handle(
+        _kpIdMeta,
+        kpId.isAcceptableOrUnknown(data['kp_id']!, _kpIdMeta),
+      );
+    }
+    if (data.containsKey('batch_id')) {
+      context.handle(
+        _batchIdMeta,
+        batchId.isAcceptableOrUnknown(data['batch_id']!, _batchIdMeta),
+      );
+    }
+    if (data.containsKey('status')) {
+      context.handle(
+        _statusMeta,
+        status.isAcceptableOrUnknown(data['status']!, _statusMeta),
+      );
+    }
+    if (data.containsKey('due_at')) {
+      context.handle(
+        _dueAtMeta,
+        dueAt.isAcceptableOrUnknown(data['due_at']!, _dueAtMeta),
+      );
+    }
     return context;
   }
 
@@ -8511,6 +8578,22 @@ class $HomeworksTable extends Homeworks
         DriftSqlType.string,
         data['${effectivePrefix}items_json'],
       )!,
+      kpId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}kp_id'],
+      ),
+      batchId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}batch_id'],
+      ),
+      status: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}status'],
+      )!,
+      dueAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}due_at'],
+      ),
     );
   }
 
@@ -8545,6 +8628,19 @@ class HomeworkRow extends DataClass implements Insertable<HomeworkRow> {
 
   /// 题目 JSON：`[{"kpId","kpName","type","question","answer","difficulty"}]`。
   final String itemsJson;
+
+  /// 主关联知识点外键（→ knowledge_points.id）；「进某知识点看其作业」用。
+  /// 一对多：一个知识点下可有多个作业行，批量布置时每行各带一个 [kpId]。
+  final String? kpId;
+
+  /// 批量布置聚合键：一次框选布置 N 个知识点共享同一 [batchId]（N 行归类）。
+  final String? batchId;
+
+  /// 作业状态：assigned / draft / done（生命周期展示用）。
+  final String status;
+
+  /// 截止时间（可选）。
+  final DateTime? dueAt;
   const HomeworkRow({
     required this.id,
     required this.version,
@@ -8555,6 +8651,10 @@ class HomeworkRow extends DataClass implements Insertable<HomeworkRow> {
     required this.title,
     required this.kpIdsJson,
     required this.itemsJson,
+    this.kpId,
+    this.batchId,
+    required this.status,
+    this.dueAt,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -8570,6 +8670,16 @@ class HomeworkRow extends DataClass implements Insertable<HomeworkRow> {
     map['title'] = Variable<String>(title);
     map['kp_ids_json'] = Variable<String>(kpIdsJson);
     map['items_json'] = Variable<String>(itemsJson);
+    if (!nullToAbsent || kpId != null) {
+      map['kp_id'] = Variable<String>(kpId);
+    }
+    if (!nullToAbsent || batchId != null) {
+      map['batch_id'] = Variable<String>(batchId);
+    }
+    map['status'] = Variable<String>(status);
+    if (!nullToAbsent || dueAt != null) {
+      map['due_at'] = Variable<DateTime>(dueAt);
+    }
     return map;
   }
 
@@ -8586,6 +8696,14 @@ class HomeworkRow extends DataClass implements Insertable<HomeworkRow> {
       title: Value(title),
       kpIdsJson: Value(kpIdsJson),
       itemsJson: Value(itemsJson),
+      kpId: kpId == null && nullToAbsent ? const Value.absent() : Value(kpId),
+      batchId: batchId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(batchId),
+      status: Value(status),
+      dueAt: dueAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(dueAt),
     );
   }
 
@@ -8604,6 +8722,10 @@ class HomeworkRow extends DataClass implements Insertable<HomeworkRow> {
       title: serializer.fromJson<String>(json['title']),
       kpIdsJson: serializer.fromJson<String>(json['kpIdsJson']),
       itemsJson: serializer.fromJson<String>(json['itemsJson']),
+      kpId: serializer.fromJson<String?>(json['kpId']),
+      batchId: serializer.fromJson<String?>(json['batchId']),
+      status: serializer.fromJson<String>(json['status']),
+      dueAt: serializer.fromJson<DateTime?>(json['dueAt']),
     );
   }
   @override
@@ -8619,6 +8741,10 @@ class HomeworkRow extends DataClass implements Insertable<HomeworkRow> {
       'title': serializer.toJson<String>(title),
       'kpIdsJson': serializer.toJson<String>(kpIdsJson),
       'itemsJson': serializer.toJson<String>(itemsJson),
+      'kpId': serializer.toJson<String?>(kpId),
+      'batchId': serializer.toJson<String?>(batchId),
+      'status': serializer.toJson<String>(status),
+      'dueAt': serializer.toJson<DateTime?>(dueAt),
     };
   }
 
@@ -8632,6 +8758,10 @@ class HomeworkRow extends DataClass implements Insertable<HomeworkRow> {
     String? title,
     String? kpIdsJson,
     String? itemsJson,
+    Value<String?> kpId = const Value.absent(),
+    Value<String?> batchId = const Value.absent(),
+    String? status,
+    Value<DateTime?> dueAt = const Value.absent(),
   }) => HomeworkRow(
     id: id ?? this.id,
     version: version ?? this.version,
@@ -8642,6 +8772,10 @@ class HomeworkRow extends DataClass implements Insertable<HomeworkRow> {
     title: title ?? this.title,
     kpIdsJson: kpIdsJson ?? this.kpIdsJson,
     itemsJson: itemsJson ?? this.itemsJson,
+    kpId: kpId.present ? kpId.value : this.kpId,
+    batchId: batchId.present ? batchId.value : this.batchId,
+    status: status ?? this.status,
+    dueAt: dueAt.present ? dueAt.value : this.dueAt,
   );
   HomeworkRow copyWithCompanion(HomeworksCompanion data) {
     return HomeworkRow(
@@ -8654,6 +8788,10 @@ class HomeworkRow extends DataClass implements Insertable<HomeworkRow> {
       title: data.title.present ? data.title.value : this.title,
       kpIdsJson: data.kpIdsJson.present ? data.kpIdsJson.value : this.kpIdsJson,
       itemsJson: data.itemsJson.present ? data.itemsJson.value : this.itemsJson,
+      kpId: data.kpId.present ? data.kpId.value : this.kpId,
+      batchId: data.batchId.present ? data.batchId.value : this.batchId,
+      status: data.status.present ? data.status.value : this.status,
+      dueAt: data.dueAt.present ? data.dueAt.value : this.dueAt,
     );
   }
 
@@ -8668,7 +8806,11 @@ class HomeworkRow extends DataClass implements Insertable<HomeworkRow> {
           ..write('canvasId: $canvasId, ')
           ..write('title: $title, ')
           ..write('kpIdsJson: $kpIdsJson, ')
-          ..write('itemsJson: $itemsJson')
+          ..write('itemsJson: $itemsJson, ')
+          ..write('kpId: $kpId, ')
+          ..write('batchId: $batchId, ')
+          ..write('status: $status, ')
+          ..write('dueAt: $dueAt')
           ..write(')'))
         .toString();
   }
@@ -8684,6 +8826,10 @@ class HomeworkRow extends DataClass implements Insertable<HomeworkRow> {
     title,
     kpIdsJson,
     itemsJson,
+    kpId,
+    batchId,
+    status,
+    dueAt,
   );
   @override
   bool operator ==(Object other) =>
@@ -8697,7 +8843,11 @@ class HomeworkRow extends DataClass implements Insertable<HomeworkRow> {
           other.canvasId == this.canvasId &&
           other.title == this.title &&
           other.kpIdsJson == this.kpIdsJson &&
-          other.itemsJson == this.itemsJson);
+          other.itemsJson == this.itemsJson &&
+          other.kpId == this.kpId &&
+          other.batchId == this.batchId &&
+          other.status == this.status &&
+          other.dueAt == this.dueAt);
 }
 
 class HomeworksCompanion extends UpdateCompanion<HomeworkRow> {
@@ -8710,6 +8860,10 @@ class HomeworksCompanion extends UpdateCompanion<HomeworkRow> {
   final Value<String> title;
   final Value<String> kpIdsJson;
   final Value<String> itemsJson;
+  final Value<String?> kpId;
+  final Value<String?> batchId;
+  final Value<String> status;
+  final Value<DateTime?> dueAt;
   final Value<int> rowid;
   const HomeworksCompanion({
     this.id = const Value.absent(),
@@ -8721,6 +8875,10 @@ class HomeworksCompanion extends UpdateCompanion<HomeworkRow> {
     this.title = const Value.absent(),
     this.kpIdsJson = const Value.absent(),
     this.itemsJson = const Value.absent(),
+    this.kpId = const Value.absent(),
+    this.batchId = const Value.absent(),
+    this.status = const Value.absent(),
+    this.dueAt = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   HomeworksCompanion.insert({
@@ -8733,6 +8891,10 @@ class HomeworksCompanion extends UpdateCompanion<HomeworkRow> {
     this.title = const Value.absent(),
     this.kpIdsJson = const Value.absent(),
     this.itemsJson = const Value.absent(),
+    this.kpId = const Value.absent(),
+    this.batchId = const Value.absent(),
+    this.status = const Value.absent(),
+    this.dueAt = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        updatedAt = Value(updatedAt),
@@ -8748,6 +8910,10 @@ class HomeworksCompanion extends UpdateCompanion<HomeworkRow> {
     Expression<String>? title,
     Expression<String>? kpIdsJson,
     Expression<String>? itemsJson,
+    Expression<String>? kpId,
+    Expression<String>? batchId,
+    Expression<String>? status,
+    Expression<DateTime>? dueAt,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -8760,6 +8926,10 @@ class HomeworksCompanion extends UpdateCompanion<HomeworkRow> {
       if (title != null) 'title': title,
       if (kpIdsJson != null) 'kp_ids_json': kpIdsJson,
       if (itemsJson != null) 'items_json': itemsJson,
+      if (kpId != null) 'kp_id': kpId,
+      if (batchId != null) 'batch_id': batchId,
+      if (status != null) 'status': status,
+      if (dueAt != null) 'due_at': dueAt,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -8774,6 +8944,10 @@ class HomeworksCompanion extends UpdateCompanion<HomeworkRow> {
     Value<String>? title,
     Value<String>? kpIdsJson,
     Value<String>? itemsJson,
+    Value<String?>? kpId,
+    Value<String?>? batchId,
+    Value<String>? status,
+    Value<DateTime?>? dueAt,
     Value<int>? rowid,
   }) {
     return HomeworksCompanion(
@@ -8786,6 +8960,10 @@ class HomeworksCompanion extends UpdateCompanion<HomeworkRow> {
       title: title ?? this.title,
       kpIdsJson: kpIdsJson ?? this.kpIdsJson,
       itemsJson: itemsJson ?? this.itemsJson,
+      kpId: kpId ?? this.kpId,
+      batchId: batchId ?? this.batchId,
+      status: status ?? this.status,
+      dueAt: dueAt ?? this.dueAt,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -8820,6 +8998,18 @@ class HomeworksCompanion extends UpdateCompanion<HomeworkRow> {
     if (itemsJson.present) {
       map['items_json'] = Variable<String>(itemsJson.value);
     }
+    if (kpId.present) {
+      map['kp_id'] = Variable<String>(kpId.value);
+    }
+    if (batchId.present) {
+      map['batch_id'] = Variable<String>(batchId.value);
+    }
+    if (status.present) {
+      map['status'] = Variable<String>(status.value);
+    }
+    if (dueAt.present) {
+      map['due_at'] = Variable<DateTime>(dueAt.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -8838,6 +9028,10 @@ class HomeworksCompanion extends UpdateCompanion<HomeworkRow> {
           ..write('title: $title, ')
           ..write('kpIdsJson: $kpIdsJson, ')
           ..write('itemsJson: $itemsJson, ')
+          ..write('kpId: $kpId, ')
+          ..write('batchId: $batchId, ')
+          ..write('status: $status, ')
+          ..write('dueAt: $dueAt, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -15929,6 +16123,10 @@ typedef $$HomeworksTableCreateCompanionBuilder = HomeworksCompanion Function({
   Value<String> title,
   Value<String> kpIdsJson,
   Value<String> itemsJson,
+  Value<String?> kpId,
+  Value<String?> batchId,
+  Value<String> status,
+  Value<DateTime?> dueAt,
   Value<int> rowid,
 });
 typedef $$HomeworksTableUpdateCompanionBuilder = HomeworksCompanion Function({
@@ -15941,6 +16139,10 @@ typedef $$HomeworksTableUpdateCompanionBuilder = HomeworksCompanion Function({
   Value<String> title,
   Value<String> kpIdsJson,
   Value<String> itemsJson,
+  Value<String?> kpId,
+  Value<String?> batchId,
+  Value<String> status,
+  Value<DateTime?> dueAt,
   Value<int> rowid,
 });
 
@@ -15995,6 +16197,26 @@ class $$HomeworksTableFilterComposer
 
   ColumnFilters<String> get itemsJson => $composableBuilder(
     column: $table.itemsJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get kpId => $composableBuilder(
+    column: $table.kpId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get batchId => $composableBuilder(
+    column: $table.batchId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get dueAt => $composableBuilder(
+    column: $table.dueAt,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -16052,6 +16274,26 @@ class $$HomeworksTableOrderingComposer
     column: $table.itemsJson,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get kpId => $composableBuilder(
+    column: $table.kpId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get batchId => $composableBuilder(
+    column: $table.batchId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get dueAt => $composableBuilder(
+    column: $table.dueAt,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$HomeworksTableAnnotationComposer
@@ -16089,6 +16331,18 @@ class $$HomeworksTableAnnotationComposer
 
   GeneratedColumn<String> get itemsJson =>
       $composableBuilder(column: $table.itemsJson, builder: (column) => column);
+
+  GeneratedColumn<String> get kpId =>
+      $composableBuilder(column: $table.kpId, builder: (column) => column);
+
+  GeneratedColumn<String> get batchId =>
+      $composableBuilder(column: $table.batchId, builder: (column) => column);
+
+  GeneratedColumn<String> get status =>
+      $composableBuilder(column: $table.status, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get dueAt =>
+      $composableBuilder(column: $table.dueAt, builder: (column) => column);
 }
 
 class $$HomeworksTableTableManager
@@ -16131,6 +16385,10 @@ class $$HomeworksTableTableManager
                 Value<String> title = const Value.absent(),
                 Value<String> kpIdsJson = const Value.absent(),
                 Value<String> itemsJson = const Value.absent(),
+                Value<String?> kpId = const Value.absent(),
+                Value<String?> batchId = const Value.absent(),
+                Value<String> status = const Value.absent(),
+                Value<DateTime?> dueAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => HomeworksCompanion(
                 id: id,
@@ -16142,6 +16400,10 @@ class $$HomeworksTableTableManager
                 title: title,
                 kpIdsJson: kpIdsJson,
                 itemsJson: itemsJson,
+                kpId: kpId,
+                batchId: batchId,
+                status: status,
+                dueAt: dueAt,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -16155,6 +16417,10 @@ class $$HomeworksTableTableManager
                 Value<String> title = const Value.absent(),
                 Value<String> kpIdsJson = const Value.absent(),
                 Value<String> itemsJson = const Value.absent(),
+                Value<String?> kpId = const Value.absent(),
+                Value<String?> batchId = const Value.absent(),
+                Value<String> status = const Value.absent(),
+                Value<DateTime?> dueAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => HomeworksCompanion.insert(
                 id: id,
@@ -16166,6 +16432,10 @@ class $$HomeworksTableTableManager
                 title: title,
                 kpIdsJson: kpIdsJson,
                 itemsJson: itemsJson,
+                kpId: kpId,
+                batchId: batchId,
+                status: status,
+                dueAt: dueAt,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

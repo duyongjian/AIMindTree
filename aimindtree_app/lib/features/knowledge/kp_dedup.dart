@@ -32,6 +32,7 @@ import '../../data/db/drift_database.dart';
 import '../../data/models/knowledge_point.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
+import '../settings/tree_behavior_settings.dart';
 
 /// 全局导航键：后台任务（T14 查重完成）没有页面上下文时，靠它弹对话窗。
 ///
@@ -386,6 +387,11 @@ Future<void> _kpDedupScan({
   required AiJobService jobs,
   void Function()? onNoCandidates,
 }) async {
+  // 受「自动知识点查重」开关控制（E）：关 → 不查重（允许重复，不打扰）。
+  if (!TreeBehaviorSettings.instance.dedupEnabled) {
+    _log.i('知识点查重：开关「自动知识点查重」已关闭，跳过本次扫描');
+    return;
+  }
   if (_kpDedupInFlight) {
     _log.i('知识点查重：已有扫描 / 任务在飞，跳过本轮触发');
     return;

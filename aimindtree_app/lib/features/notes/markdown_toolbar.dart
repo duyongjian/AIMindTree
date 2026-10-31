@@ -75,94 +75,102 @@ class MarkdownToolbar extends StatelessWidget {
     // 代码块：设计 §6.1 只在 image / divider 上禁用（表格由控制器内部忽略）。
     final bool canCode = block != null && block is! ImageBlock && block is! DividerBlock;
 
-    return Container(
-      height: 44,
-      decoration: BoxDecoration(
-        color: Colors.grey.shade100,
-        border: Border(bottom: BorderSide(color: Colors.grey.shade300)),
-      ),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        padding: padding,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            _markButton(Icons.format_bold, '加粗（**粗体文字**）', InlineMarks.bold, inlineOk),
-            _markButton(Icons.format_italic, '斜体（*斜体文字*）', InlineMarks.italic, inlineOk),
-            _markButton(Icons.code, '行内代码（`代码`）', InlineMarks.code, inlineOk),
-            _markButton(
-              Icons.strikethrough_s,
-              '删除线（~~文字~~）',
-              InlineMarks.strike,
-              inlineOk,
-            ),
-            const _ToolDivider(),
-            _headingButton(Icons.looks_one, '一级标题（# 标题）', 1, canConvert),
-            _headingButton(Icons.looks_two, '二级标题（## 标题）', 2, canConvert),
-            _headingButton(Icons.looks_3, '三级标题（### 标题）', 3, canConvert),
-            _headingButton(Icons.looks_4, '四级标题（#### 标题）', 4, canConvert),
-            _headingButton(Icons.looks_5, '五级标题（##### 标题）', 5, canConvert),
-            _headingButton(Icons.looks_6, '六级标题（###### 标题）', 6, canConvert),
-            const _ToolDivider(),
-            _typeButton(
-              icon: Icons.format_list_bulleted,
-              tooltip: '无序列表（- 列表项）',
-              type: BlockType.bulletList,
-              enabled: canConvert,
-              on: block is BulletListBlock,
-            ),
-            _typeButton(
-              icon: Icons.format_list_numbered,
-              tooltip: '有序列表（1. 列表项）',
-              type: BlockType.orderedList,
-              enabled: canConvert,
-              on: block is OrderedListBlock,
-            ),
-            _typeButton(
-              icon: Icons.format_quote,
-              tooltip: '引用（> 引文）',
-              type: BlockType.quote,
-              enabled: canConvert,
-              on: block is QuoteBlock,
-            ),
-            _typeButton(
-              icon: Icons.check_box,
-              tooltip: '任务列表（- [ ] 待办）',
-              type: BlockType.taskList,
-              enabled: canConvert,
-              on: block is TaskListBlock,
-            ),
-            const _ToolDivider(),
-            _toolButton(
-              icon: Icons.data_object,
-              tooltip: '代码块（``` 代码块 ```）',
-              onPressed: canCode ? controller.convertActiveToCode : null,
-              on: block is CodeBlock,
-              unsupported: !canCode,
-            ),
-            _toolButton(
-              icon: Icons.link,
-              tooltip: '链接（[链接文字](https://…)）',
-              onPressed: inlineOk ? () => _openLinkDialog(context) : null,
-              unsupported: !inlineOk,
-            ),
-            if (onInsertImage != null)
-              _toolButton(
-                icon: Icons.image_outlined,
-                tooltip: '插入图片（选本地图片，存入笔记附件）',
-                onPressed: onInsertImage,
+    return ExcludeFocus(
+      // 工具栏按钮是 focusable 的 `IconButton`：点击会抢走编辑器 `TextField` 的焦点，
+      // 触发焦点监听把 `_active` 清成 null，导致刚转成的块变只读、工具栏类型按钮全部
+      // 置灰（即用户反馈的「变成一级标题后选不中、无法变样式」的 bug）。把整条工具栏
+      // 排除在焦点系统之外，点击按钮就不再抢焦点 —— 编辑器焦点始终是赢家。
+      // 注：只影响「聚焦」，按钮的点击 / tooltip / 禁用态都不受影响。
+      excluding: true,
+      child: Container(
+        height: 44,
+        decoration: BoxDecoration(
+          color: Colors.grey.shade100,
+          border: Border(bottom: BorderSide(color: Colors.grey.shade300)),
+        ),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: padding,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              _markButton(Icons.format_bold, '加粗（**粗体文字**）', InlineMarks.bold, inlineOk),
+              _markButton(Icons.format_italic, '斜体（*斜体文字*）', InlineMarks.italic, inlineOk),
+              _markButton(Icons.code, '行内代码（`代码`）', InlineMarks.code, inlineOk),
+              _markButton(
+                Icons.strikethrough_s,
+                '删除线（~~文字~~）',
+                InlineMarks.strike,
+                inlineOk,
               ),
-            _toolButton(
-              icon: Icons.table_chart,
-              tooltip: '插入 2×2 表格',
-              onPressed: () => controller.insertTableBlock(rows: 2, cols: 2),
-            ),
-            _toolButton(
-              icon: Icons.horizontal_rule,
-              tooltip: '分割线（---）',
-              onPressed: controller.insertDividerBlock,
-            ),
-          ],
+              const _ToolDivider(),
+              _headingButton(Icons.looks_one, '一级标题（# 标题）', 1, canConvert),
+              _headingButton(Icons.looks_two, '二级标题（## 标题）', 2, canConvert),
+              _headingButton(Icons.looks_3, '三级标题（### 标题）', 3, canConvert),
+              _headingButton(Icons.looks_4, '四级标题（#### 标题）', 4, canConvert),
+              _headingButton(Icons.looks_5, '五级标题（##### 标题）', 5, canConvert),
+              _headingButton(Icons.looks_6, '六级标题（###### 标题）', 6, canConvert),
+              const _ToolDivider(),
+              _typeButton(
+                icon: Icons.format_list_bulleted,
+                tooltip: '无序列表（- 列表项）',
+                type: BlockType.bulletList,
+                enabled: canConvert,
+                on: block is BulletListBlock,
+              ),
+              _typeButton(
+                icon: Icons.format_list_numbered,
+                tooltip: '有序列表（1. 列表项）',
+                type: BlockType.orderedList,
+                enabled: canConvert,
+                on: block is OrderedListBlock,
+              ),
+              _typeButton(
+                icon: Icons.format_quote,
+                tooltip: '引用（> 引文）',
+                type: BlockType.quote,
+                enabled: canConvert,
+                on: block is QuoteBlock,
+              ),
+              _typeButton(
+                icon: Icons.check_box,
+                tooltip: '任务列表（- [ ] 待办）',
+                type: BlockType.taskList,
+                enabled: canConvert,
+                on: block is TaskListBlock,
+              ),
+              const _ToolDivider(),
+              _toolButton(
+                icon: Icons.data_object,
+                tooltip: '代码块（``` 代码块 ```）',
+                onPressed: canCode ? controller.convertActiveToCode : null,
+                on: block is CodeBlock,
+                unsupported: !canCode,
+              ),
+              _toolButton(
+                icon: Icons.link,
+                tooltip: '链接（[链接文字](https://…)）',
+                onPressed: inlineOk ? () => _openLinkDialog(context) : null,
+                unsupported: !inlineOk,
+              ),
+              if (onInsertImage != null)
+                _toolButton(
+                  icon: Icons.image_outlined,
+                  tooltip: '插入图片（选本地图片，存入笔记附件）',
+                  onPressed: onInsertImage,
+                ),
+              _toolButton(
+                icon: Icons.table_chart,
+                tooltip: '插入 2×2 表格',
+                onPressed: () => controller.insertTableBlock(rows: 2, cols: 2),
+              ),
+              _toolButton(
+                icon: Icons.horizontal_rule,
+                tooltip: '分割线（---）',
+                onPressed: controller.insertDividerBlock,
+              ),
+            ],
+          ),
         ),
       ),
     );
