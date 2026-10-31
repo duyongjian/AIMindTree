@@ -1,5 +1,5 @@
 # Codemagic CI/CD configuration for AIMindTree
-# Dashboard: https://codemagic.io/apps (linked to github.com/BOFHTT/AIMindTree, branch: master)
+# Dashboard: https://codemagic.io/apps (linked to github.com/BOFHT/AIMindTree, branch: master)
 # Docs: https://docs.codemagic.io/yaml/yaml/
 #
 # 注意：Flutter 工程在仓库子目录 aimindtree_app/ 下，故统一用 working_directory 切到该目录。
