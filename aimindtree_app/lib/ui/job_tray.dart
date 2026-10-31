@@ -11,7 +11,8 @@
 ///   canceled → 直接从托盘消失；``silent`` 任务（如对话检测）只留托盘行，
 ///   终态不弹 SnackBar。
 /// - **三类行要能分清**：队列任务（服务端 job，800ms 轮询推进）、交互会话
-///   （``interactive``：只是一个开着的页面，**不画进度条**，永远 running）、
+///   （``interactive``：只是一个开着的页面，**不画进度条**、**也不显示耗时**
+///   ——它没有任务耗时语义，一直涨的计时会被误读成「卡死了」；永远 running）、
 ///   后台任务（``detached``：本地执行体，自己报进度）；``offline`` 行是「服务
 ///   端还在跑、本机断了」——橙色离线标，不是失败红条。
 library;
@@ -363,9 +364,9 @@ class JobTrayState extends State<JobTray> {
                 shrinkWrap: true,
                 padding: EdgeInsets.zero,
                 children: [
-                  for (final job in active) _jobRow(context, job),
-                  for (final job in failed) _jobRow(context, job),
-                  for (final job in done) _jobRow(context, job),
+                  for (final job in active) _jobRow(context, job, active),
+                  for (final job in failed) _jobRow(context, job, active),
+                  for (final job in done) _jobRow(context, job, active),
                 ],
               ),
             ),
@@ -419,7 +420,7 @@ class JobTrayState extends State<JobTray> {
     return best;
   }
 
-  Widget _jobRow(BuildContext context, AiJob job) {
+  Widget _jobRow(BuildContext context, AiJob job, List<AiJob> active) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final isFailed = job.status == AiJobStatus.failed;
@@ -431,8 +432,23 @@ class JobTrayState extends State<JobTray> {
     // 交互会话行**不画进度条**：它的 status 永远 running（服务端压根没有这个
     // job，没有任何东西能推进它），画 `progressOrNull == null` 的不确定进度条
     // 就是在播一段永远播不完的动画。这里改成纯文字，说清楚它是什么。
+    //
+    // **也**不显示累加计时（见下方计时行的 `if (!isInteractive)`）：交互行不是
+    // 任务，没有「耗时」语义，一直涨的计时会让用户误以为「卡了很久却没在调用
+    // AI」。文案也不承诺「空闲 / 关闭即结束」——关闭页面只释放资源锁，正在进行的
+    // 生成由 runDetached 后台任务继续跑完并落库，所以写「后台任务不受影响」是陈述
+    // 事实、而非误导。老师模式：交互行锁 `kp:{id}`，该点的生成任务锁 `kp:{id}:chat`
+    // → 前缀匹配即可判断「这一点是不是真在生成」。其它入口（作业 `homework:*`、
+    // AI 助手 `agent:chat`）判断不了，就走中性文案，不承诺「空闲」以免误导。
+    final hasActiveGen = isInteractive &&
+        active.any((j) =>
+            j.id != job.id &&
+            !j.interactive &&
+            j.resourceKey.isNotEmpty &&
+            job.resourceKey.isNotEmpty &&
+            j.resourceKey.startsWith('${job.resourceKey}:'));
     final messageText = isInteractive
-        ? '会话打开中 · 关闭页面即结束'
+        ? (hasActiveGen ? '生成中 · 完成后自动落库' : '会话已打开 · 后台任务不受影响')
         : '${job.message}'
             '${(progress != null && !isDone) ? '（${(progress * 100).round()}%）' : ''}';
     final messageColor = isFailed
@@ -498,7 +514,7 @@ class JobTrayState extends State<JobTray> {
                             ?.copyWith(fontWeight: FontWeight.w600),
                       ),
                     ),
-                    Text(job.elapsedText, style: theme.textTheme.bodySmall),
+                    if (!isInteractive) Text(job.elapsedText, style: theme.textTheme.bodySmall),
                   ],
                 ),
                 const SizedBox(height: 2),

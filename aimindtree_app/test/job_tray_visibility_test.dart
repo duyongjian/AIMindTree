@@ -54,10 +54,13 @@ void main() {
       await _expand(tester);
 
       expect(tester.takeException(), isNull);
-      expect(find.text('会话打开中 · 关闭页面即结束'), findsOneWidget);
+      // 文案不再谎称「关闭页面即结束」：关闭只放资源锁，后台生成由 runDetached 继续。
+      expect(find.text('会话已打开 · 后台任务不受影响'), findsOneWidget);
       // 折叠态那条 4px 总进度条也不该出现（只有交互会话 = 没有进度可言）。
       expect(find.byType(LinearProgressIndicator), findsNothing);
       expect(find.textContaining('%'), findsNothing);
+      // 交互行也不显示累加计时（它没有任务耗时语义，一直涨会被误读成「卡死」）。
+      expect(find.textContaining(RegExp(r'^\d+s$')), findsNothing);
     });
 
     testWidgets('折叠摘要取「最新推进」的任务，而不是最早提交的', (tester) async {
