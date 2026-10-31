@@ -1401,6 +1401,20 @@ class TreeCanvasState extends State<TreeCanvas> {
                 body: c.body,
                 kind: c.kind,
                 linked: c.noteId != null,
+                // 问题7：点击由卡片自身命中（命中区 = 卡片盒），不再依赖外层
+                // 画布坐标换算，杜绝「点不中 / 有偏移」。框选/画笔/橡皮/连线
+                // 模式下不接管，交回外层手势。
+                onTap: (linking ||
+                        widget.selectionMode ||
+                        widget.penMode ||
+                        widget.eraserMode)
+                    ? null
+                    : () {
+                        if (_frontCardNodeId != c.nodeId) {
+                          setState(() => _frontCardNodeId = c.nodeId);
+                        }
+                        widget.onEditCard?.call(c);
+                      },
               ),
             ),
           // 连线上的删除按钮：**只有鼠标悬停的那条线才会渲染**（以前是每条线
@@ -1527,6 +1541,11 @@ class TreeCanvasState extends State<TreeCanvas> {
                         onScaleStart: _onScaleStart,
                         onScaleUpdate: _onScaleUpdate,
                         onScaleEnd: _onScaleEnd,
+                        // 点击命中必须用「本次点按」的场景坐标：tap 抢赢竞技场时
+                        // _onScaleStart 不会触发，沿用上次留下的 _lastTapScene
+                        // 会让命中判定偏移（问题7）。onTapDown 总能拿到真实位置。
+                        onTapDown: (d) =>
+                            _lastTapScene = _toScene(d.localPosition),
                         // 只在连线态挂 onTap，避免平时和缩放手势抢 arena。
                         onTap: linking ? _cancelLinking : _onCanvasTap,
                         child: OverflowBox(

@@ -1,7 +1,9 @@
 /// 画布上的自由文本卡片（笔记卡片 / 透明文本框）。
 ///
-/// 纯展示组件：填满父级 `Positioned` 给定的盒子（宽高由调用方按 card.w/card.h 传入），
-/// 不参与拖拽 / 点击手势 —— 这些由外层 [TreeCanvas] 在场景坐标层统一处理。
+/// 纯展示组件：填满父级 `Positioned` 给定的盒子（宽高由调用方按 card.w/card.h 传入）。
+/// 拖拽由外层 [TreeCanvas] 在场景坐标层统一处理；**点击**则由本组件自带的
+/// [GestureDetector] 直接承接（见 [onTap]）——让命中区就是卡片盒子本身，
+/// 避免依赖外层画布坐标换算带来的「点不中 / 有偏移」。
 library;
 
 import 'package:flutter/material.dart';
@@ -73,7 +75,7 @@ class CanvasTextCard extends StatelessWidget {
       ],
     );
 
-    return SizedBox.expand(
+    final box = SizedBox.expand(
       child: Container(
         clipBehavior: Clip.antiAlias,
         padding: const EdgeInsets.all(10),
@@ -99,6 +101,15 @@ class CanvasTextCard extends StatelessWidget {
               ),
         child: textChild,
       ),
+    );
+
+    // 无 onTap 时保持纯展示（拖拽/平移交外层）；有 onTap 时自带命中层，
+    // behavior: opaque 让透明文本框的整块区域也算可点。
+    if (onTap == null) return box;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: box,
     );
   }
 }

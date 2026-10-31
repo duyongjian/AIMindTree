@@ -180,6 +180,33 @@ void main() {
       expect(notFound['error'], 'not_found');
     });
 
+    test('list_tree_points：缺 tree_id 时回退当前激活树（问题2）', () async {
+      final (_, _, treeId) = await seed();
+      // 未设激活树时仍报 missing_arg（旧行为不变）。
+      final before = decode(await toolset.dispatch('list_tree_points', const {}));
+      expect(before['error'], 'missing_arg');
+
+      toolset.setActiveTree(treeId);
+      final out = decode(await toolset.dispatch('list_tree_points', const {}));
+      expect(out['tree']['id'], treeId);
+      expect(out['points'] as List, hasLength(1));
+
+      // 显式传入的 tree_id 优先于激活树：另建空树并显式指定。
+      final other = await trees.createTree('化学');
+      final otherId = (other as Success<KnowledgeTree>).value.id;
+      final explicit = decode(await toolset.dispatch(
+        'list_tree_points',
+        {'tree_id': otherId},
+      ));
+      expect(explicit['tree']['id'], otherId);
+      expect(explicit['points'] as List, isEmpty);
+
+      // 清空激活树后恢复 missing_arg。
+      toolset.setActiveTree(null);
+      final cleared = decode(await toolset.dispatch('list_tree_points', const {}));
+      expect(cleared['error'], 'missing_arg');
+    });
+
     test('get_knowledge_point / get_note：详情与正文', () async {
       final (noteId, kpId, _) = await seed();
       final p = decode(await toolset.dispatch(

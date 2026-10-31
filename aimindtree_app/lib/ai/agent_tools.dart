@@ -170,6 +170,14 @@ class AgentToolset {
   final GroupRepository? _groups;
   final AgentMemoryStore? _memory;
 
+  /// 当前激活知识树 id（由 agent_page 在切树时同步）。
+  /// 仅作 [list_tree_points] 等需要 tree_id 的只读工具的缺省回退，
+  /// 不覆盖模型显式传入的 tree_id。
+  String? _activeTreeId;
+
+  /// 同步当前激活知识树（切树时调用）。传 null 表示未选择。
+  void setActiveTree(String? treeId) => _activeTreeId = treeId;
+
   static final AppLog _log = AppLog('agent_tools');
 
   /// 工厂：从 agent_page 已持有的依赖组装（不新建连接）。
@@ -366,11 +374,13 @@ class AgentToolset {
         description: '列出某棵知识树里的知识点（id / 名称 / 类型 / 掌握度 / 定义摘要）',
         permission: AgentToolPermission.owner,
         params: const [
-          AgentToolParam('tree_id', 'string', '知识树 id（来自 list_knowledge_trees）', required: true),
+          AgentToolParam('tree_id', 'string', '知识树 id（可省略，默认当前选中的树）'),
         ],
         exec: (args) async {
-          final treeId = _strArg(args, 'tree_id');
-          if (treeId == null) return _err('missing_arg', '缺少 tree_id');
+          final treeId = _strArg(args, 'tree_id') ?? _activeTreeId;
+          if (treeId == null || treeId.isEmpty) {
+            return _err('missing_arg', '缺少 tree_id，且当前未选择知识树');
+          }
           final tree = await _trees.getTree(treeId);
           if (tree == null) return _err('not_found', '知识树不存在：$treeId');
           final ids = await _trees.memberPointIds(treeId);

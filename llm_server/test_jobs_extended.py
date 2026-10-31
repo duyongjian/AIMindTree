@@ -137,6 +137,27 @@ class WatchdogTest(unittest.TestCase):
         self.q._sweep_external()  # 已终态，不应再被扫。
         self.assertEqual(j.status, 'done')
 
+    def test_exempt_task_never_swept(self):
+        # 交互会话 / 流式会话登记时 heartbeat_s=None → deadline=None → 看门狗豁免：
+        # 没截止时间，所以无论扫多少次、过多久都不该被误杀（修复：退出页面 /
+        # LLM 慢导致 watchdog 假 failed）。
+        j = self.q.register_external(task='SESSION', label='老师模式', heartbeat_s=None)
+        self.assertIsNone(j.heartbeat_deadline)
+        for _ in range(3):
+            self.q._sweep_external()
+            self.assertEqual(j.status, 'running')
+        # 豁免任务连「上报进度」都不会被拉回看门狗（见下个用例），这里再确认
+        # 多次 sweep 后 deadline 仍是 None。
+        self.assertIsNone(j.heartbeat_deadline)
+
+    def test_report_does_not_rearm_exempt_task(self):
+        # 豁免任务上报进度时不应被「拉回」看门狗（否则仍会被超时误杀）。
+        j = self.q.register_external(task='SESSION', label='老师模式', heartbeat_s=None)
+        self.assertIsNone(j.heartbeat_deadline)
+        self.q.report_external(j.job_id, message='进度中')
+        self.assertIsNone(j.heartbeat_deadline)
+        self.assertEqual(j.stage_message, '进度中')
+
 
 class HonestProgressTest(unittest.TestCase):
     def test_start_sets_indeterminate_zero(self):

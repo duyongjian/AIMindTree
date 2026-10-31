@@ -448,6 +448,9 @@ class AiJobService {
   /// 如「同点重复开老师模式」）；② 合成一个 running 态的 [AiJob]
   /// （``interactive=true``）进托盘，全局可见「会话在进行、占了哪个锁、
   /// 已进行多久」。返回会话 id（[releaseInteractive] 用）。
+  ///
+  /// 幂等：同 key 已占 → 复用既有行（不再建第二行），避免重复托盘行 +
+  /// 旧行孤儿化泄漏（一个入口被连点两次也不会炸）。
   String holdInteractive(
     String resourceKey, {
     required String label,
@@ -455,6 +458,8 @@ class AiJobService {
   }) {
     final key = resourceKey.trim();
     if (key.isEmpty) return '';
+    final existing = _interactive[key];
+    if (existing != null && existing.isNotEmpty) return existing;
     final id = 'ix-$_uuid()';
     _interactive[key] = id;
     final job = AiJob(
@@ -483,9 +488,24 @@ class AiJobService {
   }
 
   /// 交互通道放锁 + 撤托盘行（sessionId 由 [holdInteractive] 返回）。
+  ///
+  /// ⚠️ 必须同步清掉 [_locks] 里这一行：否则 [holdInteractive] 占的 `kp:{id}`
+  /// / `homework:...` 锁会残留成「僵尸锁」，下次打开同一入口被 [isLocked]
+  /// 拦下、报「该知识点的老师模式会话已打开」（P1 根因：退出页面后锁没清）。
   void releaseInteractive(String sessionId) {
     if (sessionId.isEmpty) return;
-    _interactive.removeWhere((_, holder) => holder == sessionId);
+    // 先按 holder 反查 resourceKey，再清锁 + 清交互表，避免留下僵尸锁。
+    String? lockedKey;
+    _interactive.removeWhere((k, holder) {
+      if (holder == sessionId) {
+        lockedKey = k;
+        return true;
+      }
+      return false;
+    });
+    if (lockedKey != null && lockedKey!.isNotEmpty) {
+      _locks.remove(lockedKey);
+    }
     final job = _jobs.remove(sessionId);
     if (job != null) {
       if (job.serverJobId != null) {

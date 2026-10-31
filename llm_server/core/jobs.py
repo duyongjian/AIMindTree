@@ -632,10 +632,14 @@ class JobQueue:
         else:
             job_id = _new_job_id()
 
+        # heartbeat_s=None → 看门狗豁免（无截止时间）。用于「交互会话 / 流式
+        # 会话」这类由 App 本地 SSE 流驱动、不靠心跳续命、且可能跑很久的任务：
+        # 退出页面不中断、LLM 慢也不该被误杀（方案 B）。非空 → 正常看门狗
+        # （默认 30s），用于 App 后台体等「App 被强杀应超时标 failed」的任务。
         try:
-            hb = max(5.0, float(heartbeat_s)) if heartbeat_s is not None else self._external_heartbeat_s
+            hb = None if heartbeat_s is None else max(5.0, float(heartbeat_s))
         except (TypeError, ValueError):
-            hb = self._external_heartbeat_s
+            hb = None
 
         job = Job(
             task=task,
@@ -648,7 +652,8 @@ class JobQueue:
         job.status = 'running'
         job.stage_message = '进行中…'
         job.started_at = time.time()
-        job.heartbeat_deadline = time.monotonic() + hb
+        # 豁免任务 deadline=None：_sweep_external 跳过它；非空才进看门狗。
+        job.heartbeat_deadline = None if hb is None else time.monotonic() + hb
         self._seq += 1
         job.seq = self._seq
         self._external[job.job_id] = job
@@ -697,8 +702,10 @@ class JobQueue:
                 job.stage_index = max(0, int(stage_index) - 1)
             except (TypeError, ValueError):
                 pass
-        # 续心跳：重置截止时间。
-        job.heartbeat_deadline = time.monotonic() + self._external_heartbeat_s
+        # 续心跳：仅当该任务配置了看门狗（deadline 非 None）才重置截止时间。
+        # 看门狗豁免的任务（heartbeat_s=None 登记）上报只更新进度，不被拉回看门狗。
+        if job.heartbeat_deadline is not None:
+            job.heartbeat_deadline = time.monotonic() + self._external_heartbeat_s
         job.touch()
         return job
 

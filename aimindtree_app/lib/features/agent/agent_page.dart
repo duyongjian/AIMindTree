@@ -81,6 +81,7 @@ class AgentDetectedItem {
     this.definition = '',
     this.reason = '',
     this.weak = false,
+    this.extension = false,
   });
 
   final String name;
@@ -89,6 +90,9 @@ class AgentDetectedItem {
 
   /// true = 薄弱点（用户明显不会）；false = 需要的知识点（应掌握但未在树里）。
   final bool weak;
+
+  /// true = 树外延伸（同一知识体系里树还没有、AI 建议补进树）。
+  final bool extension;
 
   String toMarkdown() => '# $name\n\n$definition';
 
@@ -300,6 +304,7 @@ class AgentPageState extends State<AgentPage> {
         final idx = trees.indexWhere((t) => t.id == prevId);
         _activeTree = idx == -1 ? null : trees[idx];
       }
+      _tools.setActiveTree(_activeTree?.id);
     });
   }
 
@@ -711,10 +716,17 @@ class AgentPageState extends State<AgentPage> {
     String memoryCtx = '',
     String sessionCtx = '',
   }) {
-    final ctx = _activeTree == null
+    final tree = _activeTree;
+    final ctx = tree == null
         ? ''
-        : '（你正在帮用户在知识树「${_activeTree!.name}」里补全知识点，'
-            '回答时请围绕这张树的脉络展开。）\n\n';
+        : '（当前知识树：「${tree.name}」，id=${tree.id}。'
+            '查看这棵树的知识点可直接调用 list_tree_points，'
+            'tree_id 可省略（默认即当前树）或填 ${tree.id}，'
+            '无需再先调用 list_knowledge_trees 查 id。'
+            '回答时请围绕这张树的脉络展开。）\n'
+            '（若用户想学这张树里还没有、但属于同一知识体系的内容，'
+            '请结合已有知识点的脉络做延伸讲解，明确指出哪些是树外补充，'
+            '不要因为树里没有就拒答。）\n\n';
     final b = StringBuffer()
       ..write(ctx)
       ..write(_kToolProtocol)
@@ -951,6 +963,45 @@ class AgentPageState extends State<AgentPage> {
     if (mounted) setState(() => _detecting = false);
   }
 
+  /// 问题3：基于当前树已有知识点，让 AI 梳理「树外延伸」概念
+  /// （同一知识体系里树还没有、值得补的），结果并入检测面板可直接勾选入树。
+  Future<void> _runExtension() async {
+    final tree = _activeTree;
+    if (tree == null) {
+      _toast('请先在上方选择知识树，再让 AI 梳理树外延伸');
+      return;
+    }
+    if (_detecting) return;
+    setState(() => _detecting = true);
+    _toast('正在梳理「${tree.name}」的树外延伸…');
+    final ids = await widget.service.trees.memberPointIds(tree.id);
+    final pts = await widget.service.repo.pointsByIds(ids);
+    final names = pts.map((p) => p.name).join('、');
+    final prompt = '用户正在构建知识树「${tree.name}」，目前树里只有这些知识点：'
+        '${names.isEmpty ? '（空树）' : names}。\n'
+        '请基于这张树的主题与已有脉络，列出 3-8 个「树里还没有、但属于同一知识体系、'
+        '值得补进来深入学」的延伸概念（可以是现有知识点的前置基础、并列分支或后续进阶）。\n'
+        '只输出一个 JSON 对象，不要任何解释或代码块标记：\n'
+        '{"extension":[{"name":"","definition":"","reason":""}]}\n'
+        'reason 要说明它和树里哪个已有知识点相关、为什么值得延伸。';
+    final buf = StringBuffer();
+    try {
+      await for (final c in widget.service.ai.chat(AiTask.t5Ask, prompt)) {
+        if (c.delta != null) buf.write(c.delta);
+      }
+    } on Object catch (e) {
+      _log.w('树外延伸失败（忽略）：$e');
+      if (mounted) setState(() => _detecting = false);
+      _toast('延伸梳理失败：$e');
+      return;
+    }
+    final before = _detected.length;
+    _applyDetection(buf.toString());
+    if (mounted && _detected.length == before) {
+      _toast('这次没梳理出新概念，可以换个说法再试');
+    }
+  }
+
   List<AgentDetectedItem> _parseDetection(String raw) {
     var s = raw.trim();
     // 去掉可能的 ```json 围栏。
@@ -964,7 +1015,7 @@ class AgentPageState extends State<AgentPage> {
     try {
       final map = jsonDecode(s.substring(start, end + 1)) as Map<String, dynamic>;
       final out = <AgentDetectedItem>[];
-      void take(String key, bool weak) {
+      void take(String key, bool weak, {bool extension = false}) {
         final list = map[key];
         if (list is! List) return;
         for (final e in list) {
@@ -976,12 +1027,14 @@ class AgentPageState extends State<AgentPage> {
             definition: (e['definition'] as String?)?.trim() ?? '',
             reason: (e['reason'] as String?)?.trim() ?? '',
             weak: weak,
+            extension: extension,
           ));
         }
       }
 
       take('needed', false);
       take('weak', true);
+      take('extension', false, extension: true);
       return out;
     } on Object catch (e) {
       _log.w('检测 JSON 解析失败（忽略）：$e');
@@ -1062,6 +1115,7 @@ class AgentPageState extends State<AgentPage> {
     // 匹配不上任何菜单项，DropdownButton 会断言崩溃）。
     final idx = _trees.indexWhere((t) => t.id == created.id);
     setState(() => _activeTree = idx == -1 ? created : _trees[idx]);
+    _tools.setActiveTree(_activeTree?.id);
     return created;
   }
 
@@ -1098,6 +1152,7 @@ class AgentPageState extends State<AgentPage> {
             await _createTreeInline();
           } else {
             setState(() => _activeTree = v);
+            _tools.setActiveTree(v.id);
           }
         },
       ),
@@ -1111,6 +1166,13 @@ class AgentPageState extends State<AgentPage> {
         appBar: AppBar(
           title: const Text('AI 助手'),
           actions: [
+            // 问题3：基于当前树梳理「树外延伸」概念（需先选树）。
+            IconButton(
+              tooltip: '延伸讲解（树外拓展）',
+              icon: const Icon(Icons.school_outlined),
+              onPressed:
+                  _activeTree == null || _detecting ? null : _runExtension,
+            ),
             // 设置入口：记忆开关 / 查看 / 清空。
             IconButton(
               tooltip: '设置',
@@ -1184,8 +1246,9 @@ class AgentPageState extends State<AgentPage> {
       );
 
   Widget _buildDetectPanel() {
-    final needed = _detected.where((d) => !d.weak).toList();
+    final needed = _detected.where((d) => !d.weak && !d.extension).toList();
     final weak = _detected.where((d) => d.weak).toList();
+    final extension = _detected.where((d) => d.extension).toList();
     final expanded = _panelExpanded;
     // Container 只画边框，背景色交给内层 Material：ListTile（勾选行）的墨水
     // 反馈需要就近的 Material 祖先，直接给带底色的 Container 会触发
@@ -1263,6 +1326,16 @@ class AgentPageState extends State<AgentPage> {
               child: ListView(
                 padding: const EdgeInsets.symmetric(horizontal: 8),
                 children: [
+                  if (extension.isNotEmpty) ...[
+                    const _SectionLabel(text: '树外延伸（可补进树）', weak: false),
+                    for (final d in extension)
+                      _DetectTile(
+                        item: d,
+                        picked: _picked,
+                        onTap: _toggle,
+                        onRemove: _removeDetected,
+                      ),
+                  ],
                   if (weak.isNotEmpty) ...[
                     const _SectionLabel(text: '薄弱点（应重点补）', weak: true),
                     for (final d in weak)

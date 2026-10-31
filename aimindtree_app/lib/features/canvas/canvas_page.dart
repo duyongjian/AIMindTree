@@ -428,6 +428,8 @@ class CanvasPageState extends State<CanvasPage> {
     final bodyCtl = TextEditingController(text: vm.body);
     final action = await showDialog<String?>(
       context: context,
+      // 问题6：录入型弹框不让点外部误关，避免输入内容/流程被直接丢掉。
+      barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSt) => AlertDialog(
           title: Text(isNoteCard ? '编辑笔记卡片' : '编辑文本框'),
@@ -883,6 +885,8 @@ class CanvasPageState extends State<CanvasPage> {
     final query = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
+      // 问题6：多选加入树是录入流程，禁止点外部误关（有显式「取消」）。
+      barrierDismissible: false,
       builder: (ctx) {
         var keyword = '';
         return StatefulBuilder(
@@ -998,6 +1002,8 @@ class CanvasPageState extends State<CanvasPage> {
 
     final created = await showDialog<KnowledgePoint>(
       context: context,
+      // 问题6：新增知识点是录入流程，禁止点外部误关（有显式「取消」）。
+      barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSt) => AlertDialog(
           title: const Text('新建知识点'),
@@ -1129,6 +1135,8 @@ class CanvasPageState extends State<CanvasPage> {
 
     final saved = await showDialog<bool>(
       context: context,
+      // 问题6：编辑知识点是录入流程，禁止点外部误关（有显式「取消」）。
+      barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSt) => AlertDialog(
           title: const Text('编辑知识点'),
@@ -1413,6 +1421,8 @@ class CanvasPageState extends State<CanvasPage> {
     final query = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
+      // 问题6：跨树多选加入是录入流程，禁止点外部误关（有显式「取消」）。
+      barrierDismissible: false,
       builder: (ctx) {
         var keyword = '';
         return StatefulBuilder(
@@ -1536,11 +1546,14 @@ class CanvasPageState extends State<CanvasPage> {
   }
 
   /// 自动连线（B2：默认走队列，提交即返回；同步路径保留）。
-  Future<void> _autoLink() async {
+  ///
+  /// [force] = true 表示用户在画布上手动点「自动连线」：手动操作不受
+  /// 「自动连线」开关约束（该开关只管 AI 链式自动连线）。
+  Future<void> _autoLink({bool force = false}) async {
     final tree = _selectedTree;
     if (tree == null) return;
-    // 受「自动连线」开关控制（E）：关 → 不自动建立边（满足默认只查重、不连线）。
-    if (!TreeBehaviorSettings.instance.autoLinkEnabled) return;
+    // 受「自动连线」开关控制（E）：关 → AI 链式路径不自动建立边。
+    if (!force && !TreeBehaviorSettings.instance.autoLinkEnabled) return;
     if (!kAiJobQueueEnabled) {
       await _autoLinkSync(tree);
       return;
@@ -1629,11 +1642,12 @@ class CanvasPageState extends State<CanvasPage> {
   ///
   /// 决策：T3 的 inputs 仍用**全树**上下文（[AutoGraphService.linkInputsFor]），因为模型
   /// 需要全树信息才推断得准；只在落库时过滤两端都在集合内的边（需求 ②）。
-  Future<void> _autoLinkSelected() async {
+  Future<void> _autoLinkSelected({bool force = false}) async {
     final tree = _selectedTree;
     if (tree == null) return;
-    // 受「自动连线」开关控制（E）：关 → 不自动建立边。
-    if (!TreeBehaviorSettings.instance.autoLinkEnabled) return;
+    // 受「自动连线」开关控制（E）：关 → AI 链式路径不自动建立边。
+    // [force] = true 为用户手动点选，不受开关约束。
+    if (!force && !TreeBehaviorSettings.instance.autoLinkEnabled) return;
     if (_selectedKpIds.length < 2) {
       _toast('请先框选至少 2 个知识点（先开「框选模式」）再局部连线');
       return;
@@ -2801,6 +2815,8 @@ class CanvasPageState extends State<CanvasPage> {
     var selected = _SupplementMode.manual; // 默认 1：不新建笔记
     return showDialog<_SupplementMode>(
       context: context,
+      // 问题6：补前置的入库方式是多步流程，禁止点外部误关（有显式「取消」）。
+      barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSt) => AlertDialog(
           title: const Text('补前置入库：笔记归属'),
@@ -2936,6 +2952,8 @@ class CanvasPageState extends State<CanvasPage> {
     final controller = TextEditingController(text: initial);
     return showDialog<String>(
       context: context,
+      // 问题6：命名弹框有输入内容，禁止点外部误关（有显式「取消」）。
+      barrierDismissible: false,
       builder: (ctx) => AlertDialog(
         title: Text(title),
         content: TextField(
@@ -3116,28 +3134,17 @@ class CanvasPageState extends State<CanvasPage> {
           _toolbarMenuItem(
             icon: Icons.auto_fix_high,
             // 原「自动布局」仅改 label；其 onTap 实为 _autoLink（T3 前置连线）。
+            // 手动点选不受「自动连线」开关约束（开关只管 AI 链式）。
             label: '自动连线',
             enabled: hasTree,
-            onTap: () {
-              if (!TreeBehaviorSettings.instance.autoLinkEnabled) {
-                _toast('自动连线已关闭：请在「设置 → 知识树行为」中开启');
-                return;
-              }
-              _autoLink();
-            },
+            onTap: () => _autoLink(force: true),
           ),
           _toolbarMenuItem(
             icon: Icons.hub_outlined,
             label: '局部连线',
             // 少于 2 个点无从连线（需至少 2 个框选知识点）。
             enabled: hasTree && _selectedKpIds.length >= 2,
-            onTap: () {
-              if (!TreeBehaviorSettings.instance.autoLinkEnabled) {
-                _toast('自动连线已关闭：请在「设置 → 知识树行为」中开启');
-                return;
-              }
-              _autoLinkSelected();
-            },
+            onTap: () => _autoLinkSelected(force: true),
           ),
         ],
       ),
