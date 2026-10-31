@@ -8,7 +8,8 @@
 /// - **开关**：``kAiJobQueueEnabled=false`` → 所有 ``submit`` 返回 null，
 ///   调用方退回原同步阻塞路径（零数据迁移回滚，方案 §8.4）；
 /// - **降级**：提交抛异常（服务没起）→ 调用方自行决定同步兜底或报错；
-///   轮询连续失败 5 次 → 标 ``failed(网络中断)``；轮到 404 → 标
+///   轮询连续失败 5 次 → 进**离线态**（``offline=true``、锁继续持有、5s 固定
+///   间隔一直重试到恢复，**不判终态**）；轮到 404 → 标
 ///   ``failed(服务已重启，请重试)``（方案 §8.2/8.3）；
 /// - **密钥边界**：只走本地 ``127.0.0.1:8787``，请求体不带任何密钥字段。
 library;
@@ -37,8 +38,17 @@ const List<Duration> kAiJobPollBackoff = <Duration>[
   Duration(seconds: 5),
 ];
 
-/// 连续轮询失败上限 → 标 ``failed(网络中断)``。
+/// 连续轮询失败上限 → 进**离线态**（不是失败）。
+///
+/// 判死会把「网络抖一下」变成「任务没了 + 锁释放 + 重提 409」的假失败：
+/// 服务端那边任务其实还在跑。所以达上限只改「怎么等」，不改「还在不在」。
 const int kAiJobMaxPollFailures = 5;
+
+/// 离线态的重试间隔：不再退避，固定 5s 一直试到恢复或服务端明确 404。
+const Duration kAiJobOfflineRetryInterval = Duration(seconds: 5);
+
+/// 离线态固定文案（托盘原样展示；恢复后由服务端快照覆盖）。
+const String kAiJobOfflineMessage = '与服务端失联，重试中…';
 
 /// App 侧终态保留条数（托盘历史；服务端另有 200 条环）。
 const int kAiJobMaxRecent = 50;
@@ -139,6 +149,12 @@ class AiJob {
   /// 结果由执行体写库 —— **页面销毁不影响它跑完**。
   final bool detached;
 
+  /// 服务端**外部任务** id（[AiJobService.registerExternal] 登记后回填）。
+  /// 用于让服务端持有这个 App 本地驱动任务的状态实体 + 心跳看门狗
+  /// （App 被强杀 → 服务端超时标 failed，不再「人間蒸发」）。空 = 未登记
+  /// （老服务不支持 / 服务没起，本地流程不受影响）。
+  String? serverJobId;
+
   /// 托盘「取消」调用的中断回调（交互会话 / 后台任务用；队列任务走服务端）。
   VoidCallback? interrupt;
 
@@ -165,6 +181,19 @@ class AiJob {
   bool retryable = false;
   DateTime submittedAt = DateTime.now();
   DateTime? startedAt;
+
+  /// 终态落定时刻（[AiJobService._onTerminal] 写入）。
+  ///
+  /// 托盘据此把 done 行**再保留 10 秒**（``kJobTrayDoneVisible``）—— 用户回头
+  /// 才看得见「刚才那个成了没有」，否则 done 一落地行就消失，等于没有反馈。
+  DateTime? finishedAt;
+
+  /// 轮询连续失败达上限后的「离线」标记。
+  ///
+  /// **任务仍在服务端跑**，只是本机暂时拿不到快照：true 时托盘显示橙色离线标
+  /// （不是失败红条、不给重试按钮）、资源锁继续持有、轮询以
+  /// [kAiJobOfflineRetryInterval] 固定 5s 继续重试；任一次成功即恢复。
+  bool offline = false;
 
   bool get isActive => status.isActive;
 
@@ -193,7 +222,10 @@ class AiJob {
       percent = ((stage['percent'] as num?)?.toDouble() ?? 0) / 100.0;
       message = (stage['message'] as String?) ?? message;
     }
-    cancelRequested = json['cancel_requested'] == true;
+    // 「用户点过取消」是**单调闩锁**：服务端可能不回显 cancel_requested，
+    // 而 T1/T3 这类不可中断的任务被取消后仍会一路跑成 done —— 只有记住
+    // 这个闩锁，终态文案才不会误报「已完成」（见 job_tray 的 _onTerminal）。
+    if (json['cancel_requested'] == true) cancelRequested = true;
     final res = json['result'];
     result = res is Map ? Map<String, dynamic>.from(res) : null;
     final err = json['error'];
@@ -349,6 +381,9 @@ class AiJobService {
     try {
       final json = await _post('/v1/jobs/$jobId/cancel', const <String, dynamic>{});
       job.applyJson(json);
+      // 服务端对 T1/T3 这类任务**不可中断**：cancel 只登记，任务会一路跑成
+      // done。本地把闩锁按下，终态文案才敢说「该任务类型不支持中途取消」。
+      if (job.isActive) job.cancelRequested = true;
       if (!job.isActive) _onTerminal(job);
       _notify();
     } on Object catch (e) {
@@ -422,7 +457,7 @@ class AiJobService {
     if (key.isEmpty) return '';
     final id = 'ix-$_uuid()';
     _interactive[key] = id;
-    _jobs[id] = AiJob(
+    final job = AiJob(
       id: id,
       taskCode: 'SESSION',
       label: label,
@@ -433,6 +468,16 @@ class AiJobService {
       ..status = AiJobStatus.running
       ..message = '会话进行中'
       ..interrupt = onCancel;
+    _jobs[id] = job;
+    if (key.isNotEmpty) _locks[key] = id;
+    // 服务端登记外部任务（让托盘/管理后台能看见这个会话 + 心跳看门狗兜底）。
+    // 失败（老服务 / 服务没起）只影响服务端可观测性，不动本地流程。
+    unawaited(
+      registerExternal(task: 'SESSION', label: label, resourceKey: key)
+          .then((sid) {
+        if (sid != null) job.serverJobId = sid;
+      }),
+    );
     _notify();
     return id;
   }
@@ -441,7 +486,13 @@ class AiJobService {
   void releaseInteractive(String sessionId) {
     if (sessionId.isEmpty) return;
     _interactive.removeWhere((_, holder) => holder == sessionId);
-    if (_jobs.remove(sessionId) != null) _notify();
+    final job = _jobs.remove(sessionId);
+    if (job != null) {
+      if (job.serverJobId != null) {
+        unawaited(finishExternal(job.serverJobId!, status: 'canceled'));
+      }
+      _notify();
+    }
   }
 
   /// 更新交互会话的托盘文案（如「正在生成讲解…」↔「会话进行中」）。
@@ -496,6 +547,13 @@ class AiJobService {
     if (key.isNotEmpty) _locks[key] = job.id;
     final task = DetachedTask._(this, job);
     job.interrupt = task._interruptFromTray;
+    // 服务端登记外部任务（看门狗兜底：App 被强杀也能超时标 failed）。
+    unawaited(
+      registerExternal(task: 'BACKGROUND', label: label, resourceKey: key)
+          .then((sid) {
+        if (sid != null) job.serverJobId = sid;
+      }),
+    );
     _notify();
     _log.i('已登记后台任务 ${job.id}（$label）');
     unawaited(_runDetachedBody(task, body));
@@ -533,7 +591,85 @@ class AiJobService {
       // 先叫醒等待方再走终态广播：等的人要的是「可以继续了」。
       if (!task._done.isCompleted) task._done.complete();
     }
+    if (job.serverJobId != null) {
+      final status = job.status == AiJobStatus.failed
+          ? 'failed'
+          : job.status == AiJobStatus.canceled
+              ? 'canceled'
+              : 'done';
+      unawaited(finishExternal(
+        job.serverJobId!,
+        status: status,
+        result: job.result,
+        message: job.doneMessage ?? job.message,
+      ));
+    }
     _onTerminal(job);
+  }
+
+  // ==================== 外部任务登记（服务端可观测 + 心跳看门狗） ====================
+
+  /// 向服务端登记一个**外部驱动**任务，拿回服务端 job_id（回填到
+  /// [AiJob.serverJobId]）。App 本地的后台体 / 交互会话 / 流式会话经此在
+  /// 服务端留下状态实体，心跳看门狗据此判断「客户端是否还活着」。
+  ///
+  /// 失败（老服务不支持 / 服务没起）一律返回 null，**绝不**影响本地流程。
+  Future<String?> registerExternal({
+    required String task,
+    required String label,
+    String resourceKey = '',
+    double? heartbeatS,
+  }) async {
+    try {
+      final json = await _post('/v1/jobs/register', <String, dynamic>{
+        'task': task,
+        'label': label,
+        if (resourceKey.isNotEmpty) 'resource_key': resourceKey,
+        if (heartbeatS != null) 'heartbeat_s': heartbeatS,
+      });
+      final id = json['job_id'];
+      return id is String && id.isNotEmpty ? id : null;
+    } on Object catch (e) {
+      _log.w('外部任务登记失败（$task/$label）：$e');
+      return null;
+    }
+  }
+
+  /// 上报外部任务进度（同时续服务端心跳）。失败静默。
+  Future<void> reportExternal(
+    String serverJobId, {
+    String? message,
+    double? percent,
+  }) async {
+    if (serverJobId.isEmpty) return;
+    try {
+      await _post('/v1/jobs/$serverJobId/progress', <String, dynamic>{
+        if (message != null) 'message': message,
+        if (percent != null)
+          'percent': (percent * 100).clamp(0, 100).round(),
+      });
+    } on Object catch (e) {
+      _log.w('外部任务进度上报失败（$serverJobId）：$e');
+    }
+  }
+
+  /// 外部任务终态（done / failed / canceled）。失败静默。
+  Future<void> finishExternal(
+    String serverJobId, {
+    required String status,
+    Map<String, dynamic>? result,
+    String? message,
+  }) async {
+    if (serverJobId.isEmpty) return;
+    try {
+      await _post('/v1/jobs/$serverJobId/finish', <String, dynamic>{
+        'status': status,
+        if (result != null) 'result': result,
+        if (message != null) 'message': message,
+      });
+    } on Object catch (e) {
+      _log.w('外部任务终态失败（$serverJobId/$status）：$e');
+    }
   }
 
   // ==================== 查询 ====================
@@ -558,6 +694,8 @@ class AiJobService {
       var adopted = 0;
       for (final raw in list) {
         if (raw is! Map) continue;
+        // 外部任务（App 本地驱动）不收养：避免和本地已存在的 ix-/bg- 行重复显示。
+        if ((raw['external'] as bool?) == true) continue;
         final id = (raw['job_id'] as String?) ?? '';
         if (id.isEmpty || _jobs.containsKey(id)) continue;
         final job = AiJob.fromJson(Map<String, dynamic>.from(raw));
@@ -587,8 +725,22 @@ class AiJobService {
     if (job == null || !job.isActive) return;
     try {
       final json = await _get('/v1/jobs/$jobId');
+      final wasOffline = job.offline;
       job.applyJson(json);
       _failCount[jobId] = 0;
+      if (wasOffline) {
+        // 恢复：退出离线态 → 回到 800ms 正常轮询（下面 isActive 分支照旧）。
+        job.offline = false;
+        if (job.message == kAiJobOfflineMessage) {
+          job.message = '连接已恢复，继续推进…';
+        }
+        _log.i('轮询已恢复（$jobId）');
+      }
+      // 用户点过取消、但该任务类型不支持中断（服务端会一路跑成 done）：
+      // 行内先说清楚，终态 SnackBar 由托盘按 cancelRequested 换词。
+      if (job.status == AiJobStatus.done && job.cancelRequested) {
+        job.message = '已结束（该任务类型不支持中途取消）';
+      }
       if (!job.isActive) {
         _onTerminal(job);
       }
@@ -608,11 +760,21 @@ class AiJobService {
     }
   }
 
+  /// 轮询失败处理：未达上限先按 [kAiJobPollBackoff] 退避；达上限后**不判死**，
+  /// 转离线态（保住托盘行、保住资源锁），以 [kAiJobOfflineRetryInterval] 固定
+  /// 5s 一直重试到恢复 —— 服务端那边任务还在跑，App 这边凭什么替它判终态。
   void _scheduleBackoff(AiJob job) {
     final n = (_failCount[job.id] ?? 0) + 1;
     _failCount[job.id] = n;
     if (n >= kAiJobMaxPollFailures) {
-      _markFailed(job, '网络中断（连续 $n 次轮询失败）', code: 'network_lost');
+      if (!job.offline) {
+        // percent 原样保留：网络断了不代表进度回退，别把用户看到的进度清零。
+        job.offline = true;
+        job.message = kAiJobOfflineMessage;
+        _log.w('轮询连续失败 $n 次（${job.id}）→ 离线重试；行与锁保留');
+        _notify();
+      }
+      _timers[job.id] = Timer(kAiJobOfflineRetryInterval, () => _poll(job.id));
       return;
     }
     final delay = kAiJobPollBackoff[(n - 1).clamp(0, kAiJobPollBackoff.length - 1)];
@@ -628,6 +790,9 @@ class AiJobService {
   }
 
   void _onTerminal(AiJob job) {
+    // 终态落定时刻：托盘据此把 done 行再保留 10 秒（见 job_tray 的可见集合）。
+    job.finishedAt = DateTime.now();
+    job.offline = false; // 终态优先：离线标不能挂在一条已结束的行上。
     _timers.remove(job.id)?.cancel();
     _failCount.remove(job.id);
     // 锁释放：终态即放；done 且 keepLockOnDone（复合流水线中间段）不放，
@@ -803,6 +968,12 @@ class DetachedTask {
     if (percent != null) job.percent = percent.clamp(0.0, 1.0);
     if (stageIndex != null) job.stageIndex = stageIndex;
     if (stageTotal != null) job.stageTotal = stageTotal;
+    // 同步续服务端心跳（让看门狗知道这个后台任务还活着）。
+    if (job.serverJobId != null) {
+      unawaited(
+        _service.reportExternal(job.serverJobId!, message: message, percent: percent),
+      );
+    }
     _service._notify();
   }
 

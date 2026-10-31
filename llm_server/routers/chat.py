@@ -38,6 +38,36 @@ def _new_conversation_id() -> str:
     return f'conv_{uuid.uuid4().hex[:20]}'
 
 
+def _external_target(queue, job_id) -> 'Job | None':
+    """若 ``job_id`` 指向一个**外部登记**任务则返回它，否则 None（不下沉到队列任务）。"""
+    if queue is None or not isinstance(job_id, str) or not job_id.strip():
+        return None
+    job = queue.get(job_id.strip())
+    if job is None or not getattr(job, 'external', False):
+        return None
+    return job
+
+
+def _ext_heartbeat(queue, jid, msg: str) -> None:
+    """给外部任务续心跳（失败仅告警，绝不中断会话流）。"""
+    if not queue or not jid:
+        return
+    try:
+        queue.report_external(jid, message=msg)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning('外部任务 %s 心跳上报失败：%s', jid, exc)
+
+
+def _ext_finish(queue, jid, *, status: str, result=None, error=None) -> None:
+    """给外部任务标终态（失败仅告警）。"""
+    if not queue or not jid:
+        return
+    try:
+        queue.finish_external(jid, status=status, result=result, error=error)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning('外部任务 %s 终态失败：%s', jid, exc)
+
+
 def _load_prompt_with_variant_fallback(state, task_code: str, variant: str | None):
     """装载提示词，**variant 未命中时回退到主形态**。
 
@@ -100,9 +130,16 @@ async def chat(request: Request) -> JSONResponse | StreamingResponse:
     if not bool(body.get('stream', True)):
         return JSONResponse(await chat_blocking_core(state, body))
 
+    # 外部任务收养：若 body 带 job_id 且对应一个已登记的外部任务，
+    # 本次 SSE 会话会在开始 / 结束时续心跳 / 标终态（看门狗据此判断存活）。
+    ext_queue = getattr(state, 'jobs', None)
+    ext_jid = (body.get('job_id') if isinstance(body, dict) else None)
+    ext_jid = ext_jid.strip() if isinstance(ext_jid, str) else None
+    ext = (ext_queue, ext_jid) if _external_target(ext_queue, ext_jid) else None
+
     resolved = _resolve_chat(state, body)
     return StreamingResponse(
-        _sse(**resolved),
+        _sse(**resolved, external=ext),
         media_type='text/event-stream',
         headers={
             'Cache-Control': 'no-cache',
@@ -173,9 +210,26 @@ def _resolve_chat(state, body: dict) -> dict:
 
 async def chat_blocking_core(state, body: dict) -> dict:
     """``stream:false``：一次性返回 payload dict（HTTP 端点与 job worker 共用）。"""
+    # 外部任务收养：带 job_id 且为已登记外部任务时，过程中心跳、结束标终态。
+    ext_jid = (body.get('job_id') if isinstance(body, dict) else None)
+    ext_jid = ext_jid.strip() if isinstance(ext_jid, str) else None
+    queue = getattr(state, 'jobs', None)
+    if _external_target(queue, ext_jid):
+        try:
+            queue.report_external(ext_jid, message='生成中…')
+        except Exception as exc:  # noqa: BLE001
+            _log.warning('外部任务 %s 心跳上报失败：%s', ext_jid, exc)
+
     resolved = _resolve_chat(state, body)
     resolved.pop('variant', None)  # _blocking 不关心 variant
-    return await _blocking(**resolved)
+    result = await _blocking(**resolved)
+
+    if _external_target(queue, ext_jid):
+        try:
+            queue.finish_external(ext_jid, status='done', result=result)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning('外部任务 %s 终态失败：%s', ext_jid, exc)
+    return result
 
 
 async def _blocking(backend, messages, *, temperature, max_tokens, timeout_s, model,
@@ -223,11 +277,20 @@ async def _blocking(backend, messages, *, temperature, max_tokens, timeout_s, mo
 
 async def _sse(backend, messages, *, temperature, max_tokens, timeout_s, model,
                need_json, conversation_id, backend_name, task_code, variant,
-               input_chars=0):
-    """SSE 生成器：逐条 ``data: {...}\\n\\n``。"""
+               input_chars=0, external=None):
+    """SSE 生成器：逐条 ``data: {...}\\n\\n``。
+
+    ``external`` 为 ``(queue, job_id)`` 元组（来自 ``/v1/chat`` 的 ``job_id``
+    字段且已校验为外部任务）：非空时开始与结束时续心跳 / 标终态，让看门狗能判断
+    该流式会话是否还活着。
+    """
+    ext_queue = external[0] if isinstance(external, (tuple, list)) and len(external) == 2 else None
+    ext_jid = external[1] if ext_queue is not None else None
     started = time.time()
     buffer: list[str] = []
     try:
+        if ext_jid:
+            _ext_heartbeat(ext_queue, ext_jid, '生成中…')
         async for delta in backend.stream_complete(
             messages,
             temperature=temperature,
@@ -253,6 +316,15 @@ async def _sse(backend, messages, *, temperature, max_tokens, timeout_s, model,
             latency_ms,
             len(content),
         )
+        if ext_jid:
+            _ext_finish(ext_queue, ext_jid, status='done', result={
+                'content': content,
+                'parsed': parsed,
+                'conversation_id': conversation_id,
+                'backend': backend_name,
+                'model_id': backend.model_id(model),
+                'latency_ms': latency_ms,
+            })
         yield _line(
             {
                 'done': True,
@@ -290,6 +362,8 @@ async def _sse(backend, messages, *, temperature, max_tokens, timeout_s, model,
                 'retryable': False,
             }
         _log.error('chat 流中断：%s', payload.get('message'))
+        if ext_jid:
+            _ext_finish(ext_queue, ext_jid, status='failed', error=payload)
         stats_record(
             kind='chat',
             task=task_code or 'CHAT',

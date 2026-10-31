@@ -3144,7 +3144,7 @@ class CanvasPageState extends State<CanvasPage> {
       // ④ AI 与作业
       _toolbarGroupButton(
         icon: Icons.auto_awesome,
-        tooltip: 'AI 与作业：补前置 / 布置作业 / 作业历史',
+        tooltip: 'AI 与作业：补前置 / 作业历史 / 作业模式',
         itemBuilder: (_) => <PopupMenuEntry<int>>[
           _toolbarMenuItem(
             icon: Icons.lightbulb_outline,
@@ -3153,15 +3153,9 @@ class CanvasPageState extends State<CanvasPage> {
                 (_selectedKpIds.isNotEmpty || _selectedPoint != null),
             onTap: _autoPrereq,
           ),
-          _toolbarMenuItem(
-            icon: Icons.assignment,
-            label: _selectedKpIds.length > 1
-                ? '批量布置作业（${_selectedKpIds.length} 份）'
-                : '布置作业',
-            // 与作业模式条内的「布置作业」一致：未框选薄弱点时禁用。
-            enabled: hasTree && _selectedKpIds.isNotEmpty,
-            onTap: _openHomeworkPage,
-          ),
+          // 「布置作业」不在这里重复：作业模式（下方菜单项）打开后，框选薄弱点
+          // 即在模式条里出现「布置作业 / 批量布置作业」（见 2160-2180 行），
+          // 两处并存会让用户以为有两套入口，且这里的入口未框选时恒为禁用。
           _toolbarMenuItem(
             icon: Icons.history,
             label: '作业历史',

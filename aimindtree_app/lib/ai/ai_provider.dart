@@ -96,6 +96,7 @@ abstract class AiProvider {
     Duration timeout = const Duration(seconds: 900),
     AiTask? task,
     String? variant,
+    String? jobId,
   });
 
   void dispose();

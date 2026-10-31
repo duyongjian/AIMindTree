@@ -1,9 +1,10 @@
 # Codemagic CI/CD configuration for AIMindTree
-# Dashboard: https://codemagic.io/apps (linked to github.com/BOFHTT/AIMindTree, branch: master)
+# Dashboard: https://codemagic.io/apps (linked to github.com/BOFHT/AIMindTree, branch: master)
 # Docs: https://docs.codemagic.io/yaml/yaml/
 #
 # 注意：Flutter 工程在仓库子目录 aimindtree_app/ 下，故统一用 working_directory 切到该目录。
 # 触发分支默认为 master（与 Codemagic 仓库设置一致）。
+# 构建目标：仅 iOS（iPhone + iPad 通用 IPA）。
 
 workflows:
   # ===== 主 CI：拉取依赖 → 静态检查 → 单元测试 =====
@@ -17,11 +18,6 @@ workflows:
       flutter: "3.47.2"
       xcode: latest
       cocoapods: default
-      # 如需 Android 签名发布，把签名文件上传到 Codemagic 并在 android_signing 引用：
-      # android_signing:
-      #   - distribution_type: android
-      #     store_file_key: ANDROID_KEYSTORE
-      #     key_alias: upload
     cache:
       cache_paths:
         - ~/.pub-cache
@@ -39,61 +35,51 @@ workflows:
     publishing:
       email:
         recipients:
-          # TODO: 替换为你的邮箱
-          - your-email@example.com
+          - 2594589804@qq.com
         notify:
           success: false
           failure: false
 
-  # ===== 构建产物：Android APK（Codemagic 免费 Linux/macOS 实例可直接构建）=====
-  build-android:
-    name: Build Android APK
-    max_build_duration: 30
+  # ===== iOS 构建（iPhone + iPad 通用 IPA，需 macOS 实例 + 代码签名）=====
+  # Flutter 的 iOS 构建产物是通用 IPA，默认同时支持 iPhone 与 iPad
+  # （除非 ios/Runner/Info.plist 的 UIDeviceFamily 限制为仅 iPhone），
+  # 因此无需为 iPhone / iPad 分别建工作流。
+  build-ios:
+    name: Build iOS (iPhone & iPad)
+    max_build_duration: 45
     instance_type: mac_mini_m2
     working_directory: aimindtree_app
     environment:
       flutter: "3.47.2"
       xcode: latest
       cocoapods: default
+      # iOS 代码签名：在 Codemagic 控制台「iOS code signing」上传发布证书 +
+      # 描述文件，并在下方填对应名称（需与 Apple Developer 后台一致）。
+      # distribution_type 可选：app_store / ad_hoc / development。
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.example.aimindtree   # TODO: 换成你的真实 Bundle ID
+        provisioning_profiles:
+          - AIMindTree App Store Profile           # TODO: 换成你的描述文件名称
+        certificates:
+          - AIMindTree Distribution Certificate     # TODO: 换成你的证书名称
+    cache:
+      cache_paths:
+        - ~/.pub-cache
+        - ~/Library/Caches/CocoaPods
     scripts:
       - name: 获取依赖
         script: flutter pub get
-      - name: 构建 release APK（未签名，可本地 adb install 验证）
-        script: flutter build apk --release
+      - name: 构建 iOS release IPA（iPhone + iPad 通用）
+        script: |
+          flutter build ipa --release \
+            --export-options-plist=$HOME/export_options.plist
     artifacts:
-      - aimindtree_app/build/**/outputs/**/*.apk
+      - aimindtree_app/build/ios/ipa/*.ipa
     publishing:
       email:
         recipients:
-          - your-email@example.com
+          - 2594589804@qq.com
         notify:
           success: false
           failure: false
-
-  # ===== 其它平台构建示例（按需启用，默认注释）=====
-  # build-web:
-  #   name: Build Web
-  #   max_build_duration: 20
-  #   instance_type: mac_mini_m2
-  #   working_directory: aimindtree_app
-  #   environment:
-  #     flutter: "3.47.2"
-  #   scripts:
-  #     - flutter pub get
-  #     - flutter build web --release
-  #   artifacts:
-  #     - aimindtree_app/build/web/**/*
-  #
-  # build-linux:
-  #   name: Build Linux desktop
-  #   max_build_duration: 30
-  #   instance_type: linux  # Linux 桌面构建需 linux 实例
-  #   working_directory: aimindtree_app
-  #   environment:
-  #     flutter: "3.47.2"
-  #   scripts:
-  #     - flutter pub get
-  #     - flutter build linux --release
-  #   artifacts:
-  #     - aimindtree_app/build/linux/**/release/bundle/**/*
-  #   # 注意：Windows 桌面构建需要 Codemagic Windows 实例（付费/自定义），默认不在免费额度内。

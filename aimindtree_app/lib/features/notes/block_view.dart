@@ -584,34 +584,57 @@ Widget _table(Block block, NoteEditorController? controller) {
   }
   if (columns <= 0) columns = 1;
 
-  return SizedBox(
-    width: double.infinity,
-    child: Table(
-      border: TableBorder.all(color: Colors.grey.shade400, width: 0.5),
-      defaultColumnWidth: const FlexColumnWidth(),
-      columnWidths: <int, TableColumnWidth>{
-        for (var i = 0; i < columns; i++) i: const FlexColumnWidth(1.0),
-      },
-      children: <TableRow>[
-        for (var r = 0; r < rows.length; r++)
-          TableRow(
-            decoration: r == 0 && block.hasHeader
-                ? BoxDecoration(color: Colors.grey.shade200)
-                : null,
-            children: <Widget>[
-              for (var c = 0; c < columns; c++)
-                _cell(
-                  block: block,
-                  controller: controller,
-                  row: r,
-                  col: c,
-                  runs: c < rows[r].length ? rows[r][c] : const <InlineNode>[],
-                  header: r == 0 && block.hasHeader,
-                ),
-            ],
-          ),
-      ],
-    ),
+  // 每列的最小像素宽（列再多也保证可点进编辑，不压成竖排单字）。
+  const double kMinColWidth = 88;
+
+  final Widget table = Table(
+    border: TableBorder.all(color: Colors.grey.shade400, width: 0.5),
+    defaultColumnWidth: const FixedColumnWidth(kMinColWidth),
+    // 「最小 88px + 按比例伸缩」：MinColumnWidth 取两个宽度中的较小值，
+    // 这里给它 (88, flex) —— flex 保证多余空间按列均分；列宽的下限由外层
+    // 固定的 tableWidth（≥ 列数 × 88）兜底，故每列恒 ≥ 88。
+    // 横向空间不足时整表按「每列 88」铺开并横向滚动，绝不把列压窄。
+    columnWidths: <int, TableColumnWidth>{
+      for (var i = 0; i < columns; i++)
+        i: MinColumnWidth(
+          const FixedColumnWidth(kMinColWidth),
+          const FlexColumnWidth(1),
+        ),
+    },
+    children: <TableRow>[
+      for (var r = 0; r < rows.length; r++)
+        TableRow(
+          decoration: r == 0 && block.hasHeader
+              ? BoxDecoration(color: Colors.grey.shade200)
+              : null,
+          children: <Widget>[
+            for (var c = 0; c < columns; c++)
+              _cell(
+                block: block,
+                controller: controller,
+                row: r,
+                col: c,
+                runs: c < rows[r].length ? rows[r][c] : const <InlineNode>[],
+                header: r == 0 && block.hasHeader,
+              ),
+          ],
+        ),
+    ],
+  );
+
+  return LayoutBuilder(
+    builder: (BuildContext context, BoxConstraints constraints) {
+      final double minTableWidth = kMinColWidth * columns;
+      final double available =
+          constraints.maxWidth.isFinite ? constraints.maxWidth : minTableWidth;
+      // 可用宽度够 → 铺满（多余宽度按列均分）；不够 → 按「每列 88」铺开并滚动。
+      final double tableWidth =
+          available > minTableWidth ? available : minTableWidth;
+      return SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: SizedBox(width: tableWidth, child: table),
+      );
+    },
   );
 }
 
@@ -642,7 +665,11 @@ Widget _cell({
       style: kNoteTableCellStyle(header: false),
       maxLines: null,
       textAlign: textAlign,
-      keyboardType: TextInputType.text,
+      // `maxLines: null`（多行）+ `TextInputAction.newline` 必须配
+      // `TextInputType.multiline`，否则会命中 text_field.dart 的断言
+      // 「Use keyboardType TextInputType.multiline when using
+      // TextInputAction.newline on a multiline TextField」。
+      keyboardType: TextInputType.multiline,
       textInputAction: TextInputAction.newline,
       decoration: const InputDecoration(
         isDense: true,

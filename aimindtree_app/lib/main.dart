@@ -73,21 +73,16 @@ class MyApp extends StatelessWidget {
         //   整屏盖住它 —— 用户因此「看不见正在跑 / 排队中的 AI 任务」。
         //   现在它是一层常驻顶栏：无任务时高度 0 完全不占位，有任务时把所有页面
         //   一起下推（不遮挡任何内容，也不吃点击）。
+        //   装配细节见 JobTrayHost：Overlay 必须是这里的**根**（吃窗口的有限
+        //   约束）；塞进 Column 会因无穷高约束直接抛
+        //   「Overlay was given infinite constraints and cannot be sized by a
+        //   suitable child」，首帧布局中断后连带刷屏
+        //   「debugFrameWasSentToEngine is not true」。
         builder: (context, child) => Directionality(
           textDirection: TextDirection.ltr,
-          child: Column(
-            children: [
-              // 用 Overlay 包一层：JobTray 挂在 Navigator 之上（不被 push 页面盖住），
-              // 但内部 IconButton.tooltip 需要一个 Overlay 祖先来承载悬浮提示层，
-              // 否则抛「No Overlay widget found」（修复：任务队列 tooltip 崩溃）。
-              Overlay(
-                initialEntries: [
-                  OverlayEntry(
-                      builder: (context) => JobTray(jobs: service.jobs)),
-                ],
-              ),
-              Expanded(child: child ?? const SizedBox.shrink()),
-            ],
+          child: JobTrayHost(
+            jobs: service.jobs,
+            child: child ?? const SizedBox.shrink(),
           ),
         ),
         home: AppShell(

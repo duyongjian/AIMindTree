@@ -116,7 +116,12 @@ class _HomeworkPageState extends State<HomeworkPage> {
       widget.existingId != null
           ? 'homework:${widget.existingId}'
           : 'homework:new:${widget.canvasId}',
-      label: widget.existingId != null ? '编辑作业（$names）' : '布置作业（$names）',
+      // 这一行代表「**这个页面开着**」（交互会话，锁随页面生命周期），不是
+      // 「正在生成题目」—— 后者是下面 `runDetached` 登记的那一行。所以 label
+      // 里必须带「编辑中」，否则出题时两行都以「布置作业」开头，用户分不清。
+      label: widget.existingId != null
+          ? '编辑作业（$names）'
+          : '布置作业 · 编辑中（$names）',
     );
     if (widget.existingId != null) _loadExisting();
   }
@@ -275,9 +280,11 @@ class _HomeworkPageState extends State<HomeworkPage> {
     _ticket('出题中…');
 
     _task = widget.jobs.runDetached(
+      // 这一行才是「正在生成题目」（后台执行体，页面关了也跑完）。与上面那条
+      // 交互行区分开：一个说页面开着，一个说进度到哪儿了。
       label: editing
           ? '重新出题（${points.first.name}）'
-          : '布置作业（${points.length} 个知识点）',
+          : '出题中（${points.length} 个知识点）',
       resourceKey: 'homework:gen:$batch',
       doneMessage: editing ? '题目已重新生成' : '作业已生成（${points.length} 份）',
       body: (task) async {

@@ -190,6 +190,7 @@ class LlmServerClient implements AiProvider {
     Duration timeout = const Duration(seconds: 900),
     AiTask? task,
     String? variant,
+    String? jobId,
   }) async* {
     final body = <String, dynamic>{
       'query': query,
@@ -199,6 +200,9 @@ class LlmServerClient implements AiProvider {
         'conversation_id': conversationId,
       if (_backendOrNull != null) 'backend': _backendOrNull,
       if (model != null && model!.isNotEmpty) 'model': model,
+      // 若调用方已向服务端登记外部任务（交互会话 / 流式会话），把其 job_id 透传，
+      // 让 llm_server 在本次会话开始 / 结束时续心跳 / 标终态（看门狗据此判断存活）。
+      if (jobId != null && jobId.isNotEmpty) 'job_id': jobId,
       'stream': !blockingChat,
       'user': user ?? 'aimindtree-app',
       'timeout_s': timeout.inSeconds,

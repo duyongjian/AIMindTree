@@ -902,8 +902,12 @@ class NoteEditorController extends ChangeNotifier {
   }
 
   /// 插入 `rows × cols` 空表格，并聚焦第一个单元格。
+  ///
+  /// 行列数会 clamp 到 `[1, 50]`（`0` 行列会序列化成空串「隐形表」）。
   void insertTableBlock({int rows = 2, int cols = 2}) {
-    final block = TableBlock.empty(rows: rows, cols: cols);
+    final int r = TableBlock.clampSize(rows);
+    final int c = TableBlock.clampSize(cols);
+    final block = TableBlock.empty(rows: r, cols: c);
     final index = _insertAfterActive(block);
     if (index < 0) return;
     focusBlock(tableCellRef(block.id, 0, 0));
@@ -964,6 +968,69 @@ class NoteEditorController extends ChangeNotifier {
     final next = actions.insertTableRow(_doc, ref, b.rows.length - 1);
     if (identical(next, _doc)) return;
     _commit(next);
+  }
+
+  /// 在表格第 [row] 行**下方**插入一行（表格工具条「+行」）。
+  ///
+  /// 越界由 `block_actions.insertTableRow` clamp 到末行之后；无变化直接返回。
+  /// 结构变更（列数与 `aligns` 补齐）全在纯函数里，这里只负责取块 + 提交。
+  void insertTableRowAfter(String tableId, int row) {
+    final ref = BlockRef(tableId);
+    final b = blockOf(ref);
+    if (b is! TableBlock) return;
+    final next = actions.insertTableRow(_doc, ref, row);
+    if (identical(next, _doc)) return;
+    _commit(next);
+  }
+
+  /// 删除表格第 [row] 行（工具条「-行」）。只剩一行 / 越界 → 纯函数原样返回。
+  void removeTableRowAt(String tableId, int row) {
+    final ref = BlockRef(tableId);
+    final b = blockOf(ref);
+    if (b is! TableBlock) return;
+    final next = actions.removeTableRow(_doc, ref, row);
+    if (identical(next, _doc)) return;
+    _commit(next);
+    _blurIfActiveInvalid();
+  }
+
+  /// 在表格第 [col] 列**右侧**插入一列（工具条「+列」；`aligns` 同步补 `none`）。
+  void insertTableColumnAfter(String tableId, int col) {
+    final ref = BlockRef(tableId);
+    final b = blockOf(ref);
+    if (b is! TableBlock) return;
+    final next = actions.insertTableColumn(_doc, ref, col);
+    if (identical(next, _doc)) return;
+    _commit(next);
+  }
+
+  /// 删除表格第 [col] 列（工具条「-列」）。只剩一列 / 越界 → 原样返回。
+  void removeTableColumnAt(String tableId, int col) {
+    final ref = BlockRef(tableId);
+    final b = blockOf(ref);
+    if (b is! TableBlock) return;
+    final next = actions.removeTableColumn(_doc, ref, col);
+    if (identical(next, _doc)) return;
+    _commit(next);
+    _blurIfActiveInvalid();
+  }
+
+  /// 删除整个表格块（工具条「删除表格」）。
+  ///
+  /// 直接整块从文档移除；`_replaceRange` → `_normalize` 会给留下相邻块补 `\n`，
+  /// 保证序列化后不会和邻块粘成一行（同 `_insertBlockAt` 的防粘连语义）。
+  void deleteTableBlock(String tableId) {
+    final idx = _indexOfBlock(tableId);
+    if (idx < 0) return;
+    final BlockRef? a = _active;
+    if (a != null && a.blockId == tableId) blur();
+    _replaceRange(idx, 1, const <Block>[]);
+  }
+
+  /// 活动行因结构变更（删行/删列）失效时退出编辑态，避免悬空引用。
+  void _blurIfActiveInvalid() {
+    final BlockRef? a = _active;
+    if (a != null && !_isValidRef(a)) blur();
   }
 
   // ===== 文本写回（内部） =====

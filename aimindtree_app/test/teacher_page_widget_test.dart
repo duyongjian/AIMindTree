@@ -62,6 +62,7 @@ class _FakeProvider implements AiProvider {
     Duration timeout = const Duration(seconds: 120),
     AiTask? task,
     String? variant,
+    String? jobId,
   }) async* {
     queries.add(query);
     if (task == AiTask.t6Explain) {

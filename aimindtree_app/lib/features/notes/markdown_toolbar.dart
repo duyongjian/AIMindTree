@@ -161,14 +161,19 @@ class MarkdownToolbar extends StatelessWidget {
                 ),
               _toolButton(
                 icon: Icons.table_chart,
-                tooltip: '插入 2×2 表格',
-                onPressed: () => controller.insertTableBlock(rows: 2, cols: 2),
+                tooltip: '插入表格（可选行列数）',
+                onPressed: () => _openTablePicker(context),
               ),
               _toolButton(
                 icon: Icons.horizontal_rule,
                 tooltip: '分割线（---）',
                 onPressed: controller.insertDividerBlock,
               ),
+              // 活动块是表格时，追加一排表格专属操作（+行 / -行 / +列 / -列 / 删除）。
+              if (block is TableBlock) ...<Widget>[
+                const _ToolDivider(),
+                ..._tableOps(block),
+              ],
             ],
           ),
         ),
@@ -325,6 +330,233 @@ class MarkdownToolbar extends StatelessWidget {
     // 对话框开着的时候 active 已被清空 → 用显式区间写入，再把焦点还给该行。
     controller.setLinkOn(ref, label, url, start: a, end: b);
     controller.focusBlock(ref, caret: a + label.length);
+  }
+
+  // -------------------------------------------------------------------------
+  // 表格：行列选择器 + 表格专属操作条
+  // -------------------------------------------------------------------------
+
+  /// 弹「插入表格」选择器（网格 hover 选尺寸 + 自定义行列输入），
+  /// 确认后按选定行列数插入（行列数由控制器 / 模型 clamp 到 `[1, 50]`）。
+  ///
+  /// 选择器走独立对话框路由（不在 `ExcludeFocus` 子树里），因此能正常拿焦点。
+  Future<void> _openTablePicker(BuildContext context) async {
+    final (int, int)? picked = await showDialog<(int, int)>(
+      context: context,
+      builder: (BuildContext dialogContext) => const _TableSizePicker(),
+    );
+    if (picked == null) return;
+    controller.insertTableBlock(rows: picked.$1, cols: picked.$2);
+  }
+
+  /// 表格专属操作条（活动块是表格时出现）：+行 / -行 / +列 / -列 / 删除表格。
+  ///
+  /// 当前操作基准格：活动单元格 → 它的行列；没有活动格 → 回退「最后一行 / 最后一列」。
+  /// 只剩一行 / 一列时对应的「删」按钮置灰（纯函数本就有守卫，UI 跟着灰）。
+  List<Widget> _tableOps(TableBlock table) {
+    final int rowCount = table.rows.length;
+    var cols = table.aligns.length;
+    for (final row in table.rows) {
+      if (row.length > cols) cols = row.length;
+    }
+    final cell = controller.active;
+    final (int, int)? rc =
+        (cell != null && cell.blockId == table.id) ? tableCellOf(cell) : null;
+    final int baseRow = rc?.$1 ?? (rowCount - 1);
+    final int baseCol = rc?.$2 ?? (cols - 1);
+    final bool canRemoveRow = rowCount > 1;
+    final bool canRemoveCol = cols > 1;
+
+    return <Widget>[
+      _tableOpButton('+行', '在当前格下方插入一行',
+          () => controller.insertTableRowAfter(table.id, baseRow)),
+      _tableOpButton(
+        '−行',
+        '删除当前行',
+        canRemoveRow
+            ? () => controller.removeTableRowAt(table.id, baseRow)
+            : null,
+      ),
+      _tableOpButton('+列', '在当前格右侧插入一列',
+          () => controller.insertTableColumnAfter(table.id, baseCol)),
+      _tableOpButton(
+        '−列',
+        '删除当前列',
+        canRemoveCol
+            ? () => controller.removeTableColumnAt(table.id, baseCol)
+            : null,
+      ),
+      _tableOpButton('删除表格', '删除整个表格',
+          () => controller.deleteTableBlock(table.id)),
+    ];
+  }
+
+  /// 表格操作条里的小胶囊按钮（比图标更直白；禁用态灰掉并保留 tooltip）。
+  Widget _tableOpButton(String label, String tooltip, VoidCallback? onPressed) {
+    final bool enabled = onPressed != null;
+    return Tooltip(
+      message: enabled ? tooltip : '$tooltip 当前块不支持该操作',
+      child: TextButton(
+        onPressed: onPressed,
+        style: TextButton.styleFrom(
+          minimumSize: const Size(0, 30),
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          foregroundColor:
+              enabled ? Colors.grey.shade800 : Colors.grey.shade400,
+        ),
+        child: Text(label, style: const TextStyle(fontSize: 12)),
+      ),
+    );
+  }
+}
+
+/// 「插入表格」尺寸选择器：10×10 网格 hover 选择 + 自定义行列输入框。
+///
+/// 默认 3×3；点网格单元格立即确认该尺寸，「插入」按钮按输入框里的行列数确认
+/// （输入框会随网格 hover 同步）。行列数最终由调用方 + 模型 clamp 到 `[1, 50]`。
+class _TableSizePicker extends StatefulWidget {
+  const _TableSizePicker();
+
+  @override
+  State<_TableSizePicker> createState() => _TableSizePickerState();
+}
+
+class _TableSizePickerState extends State<_TableSizePicker> {
+  static const int _gridMax = 10;
+  int _rows = 3;
+  int _cols = 3;
+  late final TextEditingController _rowsCtrl =
+      TextEditingController(text: '$_rows');
+  late final TextEditingController _colsCtrl =
+      TextEditingController(text: '$_cols');
+
+  @override
+  void dispose() {
+    _rowsCtrl.dispose();
+    _colsCtrl.dispose();
+    super.dispose();
+  }
+
+  void _hover(int r, int c) {
+    if (_rows == r && _cols == c) return;
+    setState(() {
+      _rows = r;
+      _cols = c;
+      _rowsCtrl.text = '$r';
+      _colsCtrl.text = '$c';
+    });
+  }
+
+  int _read(TextEditingController ctrl, int fallback) =>
+      TableBlock.clampSize(int.tryParse(ctrl.text.trim()) ?? fallback);
+
+  void _confirm() {
+    final int r = _read(_rowsCtrl, _rows);
+    final int c = _read(_colsCtrl, _cols);
+    Navigator.of(context).pop<(int, int)>((r, c));
+  }
+
+  void _pick(int r, int c) {
+    final int rr = TableBlock.clampSize(r);
+    final int cc = TableBlock.clampSize(c);
+    Navigator.of(context).pop<(int, int)>((rr, cc));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('插入表格'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Text('尺寸：$_rows × $_cols',
+                    style: const TextStyle(fontSize: 13)),
+                const Spacer(),
+                Text(
+                  '最多 ${TableBlock.maxSize} × ${TableBlock.maxSize}',
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            _grid(),
+            const SizedBox(height: 12),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: TextField(
+                    controller: _rowsCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: '行数',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: _colsCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: '列数',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        TextButton(onPressed: _confirm, child: const Text('插入')),
+      ],
+    );
+  }
+
+  Widget _grid() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        for (var r = 0; r < _gridMax; r++)
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              for (var c = 0; c < _gridMax; c++)
+                MouseRegion(
+                  onEnter: (_) => _hover(r + 1, c + 1),
+                  child: GestureDetector(
+                    onTap: () => _pick(r + 1, c + 1),
+                    child: Container(
+                      width: 18,
+                      height: 18,
+                      margin: const EdgeInsets.all(1),
+                      decoration: BoxDecoration(
+                        color: (r < _rows && c < _cols)
+                            ? Colors.blue.shade100
+                            : Colors.grey.shade100,
+                        border: Border.all(color: Colors.grey.shade400),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+      ],
+    );
   }
 }
 

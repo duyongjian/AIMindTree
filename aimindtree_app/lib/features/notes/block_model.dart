@@ -600,17 +600,33 @@ class TableBlock extends Block {
   /// 首行是表头行；[aligns] 与列数对齐。
   final List<List<InlineRuns>> rows;
 
+  /// 行列数下限（0/负值会生成序列化为空串的「隐形表」）。
+  static const int minSize = 1;
+
+  /// 行列数上限（防止误输入天文数字把 UI 撑爆）。
+  static const int maxSize = 50;
+
+  /// 把任意行列数夹到 `[minSize, maxSize]`。
+  static int clampSize(int v) => v < minSize ? minSize : (v > maxSize ? maxSize : v);
+
   /// 建一张 `rows × cols` 的空表（工具栏「插入表格」用）。
-  factory TableBlock.empty({int rows = 2, int cols = 2}) => TableBlock(
-        id: newBlockId('tb'),
-        aligns: List<TableAlign>.filled(cols, TableAlign.none),
-        rows: <List<InlineRuns>>[
-          for (var r = 0; r < rows; r++)
-            <InlineRuns>[
-              for (var c = 0; c < cols; c++) <InlineNode>[const TextRun('')],
-            ],
-        ],
-      );
+  ///
+  /// 行列数会被 clamp 到 `[1, 50]`：`0` 行/列会序列化成空串，
+  /// 在 Markdown 里就是一张「隐形表」，所以这里从源头堵住。
+  factory TableBlock.empty({int rows = 2, int cols = 2}) {
+    final int r = clampSize(rows);
+    final int c = clampSize(cols);
+    return TableBlock(
+      id: newBlockId('tb'),
+      aligns: List<TableAlign>.filled(c, TableAlign.none),
+      rows: <List<InlineRuns>>[
+        for (var i = 0; i < r; i++)
+          <InlineRuns>[
+            for (var j = 0; j < c; j++) <InlineNode>[const TextRun('')],
+          ],
+      ],
+    );
+  }
 
   @override
   BlockType get type => BlockType.table;

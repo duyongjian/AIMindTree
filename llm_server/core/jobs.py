@@ -52,10 +52,14 @@ IDEMPOTENCY_TTL_S = 60.0
 #: label / resource_key 截断上限（防客户端塞长文本撑爆内存与响应）。
 MAX_LABEL_CHARS = 120
 MAX_KEY_CHARS = 120
-MAX_TASK_CHARS = 8
+#: task 是任务分类标签（如 SESSION / BACKGROUND / EXTERNAL），纯元数据，
+#: 不参与服务端分派。App 使用 'BACKGROUND'（10 字符）等长业务名，故放宽到 32。
+MAX_TASK_CHARS = 32
 
-#: 单 stage 任务进入 running 后的初始进度（等模型阶段不假报跳动，见方案 §4.4）。
-_RUNNING_BASE_PERCENT = 10
+#: 单 stage 任务（chat / structured）只有「一次 LLM 调用」语义，进入 running
+#: 后没有中间进度信号：按方案 §4.4「不谎报」铁律，进度保持 0（App 侧显示
+#: 不确定态：只走计时、不画假百分比），等模型阶段不假跳。多阶段真实进度由
+#: 执行体（如 T4）逐层 ``report`` 推进。
 
 JobExecutor = Callable[['Job'], Any]
 
@@ -77,6 +81,7 @@ class Job:
         'status', 'stage_index', 'stage_percent', 'stage_message',
         'cancel_requested', 'result', 'error',
         'submitted_at', 'started_at', 'finished_at', 'seq',
+        'updated_at', 'revision', 'external', 'heartbeat_deadline',
     )
 
     def __init__(
@@ -122,6 +127,10 @@ class Job:
         self.started_at: float | None = None
         self.finished_at: float | None = None
         self.seq = 0
+        self.updated_at = now
+        self.revision = 0
+        self.external = False
+        self.heartbeat_deadline: float | None = None
 
     # ---------- 状态突变（worker / cancel 调用；单事件循环，无需加锁） ----------
 
@@ -141,12 +150,21 @@ class Job:
         except (TypeError, ValueError):
             return
         self.stage_message = str(message or '')[:200]
+        self.touch()
+
+    def touch(self) -> None:
+        """每次可观测状态变化都 bump（``updated_at`` / ``revision`` 供 App 判断
+        「这次轮询相对上次有没有新东西」，避免无变化时整行重绘 / 误判）。"""
+        self.updated_at = time.time()
+        self.revision += 1
 
     def start(self) -> None:
         self.status = 'running'
         self.started_at = time.time()
-        self.stage_percent = float(_RUNNING_BASE_PERCENT)
+        # 诚实：单 stage 任务没有中间进度，保持 0（App 显示不确定态，不假报）。
+        self.stage_percent = 0.0
         self.stage_message = f'正在请求（{self.task}）…'
+        self.touch()
 
     def finish(self, result: dict[str, Any] | None) -> None:
         self.status = 'done'
@@ -154,6 +172,7 @@ class Job:
         self.stage_percent = 100.0
         self.stage_message = '已完成'
         self.result = result if isinstance(result, dict) else {}
+        self.touch()
 
     def fail(self, code: str, message: str, *, retryable: bool = False) -> None:
         self.status = 'failed'
@@ -164,11 +183,13 @@ class Job:
             'message': str(message or '')[:500],
             'retryable': bool(retryable),
         }
+        self.touch()
 
     def mark_canceled(self, reason: str = '已取消') -> None:
         self.status = 'canceled'
         self.finished_at = time.time()
         self.stage_message = str(reason or '已取消')[:100]
+        self.touch()
 
     def check_cancelled(self) -> None:
         """检查点：执行体在每层 / 每个节点请求前调用。"""
@@ -200,6 +221,9 @@ class Job:
             'result': self.result,
             'error': self.error,
             'cancel_requested': self.cancel_requested,
+            'external': self.external,
+            'updated_at': self.updated_at,
+            'revision': self.revision,
         }
 
 
@@ -216,6 +240,8 @@ class JobQueue:
         concurrency: int = 1,
         retain: int = 200,
         executor: JobExecutor | None = None,
+        external_heartbeat_s: float = 30.0,
+        sweep_interval_s: float = 5.0,
     ) -> None:
         try:
             self._concurrency = max(1, int(concurrency))
@@ -230,6 +256,13 @@ class JobQueue:
         self._workers: list[asyncio.Task[None]] = []
         self._active: dict[str, Job] = {}
         self._recent: deque[Job] = deque(maxlen=self._retain)
+        #: 外部驱动任务（App 后台体 / 交互会话 / 流式会话）登记表：
+        #: 这类任务服务端不执行，只持有状态 + 心跳看门狗（超时 failed）。
+        self._external: dict[str, Job] = {}
+        #: 心跳看门狗扫描周期（秒）与单次超时（秒）。
+        self._external_heartbeat_s = max(5.0, float(external_heartbeat_s))
+        self._sweep_interval_s = max(1.0, float(sweep_interval_s))
+        self._sweep_task: asyncio.Task[None] | None = None
         #: 资源锁表：resource_key → job_id（仅 queued/running 持有；终态即摘除）。
         self._locks: dict[str, str] = {}
         #: 幂等表：key → (job_id, ts)。job_id 建好前先占位空串。
@@ -251,10 +284,12 @@ class JobQueue:
             self._workers.append(
                 asyncio.create_task(self._worker(i), name=f'job-worker-{i}')
             )
+        self._sweep_task = asyncio.create_task(self._sweep_loop(), name='job-sweep')
         _log.info(
-            '任务队列已启动：concurrency=%d retain=%d',
+            '任务队列已启动：concurrency=%d retain=%d external_heartbeat=%.0fs',
             self._concurrency,
             self._retain,
+            self._external_heartbeat_s,
         )
 
     async def stop(self) -> None:
@@ -272,6 +307,13 @@ class JobQueue:
             await asyncio.wait(self._workers, timeout=5.0)
         self._workers.clear()
         self._queue = None
+        if self._sweep_task is not None:
+            self._sweep_task.cancel()
+            try:
+                await asyncio.wait({self._sweep_task}, timeout=2.0)
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._sweep_task = None
 
     @property
     def concurrency(self) -> int:
@@ -382,8 +424,11 @@ class JobQueue:
     # ---------- 查询 ----------
 
     def get(self, job_id: str) -> Job | None:
-        """按 id 查（未终态优先，再查终态缓冲）。找不到返回 None（不抛）。"""
+        """按 id 查（未终态优先，再查外部登记表，最后查终态缓冲）。找不到返回 None（不抛）。"""
         job = self._active.get(str(job_id))
+        if job is not None:
+            return job
+        job = self._external.get(str(job_id))
         if job is not None:
             return job
         return self._find_recent(str(job_id))
@@ -394,6 +439,11 @@ class JobQueue:
         limit: int = 50,
     ) -> dict[str, Any]:
         """任务列表（未终态 + 最近终态，新的在前）。
+
+        - 状态过滤：只认合法状态；**全非法 → 返回空列表**（不再退化成「不过滤返回全量」）。
+        - **活跃任务（queued/running）永不被截断**：即便历史终态很多、超过 limit，
+          活跃任务也始终出现在结果里（App 托盘 / 对账依赖这一点，方案 §8.2）。
+        - 终态部分按 ``limit`` 截断（优先保留 seq 更大的新任务）。
 
         Args:
             status: 逗号分隔的状态过滤（如 ``running,queued``）；非法值忽略。
@@ -409,16 +459,30 @@ class JobQueue:
             cap = 50
         wanted: set[str] | None = None
         if status:
-            wanted = {s.strip() for s in str(status).split(',') if s.strip()}
-            wanted &= set(STATUSES) or wanted
+            raw = {s.strip() for s in str(status).split(',') if s.strip()}
+            valid = raw & set(STATUSES)
+            if raw and not valid:
+                # 传入状态全非法（如 ``?status=foo``）→ 返回空列表，而非退化成全量。
+                return {
+                    'jobs': [],
+                    'buffer_size': len(self._active) + len(self._external) + len(self._recent),
+                    'concurrency': self._concurrency,
+                }
+            wanted = valid
 
-        jobs = [*self._active.values(), *self._recent]
+        # 活跃任务（queued/running，含外部登记任务）无论历史多长都出现在结果里。
+        all_jobs = [*self._active.values(), *self._external.values(), *self._recent]
         if wanted:
-            jobs = [j for j in jobs if j.status in wanted]
-        jobs.sort(key=lambda j: j.seq, reverse=True)
+            all_jobs = [j for j in all_jobs if j.status in wanted]
+        active = [j for j in all_jobs if j.status in ('queued', 'running')]
+        terminal = [j for j in all_jobs if j.status not in ('queued', 'running')]
+        active.sort(key=lambda j: j.seq, reverse=True)
+        terminal.sort(key=lambda j: j.seq, reverse=True)
+        # 终态部分按 limit 截断（活跃任务已全额保留）。
+        visible = active + terminal[:max(0, cap - len(active))]
         return {
-            'jobs': [j.snapshot() for j in jobs[:cap]],
-            'buffer_size': len(self._active) + len(self._recent),
+            'jobs': [j.snapshot() for j in visible],
+            'buffer_size': len(self._active) + len(self._external) + len(self._recent),
             'concurrency': self._concurrency,
         }
 
@@ -512,8 +576,9 @@ class JobQueue:
     # ---------- 内部 ----------
 
     def _finish(self, job: Job) -> None:
-        """终态收尾：摘资源锁 + 移入环形缓冲（幂等，重复调用安全）。"""
+        """终态收尾：摘资源锁 + 移出活跃/外部登记表 + 移入环形缓冲（幂等，重复调用安全）。"""
         self._active.pop(job.job_id, None)
+        self._external.pop(job.job_id, None)
         if job.resource_key and self._locks.get(job.resource_key) == job.job_id:
             del self._locks[job.resource_key]
         if not any(j.job_id == job.job_id for j in self._recent):
@@ -524,6 +589,191 @@ class JobQueue:
             if j.job_id == job_id:
                 return j
         return None
+
+    # ---------- 外部驱动任务（App 后台体 / 交互会话 / 流式会话） ----------
+
+    def register_external(
+        self,
+        *,
+        task: str,
+        label: str,
+        resource_key: str = '',
+        job_id: str | None = None,
+        heartbeat_s: float | None = None,
+        user: str = 'aimindtree-app',
+    ) -> Job:
+        """登记一个**外部驱动**的任务实体（服务端不执行，只持有状态 + 心跳看门狗）。
+
+        调用方通过 :meth:`report_external` 周期性上报进度（同时续心跳），
+        :meth:`finish_external` 标终态。看门狗见 :meth:`_sweep_external`：
+        超过 ``heartbeat_s``（默认 :attr:`_external_heartbeat_s`）无心跳即判
+        ``failed(watchdog_timeout)``——覆盖「App 被强杀、后台任务人間蒸发」的盲区。
+
+        Raises:
+            LlmError: ``invalid_request``（job_id 冲突 / task 非法）。
+        """
+        task = str(task).strip().upper()
+        if not task:
+            raise invalid_request('外部任务缺少 task')
+        if len(task) > MAX_TASK_CHARS:
+            raise invalid_request(f'task 过长（>{MAX_TASK_CHARS} 字符）')
+        label = str(label or '').strip()[:MAX_LABEL_CHARS] or task
+        resource_key = str(resource_key or '').strip()[:MAX_KEY_CHARS]
+        if job_id:
+            job_id = str(job_id).strip()
+            if not job_id or len(job_id) > 64:
+                raise invalid_request('job_id 非法（空或过长）')
+            if (
+                job_id in self._active
+                or job_id in self._external
+                or self._find_recent(job_id) is not None
+            ):
+                raise invalid_request(f'job_id 已存在：{job_id}')
+        else:
+            job_id = _new_job_id()
+
+        try:
+            hb = max(5.0, float(heartbeat_s)) if heartbeat_s is not None else self._external_heartbeat_s
+        except (TypeError, ValueError):
+            hb = self._external_heartbeat_s
+
+        job = Job(
+            task=task,
+            label=label,
+            resource_key=resource_key,
+            user=str(user)[:64],
+        )
+        job.job_id = job_id
+        job.external = True
+        job.status = 'running'
+        job.stage_message = '进行中…'
+        job.started_at = time.time()
+        job.heartbeat_deadline = time.monotonic() + hb
+        self._seq += 1
+        job.seq = self._seq
+        self._external[job.job_id] = job
+        _log.info('外部任务 %s 已登记：task=%s label=%s', job.job_id, task, label)
+        return job
+
+    def report_external(
+        self,
+        job_id: str,
+        *,
+        percent: float | None = None,
+        message: str | None = None,
+        stage_task: str | None = None,
+        stage_index: int | None = None,
+        stage_total: int | None = None,
+    ) -> Job:
+        """上报外部任务进度（并续心跳）。"""
+        job = self._external.get(str(job_id))
+        if job is None:
+            raise invalid_request(f'外部任务不存在：{job_id}')
+        if job.status not in ('queued', 'running'):
+            raise invalid_request(f'外部任务已终态（{job.status}）')
+        if percent is not None:
+            try:
+                job.stage_percent = max(0.0, min(100.0, float(percent)))
+            except (TypeError, ValueError):
+                pass
+        if message is not None:
+            job.stage_message = str(message)[:200]
+        if stage_task is not None:
+            name = str(stage_task).strip().upper()
+            if name:
+                if job.stages:
+                    job.stages[0] = name
+                else:
+                    job.stages = [name]
+        if stage_total is not None:
+            try:
+                t = max(1, int(stage_total))
+                base = job.stages[0] if job.stages else job.task
+                job.stages = [base] * t
+            except (TypeError, ValueError):
+                pass
+        if stage_index is not None:
+            try:
+                job.stage_index = max(0, int(stage_index) - 1)
+            except (TypeError, ValueError):
+                pass
+        # 续心跳：重置截止时间。
+        job.heartbeat_deadline = time.monotonic() + self._external_heartbeat_s
+        job.touch()
+        return job
+
+    def finish_external(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        result: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> Job:
+        """外部任务终态（``done`` / ``failed`` / ``canceled``）。"""
+        job = self._external.get(str(job_id))
+        if job is None:
+            raise invalid_request(f'外部任务不存在：{job_id}')
+        status = str(status).strip().lower()
+        if status not in ('done', 'failed', 'canceled'):
+            raise invalid_request(f'非法终态：{status}')
+        job.status = status
+        job.finished_at = time.time()
+        job.heartbeat_deadline = None
+        if message:
+            job.stage_message = str(message)[:200]
+        else:
+            job.stage_message = {
+                'done': '已完成',
+                'failed': '失败',
+                'canceled': '已取消',
+            }[status]
+        if status == 'done':
+            job.stage_percent = 100.0
+        if isinstance(result, dict):
+            job.result = result
+        if isinstance(error, dict):
+            job.error = error
+        job.touch()
+        self._finish_external(job)
+        _log.info('外部任务 %s 已终态：%s', job.job_id, status)
+        return job
+
+    def _finish_external(self, job: Job) -> None:
+        """外部任务终态收尾：移出登记表、进环形缓冲。"""
+        self._external.pop(job.job_id, None)
+        if not any(j.job_id == job.job_id for j in self._recent):
+            self._recent.appendleft(job)
+
+    def _sweep_external(self) -> None:
+        """心跳看门狗：扫描外部任务，超时无心跳的 running 任务标 failed。
+
+        纯同步、无副作用风险；由 :meth:`_sweep_loop` 周期驱动（或测试直接调用）。
+        """
+        now = time.monotonic()
+        dead = [
+            j for j in self._external.values()
+            if j.heartbeat_deadline is not None
+            and now > j.heartbeat_deadline
+            and j.status in ('queued', 'running')
+        ]
+        for job in dead:
+            job.fail('watchdog_timeout', '任务心跳超时（客户端失联），已自动标记失败')
+            self._finish_external(job)
+            _log.warning('外部任务 %s 心跳超时，标记 failed（watchdog）', job.job_id)
+
+    async def _sweep_loop(self) -> None:
+        """看门狗扫描循环（``start()`` 启动，``stop()`` 取消）。"""
+        try:
+            while True:
+                await asyncio.sleep(self._sweep_interval_s)
+                try:
+                    self._sweep_external()
+                except Exception as exc:  # noqa: BLE001 - 看门狗自己不能挂
+                    _log.error('external sweep error: %s', exc)
+        except asyncio.CancelledError:
+            pass
 
     def _gc_idem(self, now: float) -> None:
         """惰性清理过期幂等键（提交路径上顺带做，不另起定时器）。"""
@@ -540,6 +790,7 @@ def reset_queue(queue: JobQueue | None) -> None:
         return
     queue._active.clear()
     queue._recent.clear()
+    queue._external.clear()
     queue._locks.clear()
     queue._idem.clear()
     queue._seq = 0

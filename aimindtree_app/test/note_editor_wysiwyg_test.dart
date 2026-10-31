@@ -78,6 +78,7 @@ class _RecordingProvider extends AiProvider {
     Duration timeout = const Duration(seconds: 120),
     AiTask? task,
     String? variant,
+    String? jobId,
   }) =>
       const Stream<AiChunk>.empty();
 

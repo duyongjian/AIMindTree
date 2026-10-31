@@ -807,11 +807,40 @@ bool _isTableDivider(String line) {
   return cells.every((c) => _kTableDivider.hasMatch(c));
 }
 
+/// 把一行 GFM 表格拆成单元格。
+///
+/// 关键：按**未转义**的 `|` 切分，切完把 `\|` 还原成 `|` ——
+/// 否则单元格里含 `|`（序列化成 `\|`）时再解析会错位成两格。
+/// 其余 `\x` 转义原样保留，交给行内解析器（`parseInline`）继续处理。
 List<String> _splitRow(String line) {
-  final t = line.trim();
-  var body = t.startsWith('|') ? t.substring(1) : t;
-  if (body.endsWith('|')) body = body.substring(0, body.length - 1);
-  return [for (final c in body.split('|')) c.trim()];
+  var body = line.trim();
+  if (body.startsWith('|')) body = body.substring(1);
+  // 末尾分隔竖线（未转义）去掉；`\|` 结尾的是单元格内容里的竖线，不能删。
+  if (body.isNotEmpty && body.endsWith('|')) {
+    final String prev = body.length >= 2 ? body[body.length - 2] : '';
+    if (prev != r'\') body = body.substring(0, body.length - 1);
+  }
+  final cells = <String>[];
+  final buf = StringBuffer();
+  var i = 0;
+  while (i < body.length) {
+    final String ch = body[i];
+    if (ch == r'\' && i + 1 < body.length && body[i + 1] == '|') {
+      buf.write('|'); // `\|` → 单元格内的字面竖线
+      i += 2;
+      continue;
+    }
+    if (ch == '|') {
+      cells.add(buf.toString().trim());
+      buf.clear();
+      i++;
+      continue;
+    }
+    buf.write(ch);
+    i++;
+  }
+  cells.add(buf.toString().trim());
+  return cells;
 }
 
 List<TableAlign> _alignsOf(String dividerLine) =>

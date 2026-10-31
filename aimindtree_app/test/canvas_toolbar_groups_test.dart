@@ -194,20 +194,21 @@ void main() {
       expect(itemEnabled(tester, '局部连线'), isFalse);
     });
 
-    testWidgets('④ AI 与作业组：批量补前置 / 布置作业 / 作业历史 / 作业模式',
+    testWidgets('④ AI 与作业组：批量补前置 / 作业历史 / 作业模式（布置作业已下线）',
         (tester) async {
       await pumpCanvasWithTree(tester);
 
       final labels = await openGroup(tester, Icons.auto_awesome);
-      expect(labels, <String>['批量补前置', '布置作业', '作业历史', '作业模式']);
+      expect(labels, <String>['批量补前置', '作业历史', '作业模式']);
       // 防回归：旧的「补前置」label 不应再出现（已改名「批量补前置」）。
       expect(labels, isNot(contains('补前置')));
+      // 防回归：「布置作业」入口已从本菜单下线 —— 作业模式打开后模式条里就有
+      // 「布置作业 / 批量布置作业」，两处并存会让用户以为有两套入口。
+      expect(labels, isNot(contains('布置作业')));
       // 无框选、无单点选中 → 批量补前置 禁用。
       expect(itemEnabled(tester, '批量补前置'), isFalse);
       expect(itemEnabled(tester, '作业历史'), isTrue);
       expect(itemEnabled(tester, '作业模式'), isTrue);
-      // 未框选薄弱点时「布置作业」禁用（与作业模式条内按钮一致）。
-      expect(itemEnabled(tester, '布置作业'), isFalse);
     });
 
     testWidgets('点悬浮栏「框选模式」真的触发既有 handler：可开可关', (tester) async {
@@ -284,10 +285,9 @@ void main() {
       }
 
       labels = await openGroup(tester, Icons.auto_awesome);
-      expect(labels, <String>['批量补前置', '布置作业', '作业历史', '作业模式']);
+      expect(labels, <String>['批量补前置', '作业历史', '作业模式']);
       for (final l in const <String>[
         '批量补前置',
-        '布置作业',
         '作业历史',
         '作业模式',
       ]) {

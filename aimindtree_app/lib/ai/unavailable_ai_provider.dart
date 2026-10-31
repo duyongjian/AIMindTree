@@ -46,6 +46,7 @@ class UnavailableAiProvider implements AiProvider {
     Duration timeout = const Duration(seconds: 900),
     AiTask? task,
     String? variant,
+    String? jobId,
   }) async* {
     throw StateError(_message);
   }

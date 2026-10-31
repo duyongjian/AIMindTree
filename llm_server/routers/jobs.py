@@ -19,7 +19,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from core.errors import LlmError, invalid_request
-from core.jobs import Job, JobQueue
+from core.jobs import Job, JobQueue, MAX_LABEL_CHARS, MAX_KEY_CHARS
 from core.logging import get_logger
 from core.stats import record as stats_record
 from routers.chat import chat_blocking_core
@@ -43,6 +43,8 @@ def create_queue(state) -> JobQueue:
     queue = JobQueue(
         concurrency=jobs_cfg.get('concurrency', 1),
         retain=jobs_cfg.get('retain', 200),
+        external_heartbeat_s=jobs_cfg.get('external_heartbeat_s', 30.0),
+        sweep_interval_s=jobs_cfg.get('external_sweep_interval_s', 5.0),
     )
 
     async def executor(job: Job) -> dict[str, Any]:
@@ -111,6 +113,93 @@ async def get_job(job_id: str, request: Request) -> JSONResponse:
 async def cancel_job(job_id: str, request: Request) -> JSONResponse:
     """取消：queued 立即；running 置检查点（UI 明示「当前步不可中断」）。"""
     job = _queue_of(request).cancel(job_id)
+    return JSONResponse(job.snapshot())
+
+
+# ---------------------------------------------------------------- 外部任务登记
+
+
+@router.post('/v1/jobs/register')
+async def register_job(request: Request) -> JSONResponse:
+    """登记一个**外部驱动**任务（App 后台体 / 交互会话 / 流式会话）。
+
+    服务端只持有状态实体 + 心跳看门狗（超时 ``failed``）。进度由调用方经
+    ``POST /v1/jobs/{id}/progress`` 上报、``POST /v1/jobs/{id}/finish`` 终态。
+
+    返回 ``{job_id, status}``（201）。``job_id`` 可选：不传由服务端生成，
+    传了则要求全局唯一（与队列任务 / 历史任务都不冲突）。
+    """
+    body = await _read_body(request)
+    task = str(body.get('task') or 'EXTERNAL').strip().upper() or 'EXTERNAL'
+    label = str(body.get('label') or '').strip()[:MAX_LABEL_CHARS] or task
+    resource_key = str(body.get('resource_key') or '').strip()[:MAX_KEY_CHARS]
+    job_id = body.get('job_id')
+    if isinstance(job_id, str):
+        job_id = job_id.strip() or None
+    else:
+        job_id = None
+    hb = body.get('heartbeat_s')
+    try:
+        hb = float(hb) if hb is not None else None
+    except (TypeError, ValueError):
+        hb = None
+    user = str(body.get('user') or 'aimindtree-app')[:64]
+    job = _queue_of(request).register_external(
+        task=task,
+        label=label,
+        resource_key=resource_key,
+        job_id=job_id,
+        heartbeat_s=hb,
+        user=user,
+    )
+    return JSONResponse(
+        {'job_id': job.job_id, 'status': job.status},
+        status_code=201,
+    )
+
+
+@router.post('/v1/jobs/{job_id}/progress')
+async def job_progress(job_id: str, request: Request) -> JSONResponse:
+    """上报外部任务进度（同时续心跳）。缺失字段不更新，幂等安全。"""
+    body = await _read_body(request)
+    try:
+        percent = float(body['percent']) if body.get('percent') is not None else None
+    except (TypeError, ValueError):
+        percent = None
+    stage_index = body.get('stage_index')
+    stage_total = body.get('stage_total')
+    try:
+        stage_index = int(stage_index) if stage_index is not None else None
+    except (TypeError, ValueError):
+        stage_index = None
+    try:
+        stage_total = int(stage_total) if stage_total is not None else None
+    except (TypeError, ValueError):
+        stage_total = None
+    job = _queue_of(request).report_external(
+        job_id,
+        percent=percent,
+        message=body.get('message'),
+        stage_task=body.get('stage'),
+        stage_index=stage_index,
+        stage_total=stage_total,
+    )
+    return JSONResponse(job.snapshot())
+
+
+@router.post('/v1/jobs/{job_id}/finish')
+async def job_finish(job_id: str, request: Request) -> JSONResponse:
+    """外部任务终态（``done`` / ``failed`` / ``canceled``）。"""
+    body = await _read_body(request)
+    status = str(body.get('status') or '').strip().lower()
+    if status not in ('done', 'failed', 'canceled'):
+        raise invalid_request(f'非法终态：{status}')
+    result = body.get('result')
+    error = body.get('error')
+    message = body.get('message')
+    job = _queue_of(request).finish_external(
+        job_id, status=status, result=result, error=error, message=message
+    )
     return JSONResponse(job.snapshot())
 
 
