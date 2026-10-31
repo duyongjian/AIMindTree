@@ -21,7 +21,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
-import '../../ai/ai_job_service.dart' show kAiJobQueueEnabled;
+import '../../ai/ai_job_service.dart' show kAiJobQueueEnabled, AiJobStatus;
 import '../../ai/ai_task.dart';
 import '../../ai/agent_memory.dart';
 import '../../ai/agent_tools.dart';
@@ -984,15 +984,54 @@ class AgentPageState extends State<AgentPage> {
         '只输出一个 JSON 对象，不要任何解释或代码块标记：\n'
         '{"extension":[{"name":"","definition":"","reason":""}]}\n'
         'reason 要说明它和树里哪个已有知识点相关、为什么值得延伸。';
+    // 登记成托盘后台任务：切走页面后仍能在「后台任务」托盘看到它在跑、并可取消。
+    // buf 提到外层：body 与 `await task.done` 之后的解析共用同一份已收集内容。
     final buf = StringBuffer();
-    try {
-      await for (final c in widget.service.ai.chat(AiTask.t5Ask, prompt)) {
-        if (c.delta != null) buf.write(c.delta);
-      }
-    } on Object catch (e) {
-      _log.w('树外延伸失败（忽略）：$e');
+    final task = widget.service.jobs.runDetached(
+      label: 'AI 助手 · 延伸讲解：${tree.name}',
+      // 不传 resourceKey（保持默认空串 = 不占锁）：本方法与「重新分析」可能并发，
+      // 占锁会把 holdInteractive('agent:chat') 的锁逻辑搞复杂，这里无需互斥。
+      silent: true, // 终态不弹 SnackBar（本页自有 _detecting 状态，避免打扰）；托盘行仍可见。
+      doneMessage: '延伸梳理完成',
+      body: (t) async {
+        var flushedChars = 0;
+        var flushedAt = DateTime.now();
+        try {
+          await for (final c in widget.service.ai.chat(AiTask.t5Ask, prompt)) {
+            // 用户点托盘「取消」：下一块就收工（不必等模型吐完）。
+            if (t.isCanceled) break;
+            if (c.delta != null) buf.write(c.delta);
+            // 进度节流：累计 ≥200 字或距上次刷新 >400ms 才刷托盘，避免托盘行疯狂抖动。
+            final now = DateTime.now();
+            if (buf.length - flushedChars >= 200 ||
+                now.difference(flushedAt) > const Duration(milliseconds: 400)) {
+              flushedChars = buf.length;
+              flushedAt = now;
+              t.progress('已梳理 ${buf.length} 字…');
+            }
+          }
+        } on Object catch (e) {
+          // 记日志后**必须** rethrow：让 AiJobService 把任务标 failed，
+          // 页面才能区分「真失败」与「成功了但没梳理出概念」（吞掉会把失败伪装成没概念）。
+          _log.w('树外延伸失败（忽略）：$e');
+          rethrow;
+        }
+      },
+    );
+    // done 在 done / failed / canceled 都会 complete，不抛；页面被销毁也不会卡住
+    // （Future 由 jobs 持有，body 独立跑完才 complete，与页面生命周期无关）。
+    await task.done;
+    if (task.isCanceled) {
+      // 取消后必须复位 _detecting（否则按钮永久禁用）；半截结果不解析入面板。
       if (mounted) setState(() => _detecting = false);
-      _toast('延伸梳理失败：$e');
+      return;
+    }
+    if (task.job.status == AiJobStatus.failed) {
+      // silent:true 压掉了服务层 SnackBar，失败提示只能由页面自己给
+      // （否则用户会把「调用失败」误当成「没梳理出概念」）。
+      final msg = task.job.errorMessage ?? '未知错误';
+      if (mounted) setState(() => _detecting = false);
+      _toast('延伸梳理失败：$msg');
       return;
     }
     final before = _detected.length;
