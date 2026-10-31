@@ -35,8 +35,7 @@ workflows:
     publishing:
       email:
         recipients:
-          # TODO: 替换为你的邮箱
-          - your-email@example.com
+          - 2594589804@qq.com
         notify:
           success: false
           failure: false
@@ -80,7 +79,7 @@ workflows:
     publishing:
       email:
         recipients:
-          - your-email@example.com
+          - 2594589804@qq.com
         notify:
           success: false
           failure: false
