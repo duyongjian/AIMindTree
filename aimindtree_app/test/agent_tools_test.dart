@@ -6,7 +6,9 @@
 /// 2. `catalogText` 目录完整性；
 /// 3. 7 个只读工具的内存库端到端（建笔记 → 提取知识点 → 建树 → 并入）；
 /// 4. 权限预留闸：非 `owner` 权限级的工具一律拒绝（permission_not_granted）；
-/// 5. 未知工具 / 缺参数 / 不存在 id 的错误回补（喂回模型自我纠正）。
+/// 5. 未知工具 / 缺参数 / 不存在 id 的错误回补（喂回模型自我纠正）；
+/// 6. 工具层「引用解析」：tree_id / point_id 传 id 或名称都能工作，
+///    重名回 `ambiguous_ref`、查不到回 `not_found` + 结构化 `candidates`。
 library;
 
 import 'dart:convert';
@@ -16,6 +18,7 @@ import 'package:aimindtree_app/core/result.dart';
 import 'package:aimindtree_app/data/db/drift_database.dart';
 import 'package:aimindtree_app/data/models/knowledge_point.dart';
 import 'package:aimindtree_app/data/models/knowledge_tree.dart';
+import 'package:aimindtree_app/data/repositories/group_repository.dart';
 import 'package:aimindtree_app/data/repositories/knowledge_repository.dart';
 import 'package:aimindtree_app/data/repositories/tree_repository.dart';
 import 'package:drift/drift.dart' as drift;
@@ -277,6 +280,170 @@ void main() {
     test('未知工具 → unknown_tool 错误（喂回模型自我纠正）', () async {
       final out = decode(await toolset.dispatch('delete_everything', const {}));
       expect(out['error'], 'unknown_tool');
+    });
+  });
+
+  // ------------------------------------------------ 工具层引用解析（id / 名称）
+
+  group('工具层引用解析：id 查不到时按名称唯一匹配', () {
+    test('list_tree_points：传树名 → 解析成真实树并返回成员', () async {
+      final (_, _, treeId) = await seed();
+      final out = decode(await toolset.dispatch(
+        'list_tree_points',
+        {'tree_id': '物理'},
+      ));
+      expect(out.containsKey('error'), isFalse, reason: '树名应被解析，不该 not_found');
+      expect(out['tree'], {'id': treeId, 'name': '物理'});
+      final pts = out['points'] as List;
+      expect(pts, hasLength(1));
+      expect(pts.first['name'], '牛顿第一定律');
+    });
+
+    test('list_tree_points：树名大小写 / 前后空格不敏感', () async {
+      final created = await trees.createTree('Linear Algebra');
+      final treeId = (created as Success<KnowledgeTree>).value.id;
+      final out = decode(await toolset.dispatch(
+        'list_tree_points',
+        {'tree_id': '  linear algebra  '},
+      ));
+      expect(out['tree']['id'], treeId);
+      expect(out['points'] as List, isEmpty);
+    });
+
+    test('list_tree_points：名字不存在 → not_found + 结构化 candidates', () async {
+      final (_, _, treeId) = await seed();
+      final out = decode(await toolset.dispatch(
+        'list_tree_points',
+        {'tree_id': 'linear_algebra'},
+      ));
+      expect(out['error'], 'not_found');
+      final cands = out['candidates'] as List;
+      expect(cands, isNotEmpty, reason: '必须回候选让模型自我纠正');
+      expect(cands.first['id'], treeId);
+      expect(cands.first['name'], '物理');
+      expect(out['hint'], isNotEmpty);
+      final msg = out['message'] as String;
+      expect(msg, contains('linear_algebra'), reason: '保留原始输入便于模型对照');
+      expect(msg, isNot('知识树不存在：linear_algebra'),
+          reason: 'message 要说明「既不是 id 也不是树名」，不能只是回显输入');
+    });
+
+    test('list_tree_points：传真实 id 行为不变（回归护栏）', () async {
+      final (_, _, treeId) = await seed();
+      final out = decode(await toolset.dispatch(
+        'list_tree_points',
+        {'tree_id': treeId},
+      ));
+      expect(out.containsKey('error'), isFalse);
+      expect(out['tree'], {'id': treeId, 'name': '物理'});
+      expect(out['points'] as List, hasLength(1));
+      expect(out['truncated'], isFalse);
+    });
+
+    test('list_tree_points：两棵同名树 + 传名字 → ambiguous_ref（候选 2 条）', () async {
+      final (_, _, treeId) = await seed();
+      final dup = await trees.createTree('物理');
+      final dupId = (dup as Success<KnowledgeTree>).value.id;
+      final out = decode(await toolset.dispatch(
+        'list_tree_points',
+        {'tree_id': '物理'},
+      ));
+      expect(out['error'], 'ambiguous_ref');
+      final cands = out['candidates'] as List;
+      expect(cands, hasLength(2), reason: '重名时必须列出全部候选，让模型改用 id');
+      expect(cands.map((c) => c['id']).toSet(), {treeId, dupId});
+      expect(out['message'] as String, contains('不唯一'));
+      expect(out.containsKey('points'), isFalse, reason: '重名时绝不能猜一棵返回数据');
+    });
+
+    test('写工具 plan：树名换成真实 id，绝不把名称传给仓库', () async {
+      final (_, kpId, treeId) = await seed();
+
+      final rename = await toolset.planWrite(
+        'rename_knowledge_tree',
+        {'tree_id': '物理', 'name': '物理2'},
+      );
+      expect(rename.isError, isFalse);
+      expect(rename.args['tree_id'], treeId);
+      expect(rename.summary, contains('物理'));
+
+      final add = await toolset.planWrite(
+        'add_points_to_tree',
+        {'tree_id': '物理', 'point_ids': [kpId]},
+      );
+      expect(add.isError, isFalse);
+      expect(add.args['tree_id'], treeId);
+
+      final rm = await toolset.planWrite(
+        'remove_points_from_tree',
+        {'tree_id': '物理', 'point_ids': [kpId]},
+      );
+      expect(rm.isError, isFalse);
+      expect(rm.args['tree_id'], treeId);
+
+      final del = await toolset.planWrite(
+        'delete_knowledge_tree',
+        {'tree_id': '物理'},
+      );
+      expect(del.isError, isFalse);
+      expect(del.args['tree_id'], treeId);
+
+      final bad = await toolset.planWrite(
+        'rename_knowledge_tree',
+        {'tree_id': 'no_such_tree_xyz', 'name': 'x'},
+      );
+      expect(bad.isError, isTrue);
+      expect(bad.error as String, contains('物理'), reason: 'plan 报错要带候选名称');
+      expect(bad.error as String, contains(treeId), reason: 'plan 报错要带候选 id');
+    });
+
+    test('create_group：scope 传不存在的树名 → 规划失败（此前不校验存在性）', () async {
+      final groups = GroupRepository(db, deviceId: 'test-device');
+      final ts = AgentToolset.create(repo: repo, trees: trees, groups: groups);
+      await seed();
+
+      final bad = await ts.planWrite('create_group', {'name': 'g1', 'scope': '不存在的树'});
+      expect(bad.isError, isTrue, reason: 'scope 必须校验存在性，不能写进悬空 canvas_id');
+      expect(bad.error as String, contains('找不到知识树'));
+
+      final ok = await ts.planWrite('create_group', {'name': 'g1', 'scope': '物理'});
+      expect(ok.isError, isFalse);
+      expect(ok.summary, contains('物理'));
+      final created = decode(await ts.executeWrite('create_group', ok.args));
+      expect(created['ok'], isTrue);
+
+      // 留空 / "global" 仍是全局分组（不挂树），语义不变。
+      final global = await ts.planWrite('create_group', {'name': 'g2'});
+      expect(global.isError, isFalse);
+      expect(global.args['scope'], '');
+      expect(global.summary, contains('全局'));
+    });
+
+    test('get_knowledge_point：传知识点名称 → 成功', () async {
+      final (noteId, kpId, _) = await seed();
+      final p = decode(await toolset.dispatch(
+        'get_knowledge_point',
+        {'point_id': ' 牛顿第一定律 '},
+      ));
+      expect(p.containsKey('error'), isFalse, reason: '知识点名称应被解析');
+      expect(p['id'], kpId);
+      expect(p['name'], '牛顿第一定律');
+      expect(p['source_note_id'], noteId);
+      expect(p['definition'], isNotEmpty);
+    });
+
+    test('get_knowledge_point：名称查不到 → not_found + 名称包含关键字的候选', () async {
+      final (_, kpId, _) = await seed();
+      final out = decode(await toolset.dispatch(
+        'get_knowledge_point',
+        {'point_id': '牛顿'},
+      ));
+      expect(out['error'], 'not_found');
+      final cands = out['candidates'] as List;
+      expect(cands, hasLength(1));
+      expect(cands.first['id'], kpId);
+      expect(cands.first['name'], '牛顿第一定律');
+      expect(out['hint'], isNotEmpty);
     });
   });
 

@@ -15,6 +15,7 @@ library;
 import 'dart:convert';
 
 import '../../data/models/knowledge_point.dart';
+import '../../data/models/knowledge_tree.dart';
 import '../../data/repositories/group_repository.dart';
 import '../../data/repositories/knowledge_repository.dart';
 import '../../data/repositories/tree_repository.dart';
@@ -374,16 +375,13 @@ class AgentToolset {
         description: '列出某棵知识树里的知识点（id / 名称 / 类型 / 掌握度 / 定义摘要）',
         permission: AgentToolPermission.owner,
         params: const [
-          AgentToolParam('tree_id', 'string', '知识树 id（可省略，默认当前选中的树）'),
+          AgentToolParam('tree_id', 'string', '知识树 id 或树名（可省略，默认当前选中的树）'),
         ],
         exec: (args) async {
-          final treeId = _strArg(args, 'tree_id') ?? _activeTreeId;
-          if (treeId == null || treeId.isEmpty) {
-            return _err('missing_arg', '缺少 tree_id，且当前未选择知识树');
-          }
-          final tree = await _trees.getTree(treeId);
-          if (tree == null) return _err('not_found', '知识树不存在：$treeId');
-          final ids = await _trees.memberPointIds(treeId);
+          final ref = _strArg(args, 'tree_id') ?? _activeTreeId ?? '';
+          final (tree, err) = await _resolveTreeRef(ref);
+          if (tree == null) return err ?? _err('not_found', '知识树不存在：$ref');
+          final ids = await _trees.memberPointIds(tree.id);
           final pts = await _repo.pointsByIds(ids);
           final out = pts.take(200).map((p) => _pointBrief(p)).toList();
           return jsonEncode({
@@ -399,14 +397,14 @@ class AgentToolset {
         description: '查看单个知识点的完整定义、类型、掌握度与出处笔记',
         permission: AgentToolPermission.owner,
         params: const [
-          AgentToolParam('point_id', 'string', '知识点 id', required: true),
+          AgentToolParam('point_id', 'string', '知识点 id 或名称', required: true),
         ],
         exec: (args) async {
-          final id = _strArg(args, 'point_id');
-          if (id == null) return _err('missing_arg', '缺少 point_id');
-          final pts = await _repo.pointsByIds([id]);
-          if (pts.isEmpty) return _err('not_found', '知识点不存在：$id');
-          final p = pts.first;
+          final ref = _strArg(args, 'point_id');
+          if (ref == null) return _err('missing_arg', '缺少 point_id');
+          // 先按 id 查（历史路径不变），查不到再按名称唯一匹配兜底。
+          final (p, err) = await _resolvePointRef(ref);
+          if (p == null) return err ?? _err('not_found', '知识点不存在：$ref');
           return jsonEncode({
             'id': p.id,
             'name': p.name,
@@ -884,14 +882,19 @@ class AgentToolset {
         description: '重命名一棵知识树',
         permission: AgentToolPermission.owner,
         params: const [
-          AgentToolParam('tree_id', 'string', '知识树 id', required: true),
+          AgentToolParam('tree_id', 'string', '知识树 id 或树名', required: true),
           AgentToolParam('name', 'string', '新名称', required: true),
         ],
         plan: (args) async {
           final id = _strArg(args, 'tree_id');
           if (id == null) return AgentToolPlan.errorPlan('rename_knowledge_tree', '缺少 tree_id');
-          final tree = await _trees.getTree(id);
-          if (tree == null) return AgentToolPlan.errorPlan('rename_knowledge_tree', '知识树不存在：$id');
+          final (tree, err) = await _resolveTreeRef(id);
+          if (tree == null) {
+            return AgentToolPlan.errorPlan(
+              'rename_knowledge_tree',
+              _planErrMessage(err ?? _err('not_found', '知识树不存在：$id')),
+            );
+          }
           final name = _strArg(args, 'name');
           if (name == null || name.isEmpty) {
             return AgentToolPlan.errorPlan('rename_knowledge_tree', '缺少 name');
@@ -899,7 +902,7 @@ class AgentToolset {
           return AgentToolPlan(
             toolName: 'rename_knowledge_tree',
             summary: '把知识树「${tree.name}」重命名为「${_cut(name, 40)}」',
-            args: {'tree_id': id, 'name': name},
+            args: {'tree_id': tree.id, 'name': name},
           );
         },
         execute: (args) async {
@@ -916,20 +919,25 @@ class AgentToolset {
         description: '删除一棵知识树（可选连其知识点一起彻底删除）',
         permission: AgentToolPermission.owner,
         params: const [
-          AgentToolParam('tree_id', 'string', '知识树 id', required: true),
+          AgentToolParam('tree_id', 'string', '知识树 id 或树名', required: true),
           AgentToolParam('delete_points', 'boolean', 'true=连树里的知识点一起彻底删除（不可恢复）；false=仅删树、知识点保留为独立资产'),
         ],
         plan: (args) async {
           final id = _strArg(args, 'tree_id');
           if (id == null) return AgentToolPlan.errorPlan('delete_knowledge_tree', '缺少 tree_id');
-          final tree = await _trees.getTree(id);
-          if (tree == null) return AgentToolPlan.errorPlan('delete_knowledge_tree', '知识树不存在：$id');
+          final (tree, err) = await _resolveTreeRef(id);
+          if (tree == null) {
+            return AgentToolPlan.errorPlan(
+              'delete_knowledge_tree',
+              _planErrMessage(err ?? _err('not_found', '知识树不存在：$id')),
+            );
+          }
           final deletePoints = _boolArg(args, 'delete_points', false);
-          final memberCount = (await _trees.memberPointIds(id)).length;
+          final memberCount = (await _trees.memberPointIds(tree.id)).length;
           return AgentToolPlan(
             toolName: 'delete_knowledge_tree',
             summary: '删除知识树「${tree.name}」${deletePoints ? '并彻底删除其 $memberCount 个知识点（不可恢复）' : '（仅解除关系，保留 $memberCount 个知识点为独立资产）'}',
-            args: {'tree_id': id, 'delete_points': deletePoints},
+            args: {'tree_id': tree.id, 'delete_points': deletePoints},
             risk: AgentToolRisk.danger,
             riskNote: deletePoints ? '将永久删除 $memberCount 个知识点' : '知识树将被删除',
           );
@@ -951,14 +959,19 @@ class AgentToolset {
         description: '把若干知识点并入某棵知识树（幂等）',
         permission: AgentToolPermission.owner,
         params: const [
-          AgentToolParam('tree_id', 'string', '知识树 id', required: true),
+          AgentToolParam('tree_id', 'string', '知识树 id 或树名', required: true),
           AgentToolParam('point_ids', 'list', '知识点 id 列表', required: true),
         ],
         plan: (args) async {
           final id = _strArg(args, 'tree_id');
           if (id == null) return AgentToolPlan.errorPlan('add_points_to_tree', '缺少 tree_id');
-          final tree = await _trees.getTree(id);
-          if (tree == null) return AgentToolPlan.errorPlan('add_points_to_tree', '知识树不存在：$id');
+          final (tree, err) = await _resolveTreeRef(id);
+          if (tree == null) {
+            return AgentToolPlan.errorPlan(
+              'add_points_to_tree',
+              _planErrMessage(err ?? _err('not_found', '知识树不存在：$id')),
+            );
+          }
           final ids = _strListArg(args, 'point_ids');
           if (ids.isEmpty) return AgentToolPlan.errorPlan('add_points_to_tree', 'point_ids 不能为空');
           final pts = await _repo.pointsByIds(ids);
@@ -968,7 +981,7 @@ class AgentToolset {
           return AgentToolPlan(
             toolName: 'add_points_to_tree',
             summary: '把 ${pts.length} 个知识点并入「${tree.name}」',
-            args: {'tree_id': id, 'point_ids': pts.map((p) => p.id).toList()},
+            args: {'tree_id': tree.id, 'point_ids': pts.map((p) => p.id).toList()},
           );
         },
         execute: (args) async {
@@ -986,20 +999,25 @@ class AgentToolset {
         description: '从某棵知识树移除若干知识点（仅解除关系，知识点本身保留）',
         permission: AgentToolPermission.owner,
         params: const [
-          AgentToolParam('tree_id', 'string', '知识树 id', required: true),
+          AgentToolParam('tree_id', 'string', '知识树 id 或树名', required: true),
           AgentToolParam('point_ids', 'list', '知识点 id 列表', required: true),
         ],
         plan: (args) async {
           final id = _strArg(args, 'tree_id');
           if (id == null) return AgentToolPlan.errorPlan('remove_points_from_tree', '缺少 tree_id');
-          final tree = await _trees.getTree(id);
-          if (tree == null) return AgentToolPlan.errorPlan('remove_points_from_tree', '知识树不存在：$id');
+          final (tree, err) = await _resolveTreeRef(id);
+          if (tree == null) {
+            return AgentToolPlan.errorPlan(
+              'remove_points_from_tree',
+              _planErrMessage(err ?? _err('not_found', '知识树不存在：$id')),
+            );
+          }
           final ids = _strListArg(args, 'point_ids');
           if (ids.isEmpty) return AgentToolPlan.errorPlan('remove_points_from_tree', 'point_ids 不能为空');
           return AgentToolPlan(
             toolName: 'remove_points_from_tree',
             summary: '从「${tree.name}」移除 ${ids.length} 个知识点（知识点本身保留）',
-            args: {'tree_id': id, 'point_ids': ids},
+            args: {'tree_id': tree.id, 'point_ids': ids},
             risk: AgentToolRisk.caution,
             riskNote: '仅解除树关系，不删知识点',
           );
@@ -1020,7 +1038,7 @@ class AgentToolset {
         permission: AgentToolPermission.owner,
         params: const [
           AgentToolParam('name', 'string', '分组名', required: true),
-          AgentToolParam('scope', 'string', '作用域：留空或 "global" = 全局分组；tree_id = 该知识树内的分组'),
+          AgentToolParam('scope', 'string', '作用域：留空或 "global" = 全局分组；否则填知识树 id 或树名（= 该树内的分组）'),
           AgentToolParam('point_ids', 'list', '初始成员知识点 id 列表'),
         ],
         plan: (args) async {
@@ -1029,9 +1047,23 @@ class AgentToolset {
           if (name == null || name.isEmpty) {
             return AgentToolPlan.errorPlan('create_group', '缺少 name');
           }
-          final scope = _strArg(args, 'scope') ?? '';
+          final rawScope = _strArg(args, 'scope') ?? '';
           final ids = _strListArg(args, 'point_ids');
-          final scopeLabel = scope.isEmpty || scope == 'global' ? '全局' : '知识树 $scope 内';
+          // scope 留空 / "global" = 全局分组（不挂树）；其余必须能解析成真实知识树，
+          // 否则写进去的会是一个不存在的 canvas_id（历史上这里完全没有校验）。
+          var scope = '';
+          var scopeLabel = '全局';
+          if (rawScope.isNotEmpty && rawScope != 'global') {
+            final (tree, err) = await _resolveTreeRef(rawScope);
+            if (tree == null) {
+              return AgentToolPlan.errorPlan(
+                'create_group',
+                _planErrMessage(err ?? _err('not_found', '知识树不存在：$rawScope')),
+              );
+            }
+            scope = tree.id;
+            scopeLabel = '知识树「${tree.name}」内';
+          }
           return AgentToolPlan(
             toolName: 'create_group',
             summary: '在$scopeLabel新建分组「${_cut(name, 40)}」${ids.isNotEmpty ? '（${ids.length} 个成员）' : ''}',
@@ -1332,6 +1364,117 @@ class AgentToolset {
         'definition': _cut(p.definition, 120),
       };
 
+  /// 把一个「树引用」解析成真实的树行：先按 id，再按名称（trim + 忽略大小写）唯一匹配。
+  ///
+  /// 模型经常把**知识树名称**当 id 传进来（`getTree` 是严格主键等值查询，会直接
+  /// `not_found`）。这里做统一兜底：id 命中即原样返回（历史行为零变化），
+  /// 未命中的再按名称找唯一匹配。
+  ///
+  /// 返回 `(tree, errorJson)`：`tree` 非空 = 成功；`errorJson` 非空 = 需要原样
+  /// 返回给模型的错误 JSON（`missing_arg` / `not_found` / `ambiguous_ref`，
+  /// 后两者带 `candidates` 让模型自我纠正）。
+  Future<(KnowledgeTree?, String?)> _resolveTreeRef(String raw) async {
+    final ref = raw.trim();
+    if (ref.isEmpty) {
+      return (
+        null,
+        _errWith('missing_arg', '缺少 tree_id，且当前未选择知识树（tree_id 既可以是 id 也可以是树名）', const <String, dynamic>{}),
+      );
+    }
+    // 1) 先按 id 精确命中——保持既有 id 路径零行为变化。
+    final hit = await _trees.getTree(ref);
+    if (hit != null) return (hit, null);
+    // 2) 再按名称唯一匹配。
+    final trees = await _trees.listTrees();
+    final lower = ref.toLowerCase();
+    final matched = trees
+        .where((t) => t.name.trim().toLowerCase() == lower)
+        .toList(growable: false);
+    if (matched.length == 1) return (matched.first, null);
+    if (matched.length > 1) {
+      return (
+        null,
+        _errWith('ambiguous_ref', '知识树名「$ref」不唯一，请改用 id', <String, dynamic>{
+          'candidates': matched.take(5).map((t) => <String, dynamic>{'id': t.id, 'name': t.name}).toList(),
+        }),
+      );
+    }
+    return (
+      null,
+      _errWith('not_found', '找不到知识树「$ref」（既不是 id 也不是树名）', <String, dynamic>{
+        'candidates': trees.take(5).map((t) => <String, dynamic>{'id': t.id, 'name': t.name}).toList(),
+        'hint': '可从 candidates 里挑一个 id 重试',
+      }),
+    );
+  }
+
+  /// 把一个「知识点引用」解析成真实的知识点行：先按 id，再按名称唯一匹配。
+  ///
+  /// 与 [_resolveTreeRef] 同构，供 `get_knowledge_point` 兜底「模型传名称」。
+  Future<(KnowledgePoint?, String?)> _resolvePointRef(String raw) async {
+    final ref = raw.trim();
+    if (ref.isEmpty) {
+      return (
+        null,
+        _errWith('missing_arg', '缺少 point_id（既可以是 id 也可以是名称）', const <String, dynamic>{}),
+      );
+    }
+    // 1) 先按 id 精确命中。
+    final hit = await _repo.pointsByIds(<String>[ref]);
+    if (hit.isNotEmpty) return (hit.first, null);
+    // 2) 再按名称唯一匹配（软删的点不会出现在 allKnowledgePoints 里）。
+    final all = await _repo.allKnowledgePoints();
+    final lower = ref.toLowerCase();
+    final matched = all
+        .where((p) => p.name.trim().toLowerCase() == lower)
+        .toList(growable: false);
+    if (matched.length == 1) return (matched.first, null);
+    if (matched.length > 1) {
+      return (
+        null,
+        _errWith('ambiguous_ref', '知识点名「$ref」不唯一，请改用 id', <String, dynamic>{
+          'candidates': matched.take(5).map((p) => <String, dynamic>{'id': p.id, 'name': p.name}).toList(),
+        }),
+      );
+    }
+    final near = all
+        .where((p) => p.name.toLowerCase().contains(lower))
+        .take(5)
+        .toList(growable: false);
+    return (
+      null,
+      _errWith('not_found', '找不到知识点「$ref」（既不是 id 也不是名称）', <String, dynamic>{
+        'candidates': near.map((p) => <String, dynamic>{'id': p.id, 'name': p.name}).toList(),
+        'hint': '可从 candidates 里挑一个 id 或名称重试',
+      }),
+    );
+  }
+
+  /// 把解析 helper 的错误 JSON 压成写工具 plan 的报错文案（含候选与提示）。
+  ///
+  /// 写工具的 [AgentToolPlan.error] 只有一条文本，又要让用户 / 模型看到可选 id，
+  /// 所以这里把 `candidates` / `hint` 拼进文案。
+  static String _planErrMessage(String errorJson) {
+    try {
+      final m = jsonDecode(errorJson);
+      if (m is! Map) return errorJson;
+      final b = StringBuffer(m['message'] as String? ?? '参数无效');
+      final cands = m['candidates'];
+      if (cands is List && cands.isNotEmpty) {
+        b.write('（候选：');
+        b.write(cands
+            .map((c) => c is Map ? '${c['name']}(${c['id']})' : '$c')
+            .join('、'));
+        b.write('）');
+      }
+      final hint = m['hint'];
+      if (hint is String && hint.isNotEmpty) b.write('；$hint');
+      return b.toString();
+    } on Object {
+      return errorJson;
+    }
+  }
+
   static String? _strArg(Map<String, dynamic> args, String key) {
     final v = args[key];
     if (v is! String) return null;
@@ -1381,5 +1524,17 @@ class AgentToolset {
   static String _cut(String s, int max) => cutText(s, max);
 
   static String _err(String code, String message) =>
-      jsonEncode({'error': code, 'message': message});
+      _errWith(code, message, const <String, dynamic>{});
+
+  /// 带附加字段的错误 JSON（如 `candidates` / `hint`），供模型自我纠正用。
+  ///
+  /// `extra` 里不允许覆盖 `error` / `message` 两个保留键。
+  static String _errWith(String code, String message, Map<String, dynamic> extra) {
+    final out = <String, dynamic>{'error': code, 'message': message};
+    for (final e in extra.entries) {
+      if (e.key == 'error' || e.key == 'message') continue;
+      out[e.key] = e.value;
+    }
+    return jsonEncode(out);
+  }
 }
