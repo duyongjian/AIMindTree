@@ -22,6 +22,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 
 import 'ai_provider.dart';
+import 'llm_channel.dart';
 import 'clients/llm_server_client.dart' show LlmServerException;
 import '../core/logger.dart';
 
@@ -88,6 +89,11 @@ enum AiJobStatus { queued, running, done, failed, canceled;
         'canceled' => AiJobStatus.canceled,
         _ => AiJobStatus.queued,
       };
+}
+
+/// 内部信号：任务还在通道队尾时就被取消。
+class _CanceledWhileQueued implements Exception {
+  const _CanceledWhileQueued();
 }
 
 /// 一个异步 AI 任务（App 侧视图 + 原始提交参数，retry 用）。
@@ -213,7 +219,11 @@ class AiJob {
       status == AiJobStatus.done ? 1.0 : (percent > 0 ? percent : null);
 
   void applyJson(Map<String, dynamic> json) {
+    final prev = status;
     status = AiJobStatus.parse(json['status'] as String?);
+    // 服务端任务的 running/终态会影响「模型是否被占」，需让通道重新评估
+    // （否则本进程的请求会一直等着一个已经跑完的任务）。
+    if (prev != status) LlmChannel.instance.notifyExternalChanged();
     final stage = json['stage'];
     if (stage is Map) {
       stageIndex = (stage['index'] as num?)?.toInt() ?? 1;
@@ -247,7 +257,16 @@ class AiJobService {
       // 只与本机 llm_server 通信：强制不走系统代理（否则本机 HTTP_PROXY 会
       // 把 127.0.0.1 请求发往代理而「假连不上」，队列提交失败→回落同步→
       // 后台 M10 看不到任务）。对齐服务端 trust_env=false。
-      : _client = client ?? (HttpClient()..findProxy = (Uri uri) => 'DIRECT');
+      : _client = client ?? (HttpClient()..findProxy = (Uri uri) => 'DIRECT') {
+    // 服务端队列任务（/v1/jobs，由服务端 worker 执行）看不见执行体，只能
+    // 靠轮询到的 status=running 判断「模型此刻被它占着」——注入给全局通道，
+    // 让本进程的流式请求等它跑完再发（用户要的「等前一个完成再发新请求」）。
+    LlmChannel.instance.externalBusy = _hasRunningServerJob;
+  }
+
+  /// 是否有服务端队列任务正跑在模型上（通道据此让本进程请求排队）。
+  bool _hasRunningServerJob() => _jobs.values.any(
+      (j) => !j.detached && !j.interactive && j.status == AiJobStatus.running);
 
   /// 形如 ``http://127.0.0.1:8787``（来自 llm_server provider 行 / 内置默认）。
   final String baseUrl;
@@ -369,6 +388,8 @@ class AiJobService {
     if (job.interactive || job.detached) {
       job.cancelRequested = true;
       job.message = '正在取消…';
+      // 还在通道队尾的话立刻摘出来，别占着位次让后面的人白等。
+      LlmChannel.instance.cancelWait(jobId);
       try {
         job.interrupt?.call();
       } on Object catch (e) {
@@ -560,20 +581,14 @@ class AiJobService {
       detached: true,
       doneMessage: doneMessage,
     )
-      ..status = AiJobStatus.running
-      ..startedAt = DateTime.now()
-      ..message = '进行中…';
+      // 登记 ≠ 开跑：先「待启动」，拿到模型通道才转「进行中」。
+      // 这正是「新任务不会把前一个挤掉」的关键 —— 它只能在队尾等。
+      ..status = AiJobStatus.queued
+      ..message = '排队中…';
     _jobs[job.id] = job;
     if (key.isNotEmpty) _locks[key] = job.id;
     final task = DetachedTask._(this, job);
     job.interrupt = task._interruptFromTray;
-    // 服务端登记外部任务（看门狗兜底：App 被强杀也能超时标 failed）。
-    unawaited(
-      registerExternal(task: 'BACKGROUND', label: label, resourceKey: key)
-          .then((sid) {
-        if (sid != null) job.serverJobId = sid;
-      }),
-    );
     _notify();
     _log.i('已登记后台任务 ${job.id}（$label）');
     unawaited(_runDetachedBody(task, body));
@@ -585,8 +600,37 @@ class AiJobService {
     Future<void> Function(DetachedTask task) body,
   ) async {
     final job = task.job;
+    LlmTicket? ticket;
     try {
-      await body(task);
+      // ① 排队等模型通道。嵌套任务（执行体里又登记了后台任务）不再排队，
+      //    否则外层的通道被自己持有 → 内层永远等不到 → 死锁。
+      if (Zone.current[kLlmChannelZoneKey] == null) {
+        ticket = await LlmChannel.instance.acquire(
+          label: job.label,
+          jobId: job.id,
+        );
+      }
+      // 排队期间被取消：不进入执行体，直接按取消收尾。
+      if (job.cancelRequested) throw const _CanceledWhileQueued();
+
+      job.status = AiJobStatus.running;
+      job.startedAt = DateTime.now();
+      job.message = '进行中…';
+      _notify();
+      // ② 服务端登记外部任务（看门狗兜底：App 被强杀也能超时标 failed）。
+      //    只在真正开跑时登记 —— 排在队里的任务不该让服务端以为它在跑。
+      unawaited(
+        registerExternal(task: 'BACKGROUND', label: job.label,
+                resourceKey: job.resourceKey)
+            .then((sid) {
+          if (sid != null) job.serverJobId = sid;
+        }),
+      );
+      // ③ 带 zone 标记跑执行体：内部的 ai.chat 凭标记免排队（通道已持有）。
+      await runZoned(
+        () => body(task),
+        zoneValues: <Object, Object>{kLlmChannelZoneKey: job.id},
+      );
       if (job.cancelRequested) {
         job.status = AiJobStatus.canceled;
         job.message = '已取消';
@@ -595,6 +639,9 @@ class AiJobService {
         job.percent = 1;
         job.message = job.doneMessage ?? '已完成';
       }
+    } on _CanceledWhileQueued {
+      job.status = AiJobStatus.canceled;
+      job.message = '已取消';
     } on Object catch (e, s) {
       if (job.cancelRequested) {
         job.status = AiJobStatus.canceled;
@@ -608,6 +655,9 @@ class AiJobService {
         job.message = '失败';
       }
     } finally {
+      // 放行下一位：必须在终态广播之前放开，否则队首会被一个已结束的任务
+      // 挡到下一个 revision 才动。
+      ticket?.release();
       // 先叫醒等待方再走终态广播：等的人要的是「可以继续了」。
       if (!task._done.isCompleted) task._done.complete();
     }

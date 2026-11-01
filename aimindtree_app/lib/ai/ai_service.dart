@@ -10,6 +10,7 @@ import 'ai_task.dart';
 import 'ai_task_router.dart';
 import '../core/logger.dart';
 import '../core/result.dart';
+import 'llm_channel.dart';
 
 class AiService {
   AiService({required this.router, AiProvider? defaultProvider})
@@ -51,6 +52,8 @@ class AiService {
       ));
     }
 
+    // 全局单通道：一次只放一个请求到模型（见 llm_channel.dart 顶部说明）。
+    final ticket = await LlmChannel.instance.acquire(label: _channelLabel(task));
     try {
       var result = await provider.runTask(task, inputs,
           user: user, timeout: timeout, variant: variant);
@@ -67,6 +70,8 @@ class AiService {
       _log.e('${task.code} 执行失败（${provider.id}）',
           error: e, stackTrace: s);
       return Failure(e, s);
+    } finally {
+      ticket.release();
     }
   }
 
@@ -79,20 +84,39 @@ class AiService {
     Duration timeout = const Duration(seconds: 900),
     String? variant,
   }) async* {
-    final provider = await router.resolve(task) ?? fallback;
-    if (provider == null) {
-      throw StateError(
-        'AI 服务未连接。请在「设置 → AI 服务状态」点重新连接，'
-        '或打开管理后台检查配置。',
+    // 全局单通道（FIFO）：真正的模型请求一次只放一个。
+    //
+    // 若本方法运行在某个 `runDetached` 执行体内（zone 带 kLlmChannelZoneKey），
+    // 通道已由那个任务持有，[LlmChannel.acquire] 会直接发免排队票 ——
+    // 这既避免了自锁，也保证一个后台任务的多段生成不会在中途被别人插队。
+    final ticket = await LlmChannel.instance.acquire(label: _channelLabel(task));
+    try {
+      final provider = await router.resolve(task) ?? fallback;
+      if (provider == null) {
+        throw StateError(
+          'AI 服务未连接。请在「设置 → AI 服务状态」点重新连接，'
+          '或打开管理后台检查配置。',
+        );
+      }
+      yield* provider.streamChat(
+        query,
+        conversationId: conversationId,
+        user: user,
+        timeout: timeout,
+        task: task,
+        variant: variant,
       );
+    } finally {
+      // `await for` 被 break / 订阅被取消时，async* 的 finally 一定会跑到，
+      // 通道不会因为调用方提前退订而永久泄漏。
+      ticket.release();
     }
-    yield* provider.streamChat(
-      query,
-      conversationId: conversationId,
-      user: user,
-      timeout: timeout,
-      task: task,
-      variant: variant,
-    );
   }
+
+  /// 通道上显示的任务名（托盘「当前：xxx」用它）。
+  static String _channelLabel(AiTask task) => switch (task) {
+        AiTask.t5Ask => 'AI 问答',
+        AiTask.t6Explain => '老师讲解',
+        _ => task.code,
+      };
 }

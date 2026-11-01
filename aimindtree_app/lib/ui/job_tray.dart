@@ -22,6 +22,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../ai/ai_job_service.dart';
+import '../ai/llm_channel.dart';
 
 /// 托盘宿主：把「托盘 + 整个页面栈」一起放进一个**铺满窗口**的 Overlay。
 ///
@@ -131,6 +132,8 @@ class JobTrayState extends State<JobTray> {
   void initState() {
     super.initState();
     widget.jobs.revision.addListener(_onRevision);
+    // 通道排队位次变化（前一个跑完、后面的位次前移）也要重绘。
+    LlmChannel.instance.revision.addListener(_onRevision);
     _terminalSub = widget.jobs.terminalStream.listen(_onTerminal);
     // 冷启动对账：收养服务端仍在跑的 job（App 被杀过）。
     widget.jobs.reconcile();
@@ -141,6 +144,7 @@ class JobTrayState extends State<JobTray> {
   @override
   void dispose() {
     widget.jobs.revision.removeListener(_onRevision);
+    LlmChannel.instance.revision.removeListener(_onRevision);
     _terminalSub?.cancel();
     _terminalSub = null;
     widget.jobs.onExpandTray = null;
@@ -375,17 +379,26 @@ class JobTrayState extends State<JobTray> {
     );
   }
 
-  /// 折叠态摘要：说「谁在推进」，而不是「谁最早提交」。
+  /// 折叠态摘要：**队首 + 总数**（FIFO，顺序稳定，不随状态跳）。
   ///
-  /// 旧实现取 `active.first`（按 submittedAt 升序 = **最早**提交的那条），于是
-  /// 「布置作业」这种先开的交互会话会一直霸占摘要，正在出题的后台行永远不上名。
+  /// 旧实现取「最新推进」的那条（`startedAt ?? submittedAt` 最大），任务从
+  /// queued 转 running 时 key 一变摘要就换人 —— 用户观感是「一下这个一下那个」，
+  /// 完全看不出这是一个队列。现在恒取 `active.first`（`activeJobs` 已按
+  /// submittedAt 升序），只有真正跑完一个才会推进，和队列语义一致。
   String _summaryText(List<AiJob> active, List<AiJob> failed, List<AiJob> done) {
-    if (active.isNotEmpty) {
-      final n = active.length;
-      final latest = _latestActive(active);
-      if (n == 1) return latest.label;
-      return '$n 个任务进行中（最新：${latest.label}）';
+    // 队首只看**真实任务**：交互会话是「页面开着」，它不排队、也不占模型，
+    // 让它当队首会让「布置作业编辑中」永远盖住正在排队的出题任务。
+    final tasks = active.where((j) => !j.interactive).toList();
+    if (tasks.isNotEmpty) {
+      final n = tasks.length;
+      final head = tasks.first;
+      final headText = head.status == AiJobStatus.running
+          ? head.label
+          : '${head.label}（待启动）';
+      final base = n == 1 ? headText : '$n 个任务 · 当前：$headText';
+      return active.length > n ? '$base · 另有会话进行中' : base;
     }
+    if (active.isNotEmpty) return active.first.label;
     if (failed.isNotEmpty) {
       // 只有带「重试」按钮的行才叫「可重试」：交互会话 / 后台任务重试不了，
       // 把它们算进「可重试」是空头支票。
@@ -400,24 +413,6 @@ class JobTrayState extends State<JobTray> {
           : '${done.length} 个任务已完成';
     }
     return '';
-  }
-
-  /// 「最新推进」的那条：优先 `startedAt`（真正开始跑的时刻），没有就看
-  /// `submittedAt`。交互会话只有 submittedAt，所以它不会盖过后开的真实任务。
-  AiJob _latestActive(List<AiJob> active) {
-    DateTime keyOf(AiJob j) => j.startedAt ?? j.submittedAt;
-    var best = active.first;
-    for (final job in active.skip(1)) {
-      final cmp = keyOf(job).compareTo(keyOf(best));
-      if (cmp > 0) {
-        best = job;
-      } else if (cmp == 0 && job.startedAt != null && best.startedAt == null) {
-        // 时间戳打平（Windows 时钟粒度 ~1ms，先开会话再点出题极易落在同一格）：
-        // 优先「真正开始跑」的那条 —— 交互会话是页面，不该盖过真实任务。
-        best = job;
-      }
-    }
-    return best;
   }
 
   Widget _jobRow(BuildContext context, AiJob job, List<AiJob> active) {
@@ -440,15 +435,16 @@ class JobTrayState extends State<JobTray> {
     // 事实、而非误导。老师模式：交互行锁 `kp:{id}`，该点的生成任务锁 `kp:{id}:chat`
     // → 前缀匹配即可判断「这一点是不是真在生成」。其它入口（作业 `homework:*`、
     // AI 助手 `agent:chat`）判断不了，就走中性文案，不承诺「空闲」以免误导。
-    final hasActiveGen = isInteractive &&
-        active.any((j) =>
-            j.id != job.id &&
-            !j.interactive &&
-            j.resourceKey.isNotEmpty &&
-            job.resourceKey.isNotEmpty &&
-            j.resourceKey.startsWith('${job.resourceKey}:'));
-    final messageText = isInteractive
-        ? (hasActiveGen ? '生成中 · 完成后自动落库' : '会话已打开 · 后台任务不受影响')
+    // 托盘文案 = job.message 原文，不再按行种类硬编码覆盖。
+    //
+    // 旧实现给交互会话行写死「会话已打开 · 后台任务不受影响」，把页面真正
+    // 写进去的话（setInteractiveMessage：'第 2 轮：正在思考…'）整段丢掉，
+    // 那一行没有一个字在动 → 用户判定「没在生成」（AI 助手报的就是这个）。
+    // 现在谁在干什么就显示什么，托盘只负责如实转述。
+    final isQueued = job.status == AiJobStatus.queued;
+    final queuePos = isQueued ? LlmChannel.instance.positionOf(job.id) : null;
+    final messageText = isQueued && queuePos != null
+        ? '排队中 · 第 $queuePos 位（等前面的任务用完模型）'
         : '${job.message}'
             '${(progress != null && !isDone) ? '（${(progress * 100).round()}%）' : ''}';
     final messageColor = isFailed
@@ -488,6 +484,19 @@ class JobTrayState extends State<JobTray> {
                           color: job.cancelRequested
                               ? kJobTrayOfflineColor
                               : kJobTrayDoneColor,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                    ],
+                    if (isQueued) ...[
+                      Icon(Icons.hourglass_empty,
+                          size: 14, color: colorScheme.outline),
+                      const SizedBox(width: 3),
+                      Text(
+                        '待启动',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          fontSize: 10,
+                          color: colorScheme.outline,
                         ),
                       ),
                       const SizedBox(width: 6),
@@ -538,7 +547,7 @@ class JobTrayState extends State<JobTray> {
                 ),
                 // 进度条：交互会话（无进度语义）与已完成（进度条已满，没有信息量）
                 // 一律不画。
-                if (!isInteractive && !isDone) ...[
+                if (!isInteractive && !isDone && !isQueued) ...[
                   const SizedBox(height: 4),
                   ClipRRect(
                     borderRadius: BorderRadius.circular(2),
