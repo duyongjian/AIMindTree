@@ -21,7 +21,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
-import '../../ai/ai_job_service.dart' show kAiJobQueueEnabled, AiJobStatus;
+import '../../ai/ai_job_service.dart' show kAiJobQueueEnabled;
 import '../../ai/ai_task.dart';
 import '../../ai/agent_memory.dart';
 import '../../ai/agent_tools.dart';
@@ -859,7 +859,10 @@ class AgentPageState extends State<AgentPage> {
 
   // ===================== 检测 =====================
 
-  /// 从当前对话抽「需要的知识点」与「薄弱点」两类建议。
+  /// 从当前对话抽「需要的知识点」「薄弱点」「树外延伸」三类建议。
+  ///
+  /// 「树外延伸」不再有手动按钮：由本方法每轮回答后自动跑一次，模型自己
+  /// 按对话意图判断是否输出（见 [_buildDetectPrompt]）。
   ///
   /// 复用 T5（``variant='detect'``，服务端透传 + JSON 修复）。队列路径（B3）：
   /// 静默提交——占 ``conversation:agent`` 锁 + 托盘计时，终态不弹 SnackBar，
@@ -903,18 +906,33 @@ class AgentPageState extends State<AgentPage> {
   }
 
   /// 拼检测 prompt：树上下文（活跃树已有知识点）+ 对话转录。
+  ///
+  /// 三类产出：``needed``（该掌握）/ ``weak``（明显薄弱）/ ``extension``
+  /// （树外延伸）。**树外延伸由模型自己按意图判断**：只有当用户在追问
+  /// 「当前知识树里还没有、但同属这一知识体系」的概念时才输出；没有活跃树
+  /// 时缺少参照系，一律要求给空数组（空树仍有树名/主题可作参照，照常判断）。
   /// 页面在查库期间被销毁则返回 null。
   Future<String?> _buildDetectPrompt() async {
     var treeCtx = '';
+    var hasTreeBasis = _activeTree != null;
     if (_activeTree != null) {
       final ids = await widget.service.trees.memberPointIds(_activeTree!.id);
       final pts = await widget.service.repo.pointsByIds(ids);
-      if (pts.isNotEmpty) {
-        treeCtx = '用户正在构建知识树「${_activeTree!.name}」，已有知识点：'
-            '${pts.map((p) => p.name).join('、')}。'
-            '请重点指出用户还缺哪些、哪些明显薄弱。\n\n';
-      }
+      treeCtx = pts.isEmpty
+          ? '用户正在构建知识树「${_activeTree!.name}」，树里目前还没有知识点。\n\n'
+          : '用户正在构建知识树「${_activeTree!.name}」，已有知识点：'
+              '${pts.map((p) => p.name).join('、')}。'
+              '请重点指出用户还缺哪些、哪些明显薄弱。\n'
+              '已在树内的概念不要放进 extension。\n\n';
     }
+    // 没有活跃树 → extension 没有参照系，明确要求输出空数组，
+    // 避免模型凭空编造「树外」概念。
+    final extensionRule = hasTreeBasis
+        ? '3) extension：**仅当**用户在追问「当前知识树里还没有、但同属这一知识体系」的'
+            '概念时才输出（树外延伸）；每个条目要说明它接在哪条既有脉络上。\n'
+            '   若本轮不涉及树外延伸，输出空数组，不要省略该键。\n'
+        : '3) extension：本次没有给出当前知识树，缺少参照系，'
+            '**不要**输出任何 extension 条目，固定给空数组 []（该键必须出现）。\n';
 
     final transcript = _history
         .map((m) => '${m.role == 'user' ? '用户' : 'AI'}：${m.content}')
@@ -922,9 +940,11 @@ class AgentPageState extends State<AgentPage> {
     return '${treeCtx}下面是用户与 AI 助手的对话。请识别其中：\n'
         '1) needed：对话涉及、用户应当掌握的知识点；\n'
         '2) weak：用户明显薄弱 / 混淆 / 答错的知识点。\n'
+        '$extensionRule'
         '只输出一个 JSON 对象，不要任何解释或代码块标记：\n'
         '{"needed":[{"name":"","definition":"","reason":""}],'
-        '"weak":[{"name":"","definition":"","reason":""}]}\n\n'
+        '"weak":[{"name":"","definition":"","reason":""}],'
+        '"extension":[{"name":"","definition":"","reason":""}]}\n\n'
         '对话：\n$transcript';
   }
 
@@ -963,84 +983,8 @@ class AgentPageState extends State<AgentPage> {
     if (mounted) setState(() => _detecting = false);
   }
 
-  /// 问题3：基于当前树已有知识点，让 AI 梳理「树外延伸」概念
-  /// （同一知识体系里树还没有、值得补的），结果并入检测面板可直接勾选入树。
-  Future<void> _runExtension() async {
-    final tree = _activeTree;
-    if (tree == null) {
-      _toast('请先在上方选择知识树，再让 AI 梳理树外延伸');
-      return;
-    }
-    if (_detecting) return;
-    setState(() => _detecting = true);
-    _toast('正在梳理「${tree.name}」的树外延伸…');
-    final ids = await widget.service.trees.memberPointIds(tree.id);
-    final pts = await widget.service.repo.pointsByIds(ids);
-    final names = pts.map((p) => p.name).join('、');
-    final prompt = '用户正在构建知识树「${tree.name}」，目前树里只有这些知识点：'
-        '${names.isEmpty ? '（空树）' : names}。\n'
-        '请基于这张树的主题与已有脉络，列出 3-8 个「树里还没有、但属于同一知识体系、'
-        '值得补进来深入学」的延伸概念（可以是现有知识点的前置基础、并列分支或后续进阶）。\n'
-        '只输出一个 JSON 对象，不要任何解释或代码块标记：\n'
-        '{"extension":[{"name":"","definition":"","reason":""}]}\n'
-        'reason 要说明它和树里哪个已有知识点相关、为什么值得延伸。';
-    // 登记成托盘后台任务：切走页面后仍能在「后台任务」托盘看到它在跑、并可取消。
-    // buf 提到外层：body 与 `await task.done` 之后的解析共用同一份已收集内容。
-    final buf = StringBuffer();
-    final task = widget.service.jobs.runDetached(
-      label: 'AI 助手 · 延伸讲解：${tree.name}',
-      // 不传 resourceKey（保持默认空串 = 不占锁）：本方法与「重新分析」可能并发，
-      // 占锁会把 holdInteractive('agent:chat') 的锁逻辑搞复杂，这里无需互斥。
-      silent: true, // 终态不弹 SnackBar（本页自有 _detecting 状态，避免打扰）；托盘行仍可见。
-      doneMessage: '延伸梳理完成',
-      body: (t) async {
-        var flushedChars = 0;
-        var flushedAt = DateTime.now();
-        try {
-          await for (final c in widget.service.ai.chat(AiTask.t5Ask, prompt)) {
-            // 用户点托盘「取消」：下一块就收工（不必等模型吐完）。
-            if (t.isCanceled) break;
-            if (c.delta != null) buf.write(c.delta);
-            // 进度节流：累计 ≥200 字或距上次刷新 >400ms 才刷托盘，避免托盘行疯狂抖动。
-            final now = DateTime.now();
-            if (buf.length - flushedChars >= 200 ||
-                now.difference(flushedAt) > const Duration(milliseconds: 400)) {
-              flushedChars = buf.length;
-              flushedAt = now;
-              t.progress('已梳理 ${buf.length} 字…');
-            }
-          }
-        } on Object catch (e) {
-          // 记日志后**必须** rethrow：让 AiJobService 把任务标 failed，
-          // 页面才能区分「真失败」与「成功了但没梳理出概念」（吞掉会把失败伪装成没概念）。
-          _log.w('树外延伸失败（忽略）：$e');
-          rethrow;
-        }
-      },
-    );
-    // done 在 done / failed / canceled 都会 complete，不抛；页面被销毁也不会卡住
-    // （Future 由 jobs 持有，body 独立跑完才 complete，与页面生命周期无关）。
-    await task.done;
-    if (task.isCanceled) {
-      // 取消后必须复位 _detecting（否则按钮永久禁用）；半截结果不解析入面板。
-      if (mounted) setState(() => _detecting = false);
-      return;
-    }
-    if (task.job.status == AiJobStatus.failed) {
-      // silent:true 压掉了服务层 SnackBar，失败提示只能由页面自己给
-      // （否则用户会把「调用失败」误当成「没梳理出概念」）。
-      final msg = task.job.errorMessage ?? '未知错误';
-      if (mounted) setState(() => _detecting = false);
-      _toast('延伸梳理失败：$msg');
-      return;
-    }
-    final before = _detected.length;
-    _applyDetection(buf.toString());
-    if (mounted && _detected.length == before) {
-      _toast('这次没梳理出新概念，可以换个说法再试');
-    }
-  }
-
+  /// 由 AI 在每轮对话后自主判断「树外延伸」（同体系但树里还没有的概念），
+  /// 不再是用户手动触发的动作：结果直接并入检测面板，可勾选入树。
   List<AgentDetectedItem> _parseDetection(String raw) {
     var s = raw.trim();
     // 去掉可能的 ```json 围栏。
@@ -1205,13 +1149,6 @@ class AgentPageState extends State<AgentPage> {
         appBar: AppBar(
           title: const Text('AI 助手'),
           actions: [
-            // 问题3：基于当前树梳理「树外延伸」概念（需先选树）。
-            IconButton(
-              tooltip: '延伸讲解（树外拓展）',
-              icon: const Icon(Icons.school_outlined),
-              onPressed:
-                  _activeTree == null || _detecting ? null : _runExtension,
-            ),
             // 设置入口：记忆开关 / 查看 / 清空。
             IconButton(
               tooltip: '设置',
@@ -1366,7 +1303,11 @@ class AgentPageState extends State<AgentPage> {
                 padding: const EdgeInsets.symmetric(horizontal: 8),
                 children: [
                   if (extension.isNotEmpty) ...[
-                    const _SectionLabel(text: '树外延伸（可补进树）', weak: false),
+                    const _SectionLabel(
+                      text: '树外延伸（可补进树）',
+                      weak: false,
+                      note: '由 AI 在对话中自动识别（树里没有但同体系的概念）',
+                    ),
                     for (final d in extension)
                       _DetectTile(
                         item: d,
@@ -1634,22 +1575,36 @@ class _DetectTile extends StatelessWidget {
       );
 }
 
-/// 分组小标题。
+/// 分组小标题。[note] 为可选的一行小字说明（例如分组结果的来源）。
 class _SectionLabel extends StatelessWidget {
-  const _SectionLabel({required this.text, required this.weak});
+  const _SectionLabel({required this.text, required this.weak, this.note = ''});
   final String text;
   final bool weak;
+  final String note;
 
   @override
   Widget build(BuildContext context) => Padding(
         padding: const EdgeInsets.fromLTRB(4, 8, 4, 2),
-        child: Text(
-          text,
-          style: TextStyle(
-            fontWeight: FontWeight.bold,
-            fontSize: 12,
-            color: weak ? Colors.orange.shade800 : Colors.teal.shade800,
-          ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              text,
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 12,
+                color: weak ? Colors.orange.shade800 : Colors.teal.shade800,
+              ),
+            ),
+            if (note.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  note,
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                ),
+              ),
+          ],
         ),
       );
 }
