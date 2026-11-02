@@ -1,12 +1,13 @@
 /// 全局任务托盘（方案 §5.2）：挂在 AppShell，5 个 Tab 常驻可见。
 ///
 /// - **折叠态**（默认，Q3 决策）：4px 细进度条 + 「N 个任务进行中」+ 展开按钮，
-///   不挡内容；
+///   不挡内容；摘要是一条**队列视图**：队首（+ 状态后缀）+「还有 N 个」+
+///   「会话：xxx」（交互会话必须被点名，见 [_JobTrayState._summaryText]）；
 /// - **展开态**：每个 job 一行——label、百分比 / 阶段文案、已用时间、取消按钮、
 ///   所占资源锁徽标（让用户知道「为什么某个按钮点不了」）；交互会话（老师
 ///   模式 / 作业出题，B4）、后台任务（D：离开页面继续跑）同样登记为行；
 ///   在途一律可取消，失败行给「重试 + 移除」两个动作；
-/// - **终态**：done → SnackBar 摘要 + **行再保留 10 秒**（[kJobTrayDoneVisible]，
+/// - **终态**：done → SnackBar 摘要 + **行再保留 30 秒**（[kJobTrayDoneVisible]，
 ///   让用户回头看得见「成了没有」）+ 3s 后自动折叠；failed → 红条 + 重试；
 ///   canceled → 直接从托盘消失；``silent`` 任务（如对话检测）只留托盘行，
 ///   终态不弹 SnackBar。
@@ -91,6 +92,7 @@ class JobTray extends StatefulWidget {
     super.key,
     required this.jobs,
     this.doneVisible = kJobTrayDoneVisible,
+    this.now = _systemNow,
   });
 
   final AiJobService jobs;
@@ -101,14 +103,27 @@ class JobTray extends StatefulWidget {
   /// 生产路径一律用默认值。
   final Duration doneVisible;
 
+  /// 「现在几点」的取值口（判断 done 行是否已过期）。
+  ///
+  /// 生产路径恒为真实时钟（[_systemNow]）；做成可注入**只为测试**：widget 测试
+  /// 里 `pump(Duration)` 推的是 FakeAsync 假时钟，而 `DateTime.now()` 走墙上
+  /// 时间 —— 两者不同步，验一个 30 秒窗口就得真等 30 秒墙钟。注入之后测试可以
+  /// 让「读到的现在」与 `pump` 同步推进，窗口语义就能在毫秒内验完。
+  final DateTime Function() now;
+
   @override
   State<JobTray> createState() => JobTrayState();
 }
 
+/// 生产时钟（[JobTray.now] 的默认值，顶层函数引用是编译期常量）。
+DateTime _systemNow() => DateTime.now();
+
 /// done 行在托盘里的**保留时长**：终态落定后仍可见这么久。
 ///
-/// 立刻消失等于没有反馈 —— 用户回头看不到「刚才那个成了没有」。
-const Duration kJobTrayDoneVisible = Duration(seconds: 10);
+/// 立刻消失等于没有反馈 —— 用户回头看不到「刚才那个成了没有」。10 秒太短：
+/// 用户被 SnackBar 引开一眼、回神时那一行已经没了，观感就成了「任务消失了」；
+/// 30 秒足够他回头看明白，又不会把托盘长期占住。
+const Duration kJobTrayDoneVisible = Duration(seconds: 30);
 
 /// 离线标记色（失联 ≠ 失败，所以不用 error 红）。
 const Color kJobTrayOfflineColor = Color(0xFFEF6C00);
@@ -162,7 +177,7 @@ class JobTrayState extends State<JobTray> {
 
   void _onTerminal(AiJob job) {
     if (!mounted) return;
-    // done 行还要亮 10 秒 → 需要一次「到点」重建。
+    // done 行还要亮 30 秒 → 需要一次「到点」重建。
     if (job.status == AiJobStatus.done) _ensureDoneSweep();
     // 静默任务（如对话检测）：托盘行/红条/重试已给足可见性，不弹 SnackBar。
     if (job.silent) return;
@@ -204,7 +219,7 @@ class JobTrayState extends State<JobTray> {
   /// 没有 `finishedAt` 的行（冷启动对账收养的历史行）不进集合：它们不是
   /// 「刚完成」，进来只会让托盘一开机就挂一堆绿条。
   List<AiJob> _visibleDone() {
-    final now = DateTime.now();
+    final now = widget.now();
     final out = <AiJob>[];
     for (final job in widget.jobs.recentJobs) {
       if (job.status != AiJobStatus.done) continue;
@@ -229,7 +244,7 @@ class JobTrayState extends State<JobTray> {
       final at = job.finishedAt!;
       if (at.isBefore(earliest)) earliest = at;
     }
-    var wait = earliest.add(widget.doneVisible).difference(DateTime.now());
+    var wait = earliest.add(widget.doneVisible).difference(widget.now());
     if (wait.isNegative) wait = Duration.zero;
     // 至少隔一帧：避免定时器早触发几毫秒 → 立刻重排 → 空转。
     if (wait < const Duration(milliseconds: 16)) {
@@ -246,7 +261,12 @@ class JobTrayState extends State<JobTray> {
   void _scheduleAutoCollapse() {
     _autoCollapse?.cancel();
     _autoCollapse = Timer(const Duration(seconds: 3), () {
-      if (mounted && widget.jobs.activeJobs.isEmpty) {
+      // 还有「刚完成」的行（[kJobTrayDoneVisible] 窗口内）没过期 → 别收起：
+      // 用户刚展开看完成结果，3 秒后整条消失就是「任务凭空没了」的观感（用户
+      // 已报）。窗口过期后 [build] 自然返回 0 高，无需这里强收。
+      if (mounted &&
+          widget.jobs.activeJobs.isEmpty &&
+          _visibleDone().isEmpty) {
         setState(() => _expanded = false);
       }
     });
@@ -268,7 +288,7 @@ class JobTrayState extends State<JobTray> {
     final failed = widget.jobs.recentJobs
         .where((j) => j.status == AiJobStatus.failed)
         .toList();
-    // done 行保留 10 秒（[kJobTrayDoneVisible]）：用户回头才看得见「成了没有」。
+    // done 行保留 30 秒（[kJobTrayDoneVisible]）：用户回头才看得见「成了没有」。
     final done = _visibleDone();
     if (active.isEmpty && failed.isEmpty && done.isEmpty) {
       return const SizedBox.shrink();
@@ -379,26 +399,44 @@ class JobTrayState extends State<JobTray> {
     );
   }
 
-  /// 折叠态摘要：**队首 + 总数**（FIFO，顺序稳定，不随状态跳）。
+  /// 折叠态摘要：**队列视图**（队首 + 还有几个 + 会话点名）。
   ///
   /// 旧实现取「最新推进」的那条（`startedAt ?? submittedAt` 最大），任务从
   /// queued 转 running 时 key 一变摘要就换人 —— 用户观感是「一下这个一下那个」，
-  /// 完全看不出这是一个队列。现在恒取 `active.first`（`activeJobs` 已按
+  /// 完全看不出这是一个队列。现在恒取 `tasks.first`（`activeJobs` 已按
   /// submittedAt 升序），只有真正跑完一个才会推进，和队列语义一致。
+  ///
+  /// **2026-11 用户报**：「一布置作业，托盘就不显示前面任务了，只显示现在这个
+  /// 作业（待启动）」—— 他当时开着老师模式 + AI 助手会话，再点「出题」，三个
+  /// 任务同时存在。根因是旧实现把交互会话整段过滤成一句「另有会话进行中」，
+  /// **不点名**：老师模式和 AI 助手在他的眼里就是「前面的任务」，被那半句话
+  /// 吞掉了。现在：
+  /// - 队首 + 「还有 N 个」，`N` 只数真实任务（交互会话不排队、不占模型，
+  ///   混进计数会把「还有几个要等」说错）；
+  /// - 交互会话**必须被点名**（最多 2 个，超出写「等 N 个」）：用户一眼看得见
+  ///   「前面那些没消失，在最后一句里」；
+  /// - 只有会话开着、没有排队任务时，摘要点名会话，而不是退回一句空话 / 空白。
   String _summaryText(List<AiJob> active, List<AiJob> failed, List<AiJob> done) {
     // 队首只看**真实任务**：交互会话是「页面开着」，它不排队、也不占模型，
     // 让它当队首会让「布置作业编辑中」永远盖住正在排队的出题任务。
     final tasks = active.where((j) => !j.interactive).toList();
+    final sessions = active.where((j) => j.interactive).toList();
+    final sessionText = _nameList(sessions.map((j) => j.label));
     if (tasks.isNotEmpty) {
-      final n = tasks.length;
       final head = tasks.first;
       final headText = head.status == AiJobStatus.running
           ? head.label
           : '${head.label}（待启动）';
-      final base = n == 1 ? headText : '$n 个任务 · 当前：$headText';
-      return active.length > n ? '$base · 另有会话进行中' : base;
+      // 「还有 N 个」= 队首之外的真实任务数；0 个时整句省略（不要「还有 0 个」）。
+      final rest = tasks.length - 1;
+      final base = rest <= 0 ? headText : '$headText · 还有 $rest 个';
+      return sessionText == null ? base : '$base · 会话：$sessionText';
     }
-    if (active.isNotEmpty) return active.first.label;
+    if (sessions.isNotEmpty) {
+      // 没有排队任务，只有会话开着 —— 点名它们（旧实现这里只剩一句
+      // 「另有会话进行中」或直接空白，用户以为任务丢了）。
+      return '进行中：${sessionText ?? '${sessions.length} 个会话'}';
+    }
     if (failed.isNotEmpty) {
       // 只有带「重试」按钮的行才叫「可重试」：交互会话 / 后台任务重试不了，
       // 把它们算进「可重试」是空头支票。
@@ -412,6 +450,45 @@ class JobTrayState extends State<JobTray> {
           ? '「${done.first.label}」已完成'
           : '${done.length} 个任务已完成';
     }
+    return '';
+  }
+
+  /// 把若干名字拼成「A、B」；超过 [max] 个时只列前 [max] 个，其余写「等 N 个」。
+  ///
+  /// 折叠条只有一行（`maxLines: 1` + 省略号）—— 全列会被截断成「看不到是谁」；
+  /// 但**一个都不列**更糟：用户会以为那些任务凭空消失了（这正是本次用户报的
+  /// 现象）。返回 null = 没有任何可用名字（调用方自行兜底）。
+  String? _nameList(Iterable<String> names, {int max = 2}) {
+    final list = names.where((n) => n.trim().isNotEmpty).toList();
+    if (list.isEmpty) return null;
+    if (list.length <= max) return list.join('、');
+    return '${list.take(max).join('、')} 等 ${list.length} 个';
+  }
+
+  /// 排队行的第二行文案：**说清在等谁**。
+  ///
+  /// 旧文案「排队中 · 第 N 位（等前面的任务用完模型）」只承认「前面有东西」，
+  /// 用户不知道是谁；折叠条上的「（待启动）」更是连位次都没有。现在把通道当前
+  /// 持有者（[LlmChannel.holderLabel]，public getter，只读）点名出来。
+  ///
+  /// 三种情况：
+  /// 1. 在通道队里 + 拿得到持有者 → 「待启动 · 第 N 位（等「xxx」用完模型）」；
+  /// 2. 不在队里但通道确实被占（服务端队列任务在跑 → 本进程请求还没入队，或
+  ///    刚刚被放行的瞬间）→「待启动 · 等「xxx」用完模型」（兜底路径）；
+  /// 3. 连持有者都拿不到 → 退回原文案，**不编造**谁在跑。
+  ///
+  /// 返回 '' = 按普通 message 渲染。
+  String _queuedMessageText(int? queuePos) {
+    final holder = LlmChannel.instance.holderLabel;
+    final hasHolder = LlmChannel.instance.isBusy &&
+        holder != null &&
+        holder.trim().isNotEmpty;
+    if (queuePos != null) {
+      return hasHolder
+          ? '待启动 · 第 $queuePos 位（等「$holder」用完模型）'
+          : '排队中 · 第 $queuePos 位（等前面的任务用完模型）';
+    }
+    if (hasHolder) return '待启动 · 等「$holder」用完模型';
     return '';
   }
 
@@ -443,8 +520,11 @@ class JobTrayState extends State<JobTray> {
     // 现在谁在干什么就显示什么，托盘只负责如实转述。
     final isQueued = job.status == AiJobStatus.queued;
     final queuePos = isQueued ? LlmChannel.instance.positionOf(job.id) : null;
-    final messageText = isQueued && queuePos != null
-        ? '排队中 · 第 $queuePos 位（等前面的任务用完模型）'
+    // 「待启动」必须说清在等谁：只写「排队中 · 第 N 位（等前面的任务用完
+    // 模型）」，用户完全不知道是谁占着模型，只能猜「是不是坏了」。
+    final queuedText = isQueued ? _queuedMessageText(queuePos) : '';
+    final messageText = queuedText.isNotEmpty
+        ? queuedText
         : '${job.message}'
             '${(progress != null && !isDone) ? '（${(progress * 100).round()}%）' : ''}';
     final messageColor = isFailed

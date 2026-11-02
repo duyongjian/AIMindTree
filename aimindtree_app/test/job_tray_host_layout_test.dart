@@ -56,8 +56,8 @@ void main() {
       expect(tester.takeException(), isNull);
       expect(find.text('页面正文'), findsOneWidget);
       expect(tester.getSize(find.byType(JobTray)).height, greaterThan(0));
-      // 收起态摘要直接显示在途任务的 label。
-      expect(find.text('老师模式'), findsWidgets);
+      // 收起态摘要点名在途任务（新格式前缀「进行中：」，用 contains 不绑死前缀）。
+      expect(find.textContaining('老师模式'), findsWidgets);
     });
   });
 }

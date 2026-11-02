@@ -54,6 +54,27 @@ const String kAiJobOfflineMessage = '与服务端失联，重试中…';
 /// App 侧终态保留条数（托盘历史；服务端另有 200 条环）。
 const int kAiJobMaxRecent = 50;
 
+/// 外部任务（后台执行体 / 交互会话）登记时上报的心跳截止秒数。
+///
+/// 服务端按 ``max(5.0, heartbeat_s)`` 起看门狗：超过这么久既没 progress 也没
+/// finish → 服务端自己把那一行标 failed。**必须上报**：不上报（缺省 null）
+/// 等于向服务端申请「看门狗永久豁免」，于是 App 崩溃 / 连接被 keep-alive
+/// 关掉 / finish 请求丢失之后，管理后台那行就永远是「进行中」，没有任何
+/// 机制来收拾它（僵尸行的第一根因）。
+const double kExternalHeartbeatS = 45.0;
+
+/// 外部任务心跳间隔：每这么久续一次看门狗。
+///
+/// 取 [kExternalHeartbeatS] 的三分之一 —— 连丢两次心跳（≈30s）仍在截止线
+/// 以内，网络抖一下不至于被服务端判死。
+const Duration kExternalHeartbeatInterval = Duration(seconds: 15);
+
+/// ``finish`` 最多尝试次数（含首次）。
+const int kExternalFinishAttempts = 3;
+
+/// ``finish`` 重试间隔。
+const Duration kExternalFinishRetryGap = Duration(milliseconds: 300);
+
 /// 把 T1/T3 job 的 ``result`` payload 转成 [AiTaskResult]（服务端
 /// ``/v1/task`` 同构字段：content / parsed / usage / latency_ms / model_id）。
 AiTaskResult aiTaskResultFromJob(Map<String, dynamic> result) {
@@ -274,6 +295,15 @@ class AiJobService {
 
   static final AppLog _log = AppLog('ai_jobs');
 
+  /// 是否启用外部任务心跳 Timer。
+  ///
+  /// 测试里必须关掉：widget 测试跑在 FakeAsync 中，一个 15s 周期 `Timer` 会被
+  /// 判成 "pending timer" 直接让用例失败（同 [LlmChannel.watchdogsEnabled] 的
+  /// 现成做法）。生产恒为 true —— 关掉就意味着服务端看门狗收不到续期，外部
+  /// 任务重新变成僵尸行。
+  @visibleForTesting
+  static bool heartbeatsEnabled = true;
+
   /// 未终态 job（含对账收养的）。
   final Map<String, AiJob> _jobs = <String, AiJob>{};
 
@@ -288,6 +318,19 @@ class AiJobService {
 
   final Map<String, Timer> _timers = <String, Timer>{};
   final Map<String, int> _failCount = <String, int>{};
+
+  /// 外部任务心跳定时器：App 侧 job id → Timer（每 [kExternalHeartbeatInterval]
+  /// 续一次服务端看门狗）。终态 / 会话释放 / dispose 时**必须**摘掉，否则
+  /// 泄漏成一只永远打点的 Timer。
+  final Map<String, Timer> _heartbeatTimers = <String, Timer>{};
+
+  /// 交互会话的服务端登记 Future（键 = sessionId）。
+  ///
+  /// [holdInteractive] 里登记是 fire-and-forget 的：[releaseInteractive] 可能在
+  /// 登记 HTTP 往返回来之前就被调用（用户开页面就退），此时 ``serverJobId`` 还是
+  /// null，直接跳过一次 finish → 服务端那行永远 running。留住 Future 才能在
+  /// 释放时把它 await 出来补发终态。
+  final Map<String, Future<String?>> _sessionRegs = <String, Future<String?>>{};
 
   /// 修订号：任何 job 状态变化 +1（托盘 / 页面内联进度订阅它）。
   final ValueNotifier<int> revision = ValueNotifier<int>(0);
@@ -481,7 +524,7 @@ class AiJobService {
     if (key.isEmpty) return '';
     final existing = _interactive[key];
     if (existing != null && existing.isNotEmpty) return existing;
-    final id = 'ix-$_uuid()';
+    final id = 'ix-${_uuid()}';
     _interactive[key] = id;
     final job = AiJob(
       id: id,
@@ -498,12 +541,23 @@ class AiJobService {
     if (key.isNotEmpty) _locks[key] = id;
     // 服务端登记外部任务（让托盘/管理后台能看见这个会话 + 心跳看门狗兜底）。
     // 失败（老服务 / 服务没起）只影响服务端可观测性，不动本地流程。
-    unawaited(
-      registerExternal(task: 'SESSION', label: label, resourceKey: key)
-          .then((sid) {
-        if (sid != null) job.serverJobId = sid;
-      }),
+    //
+    // 两处都是僵尸行的根因修复：① 必须带 ``heartbeatS``，否则服务端给这条
+    // 外部任务「永久豁免」，会话页异常退出后那行永远进行中；② 必须留住登记
+    // Future，[releaseInteractive] 早于登记返回时才补得上 finish。
+    final reg = registerExternal(
+      task: 'SESSION',
+      label: label,
+      resourceKey: key,
+      heartbeatS: kExternalHeartbeatS,
     );
+    _sessionRegs[id] = reg;
+    unawaited(reg.then((sid) {
+      if (sid == null) return;
+      job.serverJobId = sid;
+      // 会话可能已经释放/异常结束：别为一条已死的任务起心跳。
+      if (job.isActive) _startHeartbeat(job);
+    }));
     _notify();
     return id;
   }
@@ -528,12 +582,30 @@ class AiJobService {
       _locks.remove(lockedKey);
     }
     final job = _jobs.remove(sessionId);
+    // 登记 Future 与心跳 Timer 一律摘掉：会话已经结束，两者都没有存在意义。
+    final reg = _sessionRegs.remove(sessionId);
+    _stopHeartbeat(sessionId);
     if (job != null) {
-      if (job.serverJobId != null) {
-        unawaited(finishExternal(job.serverJobId!, status: 'canceled'));
+      if (job.serverJobId != null || reg != null) {
+        // 同步方法不变 async（dispose 也调这里），内部走 async 辅助函数。
+        unawaited(_finishSession(job, reg));
       }
       _notify();
     }
+  }
+
+  /// 交互会话终态上报（[releaseInteractive] 的内部 async 收尾）。
+  ///
+  /// ``job.serverJobId`` 可能还没回填（登记 HTTP 往返比「开页面就退出」慢）：
+  /// 此时等登记 Future 出来再发 finish，否则服务端会话行会永远 running。
+  Future<void> _finishSession(AiJob job, Future<String?>? reg) async {
+    String? sid = job.serverJobId;
+    if (sid == null && reg != null) {
+      sid = await reg;
+      if (sid != null) job.serverJobId = sid;
+    }
+    if (sid == null || sid.isEmpty) return;
+    await finishExternal(sid, status: 'canceled');
   }
 
   /// 更新交互会话的托盘文案（如「正在生成讲解…」↔「会话进行中」）。
@@ -573,7 +645,7 @@ class AiJobService {
   }) {
     final key = resourceKey.trim();
     final job = AiJob(
-      id: 'bg-$_uuid()',
+      id: 'bg-${_uuid()}',
       taskCode: 'BACKGROUND',
       label: label,
       resourceKey: key,
@@ -601,6 +673,8 @@ class AiJobService {
   ) async {
     final job = task.job;
     LlmTicket? ticket;
+    // 服务端登记 Future：收尾时必须能 await 出来，见下面 ②。
+    Future<String?>? reg;
     try {
       // ① 排队等模型通道。嵌套任务（执行体里又登记了后台任务）不再排队，
       //    否则外层的通道被自己持有 → 内层永远等不到 → 死锁。
@@ -619,13 +693,24 @@ class AiJobService {
       _notify();
       // ② 服务端登记外部任务（看门狗兜底：App 被强杀也能超时标 failed）。
       //    只在真正开跑时登记 —— 排在队里的任务不该让服务端以为它在跑。
-      unawaited(
-        registerExternal(task: 'BACKGROUND', label: job.label,
-                resourceKey: job.resourceKey)
-            .then((sid) {
-          if (sid != null) job.serverJobId = sid;
-        }),
+      //
+      //    ⚠️ 两处细节都是僵尸行的根因：
+      //    - 必带 ``heartbeatS``：缺省 = 服务端给「看门狗永久豁免」；
+      //    - 必须留住 Future（``reg``）：注册是 fire-and-forget 的，短任务 /
+      //      服务端慢的时候注册还没回来执行体就结束了，只看 ``serverJobId``
+      //      会把 finish 整个跳过 → 服务端那行永远 running。
+      reg = registerExternal(
+        task: 'BACKGROUND',
+        label: job.label,
+        resourceKey: job.resourceKey,
+        heartbeatS: kExternalHeartbeatS,
       );
+      unawaited(reg.then((sid) {
+        if (sid == null) return;
+        job.serverJobId = sid;
+        // 任务可能已经收尾了（注册比执行体慢）：别为死任务起心跳。
+        if (job.isActive) _startHeartbeat(job);
+      }));
       // ③ 带 zone 标记跑执行体：内部的 ai.chat 凭标记免排队（通道已持有）。
       await runZoned(
         () => body(task),
@@ -661,20 +746,68 @@ class AiJobService {
       // 先叫醒等待方再走终态广播：等的人要的是「可以继续了」。
       if (!task._done.isCompleted) task._done.complete();
     }
-    if (job.serverJobId != null) {
-      final status = job.status == AiJobStatus.failed
-          ? 'failed'
-          : job.status == AiJobStatus.canceled
-              ? 'canceled'
-              : 'done';
-      unawaited(finishExternal(
-        job.serverJobId!,
-        status: status,
-        result: job.result,
-        message: job.doneMessage ?? job.message,
-      ));
-    }
+    // 终态上报：**不能**只看 ``job.serverJobId``（旧实现漏发 finish 的根因）。
+    // 注册 Future 还没回来 → 挂到它后面补发，而不是直接跳过。这里刻意不
+    // await：``_onTerminal`` 要立刻放锁 / 广播，不能被一次 HTTP 往返拖住。
+    _stopHeartbeat(job.id);
+    final serverStatus = job.status == AiJobStatus.failed
+        ? 'failed'
+        : job.status == AiJobStatus.canceled
+            ? 'canceled'
+            : 'done';
+    unawaited(_finishWhenRegistered(
+      job,
+      reg,
+      status: serverStatus,
+      result: job.result,
+      message: job.doneMessage ?? job.message,
+    ));
     _onTerminal(job);
+  }
+
+  /// 等外部任务登记落定再发终态（[reg] 可能还是 null = 压根没登记）。
+  ///
+  /// 关键点：无论登记 Future 先到还是执行体先结束，finish **一定会发**。
+  Future<void> _finishWhenRegistered(
+    AiJob job,
+    Future<String?>? reg, {
+    required String status,
+    Map<String, dynamic>? result,
+    String? message,
+  }) async {
+    String? sid = job.serverJobId;
+    if (sid == null && reg != null) {
+      sid = await reg;
+      if (sid != null) job.serverJobId = sid;
+    }
+    if (sid == null || sid.isEmpty) return;
+    await finishExternal(sid, status: status, result: result, message: message);
+  }
+
+  // ==================== 外部任务心跳 ====================
+
+  /// 起外部任务心跳（[job] 的 ``serverJobId`` 必须已回填）。
+  ///
+  /// 服务端只认「最近一次 progress / finish」；App 侧一个长时间没动进度的
+  /// 任务（等模型、长流式）若不上报，看门狗会把它标 failed，反过来 App 崩溃
+  /// 后不上报则永远 running —— 所以有心跳才有「僵尸行自愈」。
+  void _startHeartbeat(AiJob job) {
+    if (!heartbeatsEnabled) return;
+    _stopHeartbeat(job.id);
+    _heartbeatTimers[job.id] = Timer.periodic(kExternalHeartbeatInterval, (_) {
+      final sid = job.serverJobId;
+      // 任务已终态 / id 被清：自我了断，别留一只空转的 Timer。
+      if (sid == null || sid.isEmpty || !job.isActive) {
+        _stopHeartbeat(job.id);
+        return;
+      }
+      unawaited(reportExternal(sid, message: job.message));
+    });
+  }
+
+  /// 停外部任务心跳（幂等；终态 / 放锁 / dispose 都要调）。
+  void _stopHeartbeat(String jobId) {
+    _heartbeatTimers.remove(jobId)?.cancel();
   }
 
   // ==================== 外部任务登记（服务端可观测 + 心跳看门狗） ====================
@@ -723,7 +856,11 @@ class AiJobService {
     }
   }
 
-  /// 外部任务终态（done / failed / canceled）。失败静默。
+  /// 外部任务终态（done / failed / canceled）。
+  ///
+  /// **重试 3 次（间隔 300ms）**：这条请求丢了就是服务端那一行永久 running
+  /// （App 这边已经清干净了，没人会再提第二次）——一次网络抖动不该换来一条
+  /// 僵尸行。全部失败才记 warn。
   Future<void> finishExternal(
     String serverJobId, {
     required String status,
@@ -731,15 +868,27 @@ class AiJobService {
     String? message,
   }) async {
     if (serverJobId.isEmpty) return;
-    try {
-      await _post('/v1/jobs/$serverJobId/finish', <String, dynamic>{
-        'status': status,
-        if (result != null) 'result': result,
-        if (message != null) 'message': message,
-      });
-    } on Object catch (e) {
-      _log.w('外部任务终态失败（$serverJobId/$status）：$e');
+    final body = <String, dynamic>{
+      'status': status,
+      if (result != null) 'result': result,
+      if (message != null) 'message': message,
+    };
+    Object? lastError;
+    for (var attempt = 1; attempt <= kExternalFinishAttempts; attempt++) {
+      try {
+        await _post('/v1/jobs/$serverJobId/finish', body);
+        return;
+      } on Object catch (e) {
+        lastError = e;
+        // 服务端明确说这条任务已不存在（404）= 无需再试，重试也不会变 200。
+        if (e is LlmServerException && e.statusCode == 404) break;
+        if (attempt < kExternalFinishAttempts) {
+          await Future<void>.delayed(kExternalFinishRetryGap);
+        }
+      }
     }
+    _log.w('外部任务终态失败（$serverJobId/$status，已试 $kExternalFinishAttempts'
+        ' 次）：$lastError');
   }
 
   // ==================== 查询 ====================
@@ -864,6 +1013,8 @@ class AiJobService {
     job.finishedAt = DateTime.now();
     job.offline = false; // 终态优先：离线标不能挂在一条已结束的行上。
     _timers.remove(job.id)?.cancel();
+    // 心跳必须随终态停掉：否则这只 Timer 会一直往一个已结束的任务上报进度。
+    _stopHeartbeat(job.id);
     _failCount.remove(job.id);
     // 锁释放：终态即放；done 且 keepLockOnDone（复合流水线中间段）不放，
     // 由下一段提交继续持有或调用方手动 releaseLock。
@@ -996,6 +1147,13 @@ class AiJobService {
       t.cancel();
     }
     _timers.clear();
+    // 心跳 Timer 与登记 Future 一并清掉：一只空转的周期 Timer 会拖住
+    // 进程退出（也会让测试判成 pending timer）。
+    for (final t in _heartbeatTimers.values) {
+      t.cancel();
+    }
+    _heartbeatTimers.clear();
+    _sessionRegs.clear();
     _terminal.close();
     revision.dispose();
   }
