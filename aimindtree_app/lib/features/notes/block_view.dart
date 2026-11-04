@@ -382,7 +382,9 @@ class _ReadOnlyLine extends StatelessWidget {
       // 且不做任何行内解析。
       return GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTapDown: (TapDownDetails d) => _focusAt(context, text, d.localPosition, double.infinity),
+        // 用 onTapUp（抬起且未拖动）而非 onTapDown（按下即触发）：否则一拖拽、按下瞬间
+        // 就进编辑态变成 TextField，SelectionArea 的跨块选区还没开始就被打断。
+        onTapUp: (TapUpDetails d) => _focusAt(context, text, d.localPosition, double.infinity),
         child: Text(
           text.isEmpty ? ' ' : text,
           style: style,
@@ -396,7 +398,8 @@ class _ReadOnlyLine extends StatelessWidget {
             : MediaQuery.sizeOf(context).width;
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onTapDown: (TapDownDetails d) => _focusAt(context, text, d.localPosition, width),
+          // 同 asPlainText 分支：onTapUp 让拖拽不被「进入编辑态」抢占，跨块选区才能成立。
+          onTapUp: (TapUpDetails d) => _focusAt(context, text, d.localPosition, width),
           child: text.isEmpty
               ? SizedBox(
                   width: double.infinity,
