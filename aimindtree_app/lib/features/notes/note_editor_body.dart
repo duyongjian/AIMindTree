@@ -59,17 +59,24 @@ class _NoteEditorBodyState extends State<NoteEditorBody> {
           onKeyEvent: _onKeyEvent,
           child: SingleChildScrollView(
             padding: widget.padding,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                for (final block in blocks)
-                  BlockView(
-                    key: ValueKey<String>(block.id),
-                    controller: _c,
-                    block: block,
-                  ),
-                _tail(),
-              ],
+            // 整篇拖选复制：用 SelectionArea 把每个只读块的 Text/Text.rich 统一成一个
+            // 可选区，鼠标可从这一块一路拖到另一块（设计 §5.5「跨块选区 v1 不支持」的
+            // 可视化兜底）。活动块仍是独立 TextField，用自己的选区，互不影响。
+            // SelectionArea 默认不注册 TapGestureRecognizer，不会抢走「点一下进入
+            // 编辑态」的手势（见 [_ReadOnlyLine]）。
+            child: SelectionArea(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  for (final block in blocks)
+                    BlockView(
+                      key: ValueKey<String>(block.id),
+                      controller: _c,
+                      block: block,
+                    ),
+                  _tail(),
+                ],
+              ),
             ),
           ),
         );

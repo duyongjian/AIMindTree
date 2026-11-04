@@ -802,8 +802,13 @@ class NoteEditorController extends ChangeNotifier {
   }
 
   /// 「代码块」按钮：代码块 → 段落，其它 → 代码块。
+  ///
+  /// 必须用 [toolbarActiveBlock] 而非 [activeBlock]：点工具栏瞬间活动行已失焦
+  /// （[active] 被清空，见 [toolbarActiveBlock] 的注释），但工具栏启用判定用的是
+  /// 回退到「最后编辑块」的口径；此处若还用 [activeBlock] 会因 null 提前 return，
+  /// 表现为「点了没反应」（桌面端代码块按钮失效的根因）。
   void convertActiveToCode() {
-    final b = activeBlock;
+    final b = toolbarActiveBlock;
     if (b == null) return;
     convertActiveTo(b is CodeBlock ? BlockType.paragraph : BlockType.code);
   }
