@@ -2,8 +2,11 @@
 ///
 /// 背景：
 /// - Bug 1：只读行是 `Text`/`Text.rich`（默认不可选），旧实现没有 SelectionArea，
-///   鼠标只能选活动行那个 `TextField`，表现为「拖选最多一行」。修复 = 用
-///   `SelectionArea` 包住正文 Column。
+///   鼠标只能选活动行那个 `TextField`，表现为「拖选最多一行」。
+///   必要修复 = 用 `SelectionArea` 包住正文 Column；但**真根因**在只读行原先用
+///   `onTapDown`（按下即进编辑态），拖拽按下瞬间第一块被改成 `TextField`，跨块选区
+///   起点被截断。故必须改 `onTapDown → onTapUp`：轻点仍进编辑态，拖拽期间 `onTapUp`
+///   不触发、块保持只读，SelectionArea 才能接管任意方向跨块拖选（见 commit 999240c）。
 /// - Bug 2：`convertActiveToCode` 旧版用 `activeBlock`（仅 `_active`，失焦后为 null），
 ///   而工具栏启用判定用 `toolbarActiveBlock`（回退 `_lastActiveRef`），点工具栏瞬间
 ///   活动行失焦 → 提前 return → 「点了没效果」。修复 = 改用 `toolbarActiveBlock`。
