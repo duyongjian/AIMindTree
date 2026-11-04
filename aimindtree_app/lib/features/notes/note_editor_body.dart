@@ -68,11 +68,18 @@ class _NoteEditorBodyState extends State<NoteEditorBody> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
-                  for (final block in blocks)
+                  for (var i = 0; i < blocks.length; i++)
                     BlockView(
-                      key: ValueKey<String>(block.id),
+                      key: ValueKey<String>(blocks[i].id),
                       controller: _c,
-                      block: block,
+                      block: blocks[i],
+                      // 末块不挂（尾部空白不是块间分隔）；其余块用自身 trailingGap，
+                      // 且保证至少有一个换行，否则复制出来仍会与下一块粘连。
+                      copyGap: i == blocks.length - 1
+                          ? ''
+                          : (blocks[i].trailingGap.contains('\n')
+                              ? blocks[i].trailingGap
+                              : '\n\n'),
                     ),
                   _tail(),
                 ],

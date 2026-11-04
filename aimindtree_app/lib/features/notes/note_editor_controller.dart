@@ -662,6 +662,23 @@ class NoteEditorController extends ChangeNotifier {
       return;
     }
 
+    // 多行粘贴（带 `\n` 但不是「单个回车」）：必须按行拆成独立段落块。
+    // 若把 `\n` 原样写进同一块的 runs，序列化只会吐出**单换行**，parser 的
+    // 「段落懒续行」(P3) 会把相邻行并回同一段 → 保存重开后「每一段都连着下一段」。
+    // 代码块 / 原文块的换行是内容本身；多行块（引用/列表）另有行结构，都不在这里拆。
+    final multiLinePaste = !singleNewline &&
+        newText.contains('\n') &&
+        b is! CodeBlock &&
+        b is! RawBlock &&
+        b is! QuoteBlock &&
+        b is! BulletListBlock &&
+        b is! OrderedListBlock &&
+        b is! TaskListBlock;
+    if (multiLinePaste) {
+      _pasteMultiline(ref, newText);
+      return;
+    }
+
     final soft = _softBreak || HardwareKeyboard.instance.isShiftPressed;
     if (singleNewline && !soft && b is! CodeBlock && b is! RawBlock) {
       _writeLineValue(ref, old, caret: p);
@@ -1082,6 +1099,45 @@ class NoteEditorController extends ChangeNotifier {
       selection: TextSelection.collapsed(offset: c),
     );
     _applying = false;
+  }
+
+  /// 多行粘贴 → 逐行拆成独立段落块，块间用 `\n\n` 分隔。
+  ///
+  /// 首块沿用原块类型与 id（标题粘贴后仍是标题、活动行引用不失效），其余新建段落。
+  /// 粘贴文本按**原样**存成 TextRun（不跑 `parseInline`），避免把纯文本里的
+  /// `*`/`_` 之类误解析成行内标记而吞掉字符。
+  void _pasteMultiline(BlockRef ref, String newText) {
+    final idx = _indexOfBlock(ref.blockId);
+    if (idx < 0) return;
+    final old = _doc.blocks[idx];
+
+    // 粘贴里的空行只表达「段落分隔」，不产生空块（否则 '\n\n' 会多出一个空段落，
+    // 连续空行更会造出一串空块）。空行直接跳过，非空行各自成一个段落。
+    final parts = <String>[
+      for (final line in newText.split('\n'))
+        if (line.trim().isNotEmpty) line,
+    ];
+    if (parts.isEmpty) parts.add('');
+
+    final inserts = <Block>[];
+    for (var i = 0; i < parts.length; i++) {
+      final isLast = i == parts.length - 1;
+      final gap = isLast ? old.trailingGap : '\n\n';
+      final runs = parts[i].isEmpty
+          ? const <InlineNode>[]
+          : <InlineNode>[TextRun(parts[i])];
+      if (i == 0) {
+        inserts.add(_withGap(_blockWithRuns(old, ref, runs), gap));
+      } else {
+        inserts.add(ParagraphBlock(
+          id: newBlockId('p'),
+          trailingGap: gap,
+          runs: runs,
+        ));
+      }
+    }
+    _replaceRange(idx, 1, inserts);
+    focusBlock(BlockRef(inserts.last.id), caret: parts.last.length);
   }
 
   // ===== 回车语义 =====

@@ -7,6 +7,9 @@
 ///   `onTapDown`（按下即进编辑态），拖拽按下瞬间第一块被改成 `TextField`，跨块选区
 ///   起点被截断。故必须改 `onTapDown → onTapUp`：轻点仍进编辑态，拖拽期间 `onTapUp`
 ///   不触发、块保持只读，SelectionArea 才能接管任意方向跨块拖选（见 commit 999240c）。
+/// - Bug 1b（本次）：`SelectionArea` 把各块的选中文本**首尾直拼**（框架不插分隔符），
+///   复制出来是「第一段第二段」。修复 = 每个非末块的最后一行末尾挂一个零高度的
+///   `copyGap` TextSpan，选中跨过该行时换行一起进剪贴板 → 局部复制粘贴也能带换行。
 /// - Bug 2：`convertActiveToCode` 旧版用 `activeBlock`（仅 `_active`，失焦后为 null），
 ///   而工具栏启用判定用 `toolbarActiveBlock`（回退 `_lastActiveRef`），点工具栏瞬间
 ///   活动行失焦 → 提前 return → 「点了没效果」。修复 = 改用 `toolbarActiveBlock`。
@@ -23,11 +26,31 @@ import 'package:aimindtree_app/features/notes/block_model.dart';
 import 'package:aimindtree_app/features/notes/note_editor_body.dart';
 import 'package:aimindtree_app/features/notes/note_editor_controller.dart';
 
+/// 只读行现在会在末尾挂一个零高度的 copyGap span，故 `find.text` 的精确匹配
+/// 不再成立；用「plainText 以目标开头」定位对应的 RichText（其 RenderObject 就是
+/// RenderParagraph，可直接读 selections）。
+Finder lineWidget(String prefix) => find.byWidgetPredicate(
+      (Widget w) => w is RichText && w.text.toPlainText().startsWith(prefix),
+    );
+
+/// 取 `SelectionArea` 当前选区拼出来的剪贴板文本（框架原生复制用的就是它）。
+/// 必须用 SelectionArea 内部的 Column 上下文：从某个 RichText 往上找会命中
+/// Text 自带的 `_SelectableTextContainerDelegate`（只管它自己那一行），而非外层
+/// 的 `StaticSelectionContainerDelegate`（管全部块）。
+String copiedText(WidgetTester tester) {
+  final ctx = tester.element(find.descendant(
+    of: find.byType(SelectionArea),
+    matching: find.byType(Column),
+  ).first);
+  final handler = SelectionContainer.maybeOf(ctx) as SelectionHandler?;
+  return handler?.getSelectedContent()?.plainText ?? '';
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('Bug 1：跨块拖选复制', () {
-    testWidgets('正文被 SelectionArea 包裹，可跨块拖选（不再「最多一行」）',
+    testWidgets('正文被 SelectionArea 包裹，可跨块拖选且复制自带换行',
         (tester) async {
       final c = NoteEditorController(markdown: '段落一 content\n\n段落二 content');
       await tester.pumpWidget(
@@ -39,8 +62,8 @@ void main() {
       expect(find.byType(SelectionArea), findsOneWidget);
 
       // 2) 跨块拖选：从「段落一」左端一路拖到「段落二」右端。
-      final p1 = tester.getRect(find.text('段落一 content', findRichText: true));
-      final p2 = tester.getRect(find.text('段落二 content', findRichText: true));
+      final p1 = tester.getRect(lineWidget('段落一 content'));
+      final p2 = tester.getRect(lineWidget('段落二 content'));
       final start = Offset(p1.left + 4, p1.center.dy);
       final end = Offset(p2.right - 4, p2.center.dy);
       // 桌面端（鼠标）用 TapAndPanGestureRecognizer，可识别任意方向拖选；
@@ -48,18 +71,42 @@ void main() {
       await tester.dragFrom(start, end, kind: PointerDeviceKind.mouse);
       await tester.pumpAndSettle();
 
-      // 3) 选区应跨两块：SelectionArea 把两块独立的 Text 统一成一个可选区，拖选后
-      //    两段各自的 RenderParagraph 都应有非折叠选区（而非「最多一行」）。
-      final p1Para = tester.renderObject<RenderParagraph>(
-          find.text('段落一 content', findRichText: true));
-      final p2Para = tester.renderObject<RenderParagraph>(
-          find.text('段落二 content', findRichText: true));
+      // 3) 选区应跨两块：两段各自的 RenderParagraph 都应有非折叠选区。
+      final p1Para = tester.renderObject<RenderParagraph>(lineWidget('段落一 content'));
+      final p2Para = tester.renderObject<RenderParagraph>(lineWidget('段落二 content'));
       expect(p1Para.selections, isNotEmpty, reason: '第一段应有选中范围');
       expect(p2Para.selections, isNotEmpty, reason: '第二段应有选中范围');
       expect(p1Para.selections.first.isCollapsed, isFalse,
           reason: '第一段选区应非折叠');
       expect(p2Para.selections.first.isCollapsed, isFalse,
           reason: '第二段选区应非折叠');
+
+      // 4) 关键：复制内容两段之间带换行（旧实现是「段落一 content段落二 content」粘一坨）。
+      final copied = copiedText(tester).replaceAll('\r\n', '\n');
+      expect(copied, contains('段落一 content'), reason: '复制应含第一段');
+      expect(copied, contains('段落二 content'), reason: '复制应含第二段');
+      expect(copied, contains('\n\n'),
+          reason: '跨段复制必须带换行符，否则粘贴回去段落会粘连');
+      expect(copied.indexOf('段落一 content'), lessThan(copied.indexOf('\n\n')));
+      expect(copied.indexOf('\n\n'), lessThan(copied.indexOf('段落二 content')));
+      c.dispose();
+    });
+
+    testWidgets('末尾块不挂 copyGap：整篇复制不会多出尾部空行', (tester) async {
+      final c = NoteEditorController(markdown: '唯一一段');
+      await tester.pumpWidget(
+        MaterialApp(home: Scaffold(body: NoteEditorBody(controller: c))),
+      );
+      await tester.pumpAndSettle();
+      final rect = tester.getRect(lineWidget('唯一一段'));
+      await tester.dragFrom(
+        Offset(rect.left + 2, rect.center.dy),
+        Offset(rect.right - 2, rect.center.dy),
+        kind: PointerDeviceKind.mouse,
+      );
+      await tester.pumpAndSettle();
+      expect(copiedText(tester).trim(), '唯一一段',
+          reason: '单段/末块复制不应带尾部换行');
       c.dispose();
     });
 
@@ -71,7 +118,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // 点「段落一」应进入编辑态（出现 TextField），且不是 SelectionArea 吞掉手势。
-      final p1 = tester.getRect(find.text('段落一 content', findRichText: true));
+      final p1 = tester.getRect(lineWidget('段落一 content'));
       await tester.tapAt(p1.center);
       await tester.pumpAndSettle();
       expect(c.isEditing, isTrue, reason: '点只读行应就地进入编辑态（回归守卫）');

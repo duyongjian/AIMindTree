@@ -199,10 +199,18 @@ class BlockView extends StatelessWidget {
     super.key,
     required this.controller,
     required this.block,
+    this.copyGap = '',
   });
 
   final NoteEditorController controller;
   final Block block;
+
+  /// 该块与下一块之间的换行文本（末块为空）。复制时挂在块内最后一行的行尾，
+  /// 让 `SelectionArea` 拼出来的跨块文本自带换行；渲染上零高度、无视觉影响。
+  final String copyGap;
+
+  /// 块内多行之间用单换行，最后一行用块间 [copyGap]。
+  String _lineGap(bool isLastLine) => isLastLine ? copyGap : '\n';
 
   @override
   Widget build(BuildContext context) {
@@ -210,12 +218,12 @@ class BlockView extends StatelessWidget {
       case ParagraphBlock(:final runs):
         return Padding(
           padding: const EdgeInsets.only(bottom: kNoteBlockGap),
-          child: _line(BlockRef(block.id), runs, kNoteBase),
+          child: _line(BlockRef(block.id), runs, kNoteBase, copyGap: copyGap),
         );
       case HeadingBlock(:final level, :final runs):
         return Padding(
           padding: const EdgeInsets.only(bottom: kNoteBlockGap),
-          child: _line(BlockRef(block.id), runs, kNoteHeadingStyle(level)),
+          child: _line(BlockRef(block.id), runs, kNoteHeadingStyle(level), copyGap: copyGap),
         );
       case QuoteBlock(:final lines):
         final style = kNoteQuoteTextStyle();
@@ -232,18 +240,24 @@ class BlockView extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
               for (var i = 0; i < lines.length; i++)
-                _line(quoteLineRef(block.id, i), lines[i], style),
+                _line(quoteLineRef(block.id, i), lines[i], style,
+                    copyGap: _lineGap(i == lines.length - 1)),
             ],
           ),
         );
       case BulletListBlock(:final items):
         return _listShell(<Widget>[
-          for (final item in items)
+          for (var i = 0; i < items.length; i++)
             _listRow(
               marker: Text('• ', style: kNoteBase),
-              runs: item.runs,
+              runs: items[i].runs,
               style: kNoteBase,
-              line: _line(BlockRef(block.id, itemId: item.id), item.runs, kNoteBase),
+              line: _line(
+                BlockRef(block.id, itemId: items[i].id),
+                items[i].runs,
+                kNoteBase,
+                copyGap: _lineGap(i == items.length - 1),
+              ),
             ),
         ]);
       case OrderedListBlock(:final start, :final items):
@@ -257,23 +271,25 @@ class BlockView extends StatelessWidget {
                 BlockRef(block.id, itemId: items[i].id),
                 items[i].runs,
                 kNoteBase,
+                copyGap: _lineGap(i == items.length - 1),
               ),
             ),
         ]);
       case TaskListBlock(:final items):
         return _listShell(<Widget>[
-          for (final item in items)
+          for (var i = 0; i < items.length; i++)
             _taskRow(
-              item: item,
-              runs: item.runs,
-              style: _taskTextStyle(item.checked),
+              item: items[i],
+              runs: items[i].runs,
+              style: _taskTextStyle(items[i].checked),
               onToggle: () => controller.toggleTaskItem(
-                BlockRef(block.id, itemId: item.id),
+                BlockRef(block.id, itemId: items[i].id),
               ),
               line: _line(
-                BlockRef(block.id, itemId: item.id),
-                item.runs,
-                _taskTextStyle(item.checked),
+                BlockRef(block.id, itemId: items[i].id),
+                items[i].runs,
+                _taskTextStyle(items[i].checked),
+                copyGap: _lineGap(i == items.length - 1),
               ),
             ),
         ]);
@@ -285,6 +301,7 @@ class BlockView extends StatelessWidget {
             code.isEmpty ? const <InlineNode>[] : <InlineNode>[TextRun(code)],
             kNoteCode,
             asPlainText: true,
+            copyGap: copyGap,
           ),
         );
       case TableBlock():
@@ -311,6 +328,7 @@ class BlockView extends StatelessWidget {
             text.isEmpty ? const <InlineNode>[] : <InlineNode>[TextRun(text)],
             kNoteCode,
             asPlainText: true,
+            copyGap: copyGap,
           ),
         );
     }
@@ -322,6 +340,7 @@ class BlockView extends StatelessWidget {
     InlineRuns runs,
     TextStyle style, {
     bool asPlainText = false,
+    String copyGap = '',
   }) {
     if (controller.active == ref) {
       return _editableLine(ref, style, asPlainText: asPlainText);
@@ -332,6 +351,7 @@ class BlockView extends StatelessWidget {
       runs: runs,
       style: style,
       asPlainText: asPlainText,
+      copyGap: copyGap,
     );
   }
 
@@ -366,6 +386,7 @@ class _ReadOnlyLine extends StatelessWidget {
     required this.runs,
     required this.style,
     this.asPlainText = false,
+    this.copyGap = '',
   });
 
   final NoteEditorController controller;
@@ -374,19 +395,41 @@ class _ReadOnlyLine extends StatelessWidget {
   final TextStyle style;
   final bool asPlainText;
 
+  /// 复制到剪贴板时，接在本行文字后面的换行分隔（**渲染上零高度**）。
+  ///
+  /// `SelectionArea` 会把每个可选 Text 的选中文本**直接首尾拼接**（框架
+  /// `SelectionContainerDelegate.getSelectedContent` 不插任何分隔符），所以跨块拖选
+  /// 复制出来原本是「第一段第二段」粘成一坨。把块间 `trailingGap` 作为一个
+  /// `fontSize:0 / height:0` 的 TextSpan 挂在该块最后一行末尾，选中跨越这一行时
+  /// 这段换行就会跟着进剪贴板 → 局部复制粘贴也能带换行。零字号 + 零行高使它有
+  /// 字符、无视觉高度（实测不增加行高），也不会影响点按定位光标。
+  final String copyGap;
+
+  /// 零高度的「复制用换行」span（只在 [copyGap] 非空时插入）。
+  InlineSpan get _gapSpan => TextSpan(
+        text: copyGap,
+        style: const TextStyle(fontSize: 0, height: 0),
+      );
+
   @override
   Widget build(BuildContext context) {
     final text = plainTextOf(runs);
     if (asPlainText) {
-      // 代码块 / 原文块：必须用 `Text(data)`（测试断言了 `widget.style.fontFamily`），
-      // 且不做任何行内解析。
+      // 代码块 / 原文块：不做任何行内解析。用 Text.rich 是为了把 [copyGap] 挂进
+      // 同一个 RenderParagraph（style 仍原样传给 Text，等宽字体断言不受影响）。
       return GestureDetector(
         behavior: HitTestBehavior.opaque,
         // 用 onTapUp（抬起且未拖动）而非 onTapDown（按下即触发）：否则一拖拽、按下瞬间
         // 就进编辑态变成 TextField，SelectionArea 的跨块选区还没开始就被打断。
         onTapUp: (TapUpDetails d) => _focusAt(context, text, d.localPosition, double.infinity),
-        child: Text(
-          text.isEmpty ? ' ' : text,
+        child: Text.rich(
+          TextSpan(
+            style: style,
+            children: <InlineSpan>[
+              TextSpan(text: text.isEmpty ? ' ' : text),
+              if (copyGap.isNotEmpty) _gapSpan,
+            ],
+          ),
           style: style,
         ),
       );
@@ -401,12 +444,29 @@ class _ReadOnlyLine extends StatelessWidget {
           // 同 asPlainText 分支：onTapUp 让拖拽不被「进入编辑态」抢占，跨块选区才能成立。
           onTapUp: (TapUpDetails d) => _focusAt(context, text, d.localPosition, width),
           child: text.isEmpty
+              // 空段落也要进可选区（否则跨空段拖选会把它两侧的段落粘连）。
+              // 用一个空格撑起行高，并把 copyGap 挂在同一个段落里。
               ? SizedBox(
                   width: double.infinity,
                   height: style.fontSize == null ? 20 : style.fontSize! * 1.5,
+                  child: Text.rich(
+                    TextSpan(
+                      style: style,
+                      children: <InlineSpan>[
+                        const TextSpan(text: ' '),
+                        if (copyGap.isNotEmpty) _gapSpan,
+                      ],
+                    ),
+                  ),
                 )
               : Text.rich(
-                  TextSpan(style: style, children: inlineSpansFor(runs, style)),
+                  TextSpan(
+                    style: style,
+                    children: <InlineSpan>[
+                      ...inlineSpansFor(runs, style),
+                      if (copyGap.isNotEmpty) _gapSpan,
+                    ],
+                  ),
                 ),
         );
       },
