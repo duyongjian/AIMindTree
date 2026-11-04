@@ -255,7 +255,9 @@ void main() {
       expect(c.doc.blocks, hasLength(2));
       expect(c.doc.blocks[0], isA<HeadingBlock>());
       expect(c.doc.blocks[1], isA<ParagraphBlock>());
-      expect(c.markdown, '# 标题\n\n');
+      // 末尾多出的空段落必须带一个收尾换行：否则序列化后它跟前一块只隔一个
+      // 换行，解析器会把那行当成「段落分隔」，空段落存盘即失（见 `_normalize`）。
+      expect(c.markdown, '# 标题\n\n\n');
       c.dispose();
     });
 
@@ -607,7 +609,8 @@ void main() {
       c.appendParagraphAndFocus();
       expect(c.doc.blocks, hasLength(2));
       expect(c.active!.blockId, c.doc.blocks[1].id);
-      expect(c.markdown, '正文\n\n');
+      // 同上：新空段落自带一个收尾换行，重开时这一行才不会被解析器吃掉。
+      expect(c.markdown, '正文\n\n\n');
       c.dispose();
     });
   });

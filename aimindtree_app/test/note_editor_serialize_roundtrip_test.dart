@@ -3,7 +3,6 @@ library;
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:aimindtree_app/features/notes/block_actions.dart';
 import 'package:aimindtree_app/features/notes/block_model.dart';
 import 'package:aimindtree_app/features/notes/markdown_block_parser.dart';
 import 'package:aimindtree_app/features/notes/note_editor_controller.dart';
@@ -27,18 +26,26 @@ void main() {
     expect(serialized2, serialized, reason: '序列化应幂等');
   });
 
-  test('编辑后序列化：splitBlock 产生的新段落互不粘连', () {
-    // 模拟用户在一整段里回车拆成两段。
-    final doc = parseMarkdownDoc('AAA\n\nBBB');
-    expect(doc.blocks.length, 2);
+  test('编辑后序列化：段尾回车分出的空段落能存住、不粘连', () {
+    // 模拟用户在两段文档的第一段末尾回车（拆出一个新段落）。
+    final c = NoteEditorController(markdown: 'AAA\n\nBBB');
+    expect(c.doc.blocks.length, 2);
+    final ref = BlockRef(c.doc.blocks.first.id);
+    c.focusBlock(ref, caret: 3);
 
-    // 第一段落尾回车 → 拆成两段。
-    final split = splitBlock(doc, BlockRef(doc.blocks.first.id), caretOffset: 3);
-    final md = serializeDoc(split.doc);
-    expect(md, contains('\n\n'), reason: '拆分后的两段之间应有空行分隔');
+    // TextField 里先落一个 `\n`，控制器据此判定「语义化回车」。
+    c.onLineChanged(ref, 'AAA\n');
 
-    final reparsed = parseMarkdownDoc(md);
-    expect(reparsed.blocks.length, 2, reason: '重解析应为 2 段，不应粘连成 1 段');
+    expect(c.doc.blocks.length, 3, reason: '段尾回车应分出一个新的空段落');
+    expect(c.markdown, startsWith('AAA'));
+
+    // 关键：保存 → 重开，仍是 3 块（空段落没有被解析器并进前一块的间隔）。
+    final reparsed = parseMarkdownDoc(c.markdown);
+    expect(reparsed.blocks.length, 3, reason: '重解析应为 3 块，空段落不得塌进间隔');
+    expect(plainTextOf((reparsed.blocks[1] as ParagraphBlock).runs), isEmpty,
+        reason: '中间那块应仍是空段落');
+    expect(plainTextOf((reparsed.blocks[2] as ParagraphBlock).runs), 'BBB');
+    c.dispose();
   });
 
   group('多行粘贴 → 保存后不粘连', () {

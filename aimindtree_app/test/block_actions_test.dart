@@ -84,15 +84,20 @@ void main() {
       expect(serializeDoc(r.doc), 'ab\n\ncdef\n\nnext');
     });
 
-    test('末尾回车：首块复用原对象（source 保留），追加一个空段落', () {
+    test('末尾回车：首块内容复用（source 保留、补上分隔），追加一个空段落', () {
       final doc = d('abc');
       final r = splitBlock(doc, ref(doc));
-      expect(identical(r.doc.blocks[0], doc.blocks[0]), isTrue, reason: 'L1：内容没变就别重造');
+      // 内容没变 → source 继续直通（L1）。但**间隔必须补上**：文末块原本
+      // `trailingGap == ''`，若直接复用原对象，新旧两块都带空间隔，序列化会退化成
+      // `'abc'` —— 空段落连同分隔一起蒸发（用户实测「连按回车，保存后一行不剩」）。
       expect(r.doc.blocks[0].source, 'abc');
+      expect(r.doc.blocks[0].trailingGap, '\n\n');
       expect(plainTextOf((r.doc.blocks[1] as ParagraphBlock).runs), isEmpty);
       expect(r.caret.blockId, r.doc.blocks[1].id);
       expect(r.doc.blocks.length, 2);
-      expect(serializeDoc(r.doc), 'abc', reason: '文末空段落不落库成空行垃圾（R1 精神）');
+      // 空段落是用户敲出来的空行，必须能序列化出来，否则重开就没了。
+      // （是否「文末多余空行」由控制器的 `_normalize` 统一收敛成单换行。）
+      expect(serializeDoc(r.doc), 'abc\n\n');
     });
 
     test('开头回车：首段为空，原文整体进后一段', () {

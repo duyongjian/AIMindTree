@@ -74,9 +74,19 @@ import 'markdown_block_parser.dart' show serializeInline;
   if (b is ParagraphBlock) {
     final text = plainTextOf(b.runs);
     final off = _clamp(caretOffset ?? text.length, text.length);
-    // 光标在末尾时首块内容未变 → 直接复用原对象，source 继续直通（L1）。
+    // 光标在末尾时首块内容未变 → 复用原对象，source 继续直通（L1）。
+    // **但间隔必须补上**：文末块（`trailingGap == ''`）回车后若直接复用原对象，
+    // 新旧两块都带空间隔，序列化就退化成「AAA」——空段落连同分隔全部蒸发
+    // （用户实测：连按回车看到空白行，保存后一行都没了）。内容没变 → source 照带。
     final head = off >= text.length
-        ? b
+        ? (b.trailingGap == headGap
+            ? b
+            : ParagraphBlock(
+                id: b.id,
+                source: b.source,
+                trailingGap: headGap,
+                runs: b.runs,
+              ))
         : ParagraphBlock(id: b.id, trailingGap: headGap, runs: _slice(b.runs, 0, off));
     final tail = ParagraphBlock(
       id: newBlockId('p'),

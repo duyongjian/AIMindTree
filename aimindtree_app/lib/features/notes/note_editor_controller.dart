@@ -1337,9 +1337,12 @@ class NoteEditorController extends ChangeNotifier {
   /// 提交新文档：重算序列化缓存 + 同步行控制器 + 通知 UI。
   void _commit(NoteDoc next) {
     _flushStale();
+    // 所有变更的唯一收口：**间隔规范化在这里做**。语义化回车 / 换类型等动作走的是
+    // `actions.*`，直接返回新 doc，不经过 `_replaceRange`——只在 `_replaceRange` 里
+    // 规范化会漏掉它们（连按回车造的空段落间隔全成 `'\n\n'`，存盘重开时多算出行）。
     final blocks = next.blocks.isEmpty
         ? <Block>[ParagraphBlock.empty()]
-        : next.blocks;
+        : _normalize(next.blocks);
     _doc = NoteDoc(blocks: blocks, prologue: next.prologue);
     _markdown = serializeDoc(_doc);
     _syncLineControllers();
@@ -1347,17 +1350,43 @@ class NoteEditorController extends ChangeNotifier {
     _notify();
   }
 
-  /// 保证「非末块」的间隔里至少有换行，否则序列化后两个块会粘成一行。
+  /// 间隔规范化：保证序列化后的 Markdown 能**原样解析回这些块**。
+  ///
+  /// 三条规则（都是间隔，绝不碰内容 / `source`）：
+  /// 1. 空段落（用户敲出来的空行）间隔恒为单个 `'\n'`——它自己就是那个空行，
+  ///    再加空行就会多算出块；末块也留一个，否则存盘重开时这一行会被解析器
+  ///    当成间隔收进前一块，用户看到的空行「凭空少一行」。
+  /// 2. 非末块与下一块之间至少要有一个换行，否则两块会粘成一行。
+  /// 3. 下一块是空段落时，当前块必须给**两个**换行——只给一个的话，解析器会把
+  ///    那个换行当成「段落分隔」，空段落本身活不下来。
   List<Block> _normalize(List<Block> blocks) {
     if (blocks.length < 2) return blocks;
     final out = <Block>[...blocks];
-    for (var i = 0; i < out.length - 1; i++) {
-      if (!out[i].trailingGap.contains('\n')) {
-        out[i] = _withGap(out[i], '\n\n');
+    for (var i = 0; i < out.length; i++) {
+      final b = out[i];
+      if (_isBlankParagraph(b)) {
+        if (b.trailingGap != '\n') out[i] = _withGap(b, '\n');
+        continue;
+      }
+      if (i == out.length - 1) {
+        // 末块自己不是空行时不需要收尾换行——否则「空行里开始打字」会把那个
+        // 换行永久留在文末，之后每次编辑都揣着一个多余的行尾。
+        if (b.trailingGap == '\n') out[i] = _withGap(b, '');
+        continue;
+      }
+      final gap = b.trailingGap;
+      if (!gap.contains('\n')) {
+        out[i] = _withGap(b, '\n\n');
+      } else if (gap == '\n' && _isBlankParagraph(out[i + 1])) {
+        out[i] = _withGap(b, '\n\n');
       }
     }
     return out;
   }
+
+  /// 这一块是不是「用户敲出来的空行」（空段落且未编辑过 → 不是源文档里的块）。
+  static bool _isBlankParagraph(Block b) =>
+      b is ParagraphBlock && b.source == null && plainTextOf(b.runs).isEmpty;
 
   /// 把文档侧的新文本同步进已注册的行控制器（`setMarkdown` / 结构变更后用）。
   void _syncLineControllers() {

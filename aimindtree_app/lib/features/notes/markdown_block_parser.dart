@@ -65,6 +65,10 @@ final _kImage = RegExp(r'!\[([^\]]*)\]\((aimindtree-asset://[^)\s]+)\)');
 /// 行首缩进（列表续行剥掉它，序列化时再统一补两空格 → 幂等）。
 final _kLeadingSpace = RegExp(r'^[ \t]+');
 
+/// 「非换行字符」——判某个间隔是不是**纯换行**（纯换行才允许拆成空段落块，
+/// 带空格 / 制表符的空白行必须原样保留，否则 L1 字节直通就破了）。
+final _kNonNewline = RegExp(r'[^\n]');
+
 /// 可被反斜杠转义的行内字符。
 final _kEscapable = RegExp(r'^[\\`*_{}\[\]()#+\-.!~|]');
 
@@ -110,7 +114,129 @@ NoteDoc parseMarkdownDoc(String md) {
     // 整篇都是空行：用空段落兜底，原文空白已由 prologue 承载。
     return NoteDoc(blocks: <Block>[ParagraphBlock.empty()], prologue: prologue);
   }
-  return NoteDoc(blocks: blocks, prologue: prologue);
+  return NoteDoc(blocks: _expandBlankGaps(blocks), prologue: prologue);
+}
+
+/// 把「连续空行」里**多出来的空行**还原成真实的空段落块（每个空行一个块）。
+///
+/// 主循环遇空行只会 `i++` 跳过，间隔由 `_gapBetween` 全部塞进**前一块**的
+/// `trailingGap`。于是用户在编辑器里连按回车敲出来的空行，保存后重开时会被
+/// 静默吃掉（渲染只看块，`trailingGap` 不占视觉高度）：表现为「空了一屏，存完
+/// 只剩一两行，而且点不动」。这里把多余空行各自变成一个空段落块 ——
+///
+/// - 第一行空白继续留给前一块的 `trailingGap`（承担段落分隔，视觉与以前一致）；
+/// - 其余每个空行一个 `ParagraphBlock`，间隔 `'\n'`（它自己就是那个空行）。
+///
+/// 序列化回去的总换行数不变（2 + (n-2) = n），所以 **L1 逐字节还原仍然成立**；
+/// 但空行成了真实块：可点、可编辑、能存住、能被复制带换行。
+///
+/// 只处理「纯换行」的间隔（空白行里带空格/制表符的原样保留）—— 不该顺手改字节。
+List<Block> _expandBlankGaps(List<Block> blocks) {
+  var touched = false;
+  final out = <Block>[];
+  for (final b in blocks) {
+    final gap = b.trailingGap;
+    final pureNewlines = gap.isNotEmpty && !gap.contains(_kNonNewline);
+    if (!pureNewlines || gap.length <= 2) {
+      out.add(b);
+      continue;
+    }
+    touched = true;
+    out.add(_withGap(b, '\n\n'));
+    for (var k = 2; k < gap.length; k++) {
+      out.add(ParagraphBlock(
+        id: newBlockId('p'),
+        trailingGap: '\n',
+        runs: const <InlineNode>[],
+      ));
+    }
+  }
+  return touched ? out : blocks;
+}
+
+/// 「换个隔行间隔」的块重建（[Block] 没有 copyWith，这里集中一处；`source` 原样
+/// 带走 → 未编辑块继续走 L1 字节直通）。
+Block _withGap(Block b, String gap) {
+  switch (b) {
+    case ParagraphBlock(:final runs):
+      return ParagraphBlock(
+        id: b.id,
+        source: b.source,
+        trailingGap: gap,
+        runs: runs,
+      );
+    case HeadingBlock(:final level, :final runs):
+      return HeadingBlock(
+        id: b.id,
+        source: b.source,
+        trailingGap: gap,
+        level: level,
+        runs: runs,
+      );
+    case QuoteBlock(:final lines):
+      return QuoteBlock(
+        id: b.id,
+        source: b.source,
+        trailingGap: gap,
+        lines: lines,
+      );
+    case BulletListBlock(:final items):
+      return BulletListBlock(
+        id: b.id,
+        source: b.source,
+        trailingGap: gap,
+        items: items,
+      );
+    case OrderedListBlock(:final start, :final items):
+      return OrderedListBlock(
+        id: b.id,
+        source: b.source,
+        trailingGap: gap,
+        start: start,
+        items: items,
+      );
+    case TaskListBlock(:final items):
+      return TaskListBlock(
+        id: b.id,
+        source: b.source,
+        trailingGap: gap,
+        items: items,
+      );
+    case CodeBlock(:final language, :final code):
+      return CodeBlock(
+        id: b.id,
+        source: b.source,
+        trailingGap: gap,
+        language: language,
+        code: code,
+      );
+    case TableBlock(:final hasHeader, :final aligns, :final rows):
+      return TableBlock(
+        id: b.id,
+        source: b.source,
+        trailingGap: gap,
+        hasHeader: hasHeader,
+        aligns: aligns,
+        rows: rows,
+      );
+    case DividerBlock():
+      return DividerBlock(id: b.id, source: b.source, trailingGap: gap);
+    case ImageBlock(:final assetId, :final alt):
+      return ImageBlock(
+        id: b.id,
+        source: b.source,
+        trailingGap: gap,
+        assetId: assetId,
+        alt: alt,
+      );
+    case RawBlock(:final text):
+      return RawBlock(
+        id: b.id,
+        source: b.source,
+        trailingGap: gap,
+        text: text,
+      );
+  }
 }
 
 /// 把 [NoteDoc] 序列化成 Markdown 字符串（纯文本，硬约束，见设计 §1.3）。
