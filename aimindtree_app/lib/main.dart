@@ -324,9 +324,6 @@ class NotesListPageState extends State<NotesListPage> {
   /// 当前选中的文件夹：null=全部笔记，''=未分类，其余为 folderId。
   String? _selectedFolderId;
 
-  /// 文件夹导航抽屉句柄。
-  final _scaffoldKey = GlobalKey<ScaffoldState>();
-
   @override
   void initState() {
     super.initState();
@@ -486,59 +483,171 @@ class NotesListPageState extends State<NotesListPage> {
   // ============ 笔记文件夹（置顶 + 增删改查） ============
 
   /// 文件夹导航抽屉：全部 / 未分类 + 层级文件夹树。
-  Widget _buildFolderDrawer() {
-    final tree = _buildFolderTree(_folders);
-    return Drawer(
-      child: Column(
-        children: [
-          const DrawerHeader(
-            margin: EdgeInsets.zero,
-            child: Align(
-              alignment: Alignment.bottomLeft,
-              child: Text('笔记文件夹',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            ),
-          ),
-          Expanded(
-            child: ListView(
-              children: [
-                _folderTile(
-                  label: '全部笔记',
-                  selected: _selectedFolderId == null,
-                  onTap: () {
-                    Navigator.pop(context);
-                    _selectFolder(null);
-                  },
-                ),
-                _folderTile(
-                  label: '未分类',
-                  selected: _selectedFolderId == '',
-                  onTap: () {
-                    Navigator.pop(context);
-                    _selectFolder('');
-                  },
-                ),
-                const Divider(),
-                for (final node in tree) _folderNode(node, 0),
-              ],
-            ),
-          ),
-          const Divider(height: 1),
-          ListTile(
-            leading: const Icon(Icons.create_new_folder_outlined),
-            title: const Text('新建文件夹'),
-            onTap: () {
-              Navigator.pop(context);
-              _createFolder();
-            },
+  /// 文件夹行的「⋯」操作菜单（新建子文件夹 / 重命名 / 置顶 / 删除）。
+  Widget _folderMoreMenu(Notebook f, BuildContext popCtx, VoidCallback onChange) =>
+      PopupMenuButton<String>(
+        tooltip: '文件夹操作',
+        onSelected: (v) async {
+          switch (v) {
+            case 'add':
+              await _createFolder(parentId: f.id);
+            case 'rename':
+              await _renameFolder(f);
+            case 'pin':
+              await _pinFolder(f);
+            case 'delete':
+              await _deleteFolder(f);
+          }
+          onChange();
+        },
+        itemBuilder: (_) => const [
+          PopupMenuItem(value: 'add', child: Text('新建子文件夹')),
+          PopupMenuItem(value: 'rename', child: Text('重命名')),
+          PopupMenuItem(value: 'pin', child: Text('置顶 / 取消置顶')),
+          PopupMenuItem(
+            value: 'delete',
+            child: Text('删除', style: TextStyle(color: Colors.red)),
           ),
         ],
-      ),
+      );
+
+  /// 右上角文件夹选择弹层：支持按名称搜索，选中即切换笔记列表过滤。
+  /// 保留原有的树形层级、置顶标记与增删改查入口。
+  Future<void> _openFolderPicker() async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) {
+        var query = '';
+        return StatefulBuilder(
+          builder: (ctx, setLocal) {
+            final q = query.trim().toLowerCase();
+            final List<Widget> folderWidgets;
+            if (q.isEmpty) {
+              final tree = _buildFolderTree(_folders);
+              folderWidgets = [
+                for (final node in tree)
+                  _folderNode(node, 0,
+                      popCtx: ctx, onChange: () => setLocal(() {}))
+              ];
+            } else {
+              final matches = _folders
+                  .where((f) => f.name.toLowerCase().contains(q))
+                  .toList();
+              folderWidgets = [
+                for (final f in matches)
+                  _folderTile(
+                    label: f.name.isEmpty ? '(未命名文件夹)' : f.name,
+                    pinned: f.pinned,
+                    selected: _selectedFolderId == f.id,
+                    trailing: _folderMoreMenu(f, ctx, () => setLocal(() {})),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _selectFolder(f.id);
+                    },
+                  ),
+                if (matches.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Text('没有匹配的文件夹',
+                        style: TextStyle(color: Colors.grey)),
+                  ),
+              ];
+            }
+            final pickerHeight = MediaQuery.of(ctx).size.height * 0.7;
+            return Align(
+              alignment: Alignment.topRight,
+              child: Material(
+                type: MaterialType.card,
+                elevation: 8,
+                borderRadius: BorderRadius.circular(12),
+                color: Theme.of(ctx).colorScheme.surface,
+                child: SizedBox(
+                  width: 340,
+                  height: pickerHeight,
+                  child: Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
+                        child: Row(
+                          children: [
+                            const Expanded(
+                              child: Text('笔记文件夹',
+                                  style: TextStyle(
+                                      fontSize: 16, fontWeight: FontWeight.bold)),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.close),
+                              tooltip: '关闭',
+                              onPressed: () => Navigator.pop(ctx),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 4),
+                        child: TextField(
+                          autofocus: true,
+                          decoration: const InputDecoration(
+                            hintText: '搜索文件夹',
+                            prefixIcon: Icon(Icons.search, size: 20),
+                            isDense: true,
+                            border: OutlineInputBorder(),
+                          ),
+                          onChanged: (v) => setLocal(() => query = v),
+                        ),
+                      ),
+                      const Divider(height: 1),
+                      Expanded(
+                        child: ListView(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          children: [
+                            _folderTile(
+                              label: '全部笔记',
+                              selected: _selectedFolderId == null,
+                              onTap: () {
+                                Navigator.pop(ctx);
+                                _selectFolder(null);
+                              },
+                            ),
+                            _folderTile(
+                              label: '未分类',
+                              selected: _selectedFolderId == '',
+                              onTap: () {
+                                Navigator.pop(ctx);
+                                _selectFolder('');
+                              },
+                            ),
+                            const Divider(),
+                            ...folderWidgets,
+                          ],
+                        ),
+                      ),
+                      const Divider(height: 1),
+                      ListTile(
+                        leading: const Icon(Icons.create_new_folder_outlined),
+                        title: const Text('新建文件夹'),
+                        onTap: () async {
+                          await _createFolder();
+                          setLocal(() {});
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
     );
   }
 
   /// 递归渲染文件夹节点（按层级缩进），每个节点带操作菜单。
-  Widget _folderNode(_FolderNode node, int depth) {
+  /// [popCtx] 用于关闭文件夹选择弹层；[onChange] 在增删改后置顶后刷新弹层。
+  Widget _folderNode(_FolderNode node, int depth,
+      {required BuildContext popCtx, required VoidCallback onChange}) {
     final f = node.folder;
     return Column(
       children: [
@@ -547,36 +656,14 @@ class NotesListPageState extends State<NotesListPage> {
           indent: 16.0 * depth,
           selected: _selectedFolderId == f.id,
           pinned: f.pinned,
-          trailing: PopupMenuButton<String>(
-            tooltip: '文件夹操作',
-            onSelected: (v) {
-              switch (v) {
-                case 'add':
-                  _createFolder(parentId: f.id);
-                case 'rename':
-                  _renameFolder(f);
-                case 'pin':
-                  _pinFolder(f);
-                case 'delete':
-                  _deleteFolder(f);
-              }
-            },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'add', child: Text('新建子文件夹')),
-              PopupMenuItem(value: 'rename', child: Text('重命名')),
-              PopupMenuItem(value: 'pin', child: Text('置顶 / 取消置顶')),
-              PopupMenuItem(
-                value: 'delete',
-                child: Text('删除', style: TextStyle(color: Colors.red)),
-              ),
-            ],
-          ),
+          trailing: _folderMoreMenu(f, popCtx, onChange),
           onTap: () {
-            Navigator.pop(context);
+            Navigator.pop(popCtx);
             _selectFolder(f.id);
           },
         ),
-        for (final child in node.children) _folderNode(child, depth + 1),
+        for (final child in node.children)
+          _folderNode(child, depth + 1, popCtx: popCtx, onChange: onChange),
       ],
     );
   }
@@ -838,8 +925,6 @@ class NotesListPageState extends State<NotesListPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      key: _scaffoldKey,
-      drawer: _buildFolderDrawer(),
       appBar: AppBar(
         title: _selectionMode
             ? Text('已选 ${_selected.length} 篇')
@@ -877,11 +962,11 @@ class NotesListPageState extends State<NotesListPage> {
               tooltip: '删除所选',
             ),
           ] else ...[
-            // 文件夹导航抽屉入口：展示 / 切换笔记文件夹。
+            // 文件夹导航：右上角弹层，支持搜索与切换。
             IconButton(
-              onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+              onPressed: _openFolderPicker,
               icon: const Icon(Icons.folder_outlined),
-              tooltip: '文件夹',
+              tooltip: '文件夹（搜索 / 切换）',
             ),
             // 搜索：展开搜索框时显示「关闭」，否则显示「搜索」入口。
             if (_searching)
