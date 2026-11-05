@@ -18,6 +18,8 @@ Map<String, dynamic> notebookRowToMap(NotebookRow r) => {
       'name': r.name,
       'parent_id': r.parentId,
       'sort_order': r.sortOrder,
+      // v8 新增：文件夹置顶。少写 = 对端 pull 时静默回落默认 false，置顶状态跨设备丢失。
+      'pinned': r.pinned,
       'updated_at': r.updatedAt,
       'version': r.version,
       'device_id': r.deviceId,
@@ -31,6 +33,8 @@ Map<String, dynamic> noteRowToMap(NoteRow r) => {
       'title': r.title,
       'content_md': r.contentMd,
       'content_hash': r.contentHash,
+      // v8 新增：置顶。少写 = 对端 pull 时静默回落默认 false，置顶状态跨设备丢失。
+      'pinned': r.pinned,
       'updated_at': r.updatedAt,
       'version': r.version,
       'device_id': r.deviceId,

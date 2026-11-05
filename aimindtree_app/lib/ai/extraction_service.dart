@@ -18,6 +18,7 @@ import '../data/db/drift_database.dart';
 import '../data/models/knowledge_point.dart';
 import '../data/repositories/group_repository.dart';
 import '../data/repositories/knowledge_repository.dart';
+import '../data/repositories/notebook_repository.dart';
 import '../data/repositories/note_asset_repository.dart';
 import '../data/repositories/tree_repository.dart';
 import '../data/repositories/settings_repository.dart';
@@ -73,12 +74,16 @@ class ExtractionService {
     required this.groups,
     required this.jobs,
     required this.assets,
+    required this.notebooks,
   });
 
   final KnowledgeRepository repo;
   final TreeRepository trees;
   final GroupRepository groups;
   final AiService ai;
+
+  /// 笔记文件夹（笔记本）仓储：文件夹增删改查与置顶。
+  final NotebookRepository notebooks;
 
   /// AI 任务队列（/v1/jobs）：批量型 AI 功能走这里，提交即返回。
   final AiJobService jobs;
@@ -543,6 +548,7 @@ class ExtractionService {
     final repo = KnowledgeRepository(database, deviceId: did);
     final trees = TreeRepository(database, deviceId: did);
     final groups = GroupRepository(database, deviceId: did);
+    final notebooks = NotebookRepository(database, deviceId: did);
 
     // === Sync（T03）===
     final outbox = SyncOutboxRepo(database, deviceId: did);
@@ -610,6 +616,7 @@ class ExtractionService {
         groups: groups,
         jobs: jobs,
         assets: NoteAssetRepository(database, deviceId: did),
+        notebooks: notebooks,
       ),
       database,
       router,

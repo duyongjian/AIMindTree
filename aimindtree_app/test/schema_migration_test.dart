@@ -113,6 +113,56 @@ CREATE TABLE homeworks (
   items_json TEXT NOT NULL DEFAULT '[]',
   PRIMARY KEY (id)
 )''',
+  // v7→v8 给 notes / notebooks 各加了 pinned 列。退回 v4 形态时一并去掉，
+  // 否则 `from < 8` 的 addColumn 会撞 `duplicate column name: pinned`。
+  // SQLite 老版本不支持 DROP COLUMN，走「建新表 → 拷数据 → 改名」。
+  'DROP TABLE IF EXISTS notes_v4',
+  '''
+CREATE TABLE notes_v4 (
+  id TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  updated_at INTEGER NOT NULL,
+  device_id TEXT NOT NULL,
+  deleted_at INTEGER NULL,
+  notebook_id TEXT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  content_md TEXT NOT NULL DEFAULT '',
+  content_hash TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (id)
+)''',
+  '''
+INSERT INTO notes_v4 (
+  id, version, updated_at, device_id, deleted_at, notebook_id, title,
+  content_md, content_hash
+)
+SELECT
+  id, version, updated_at, device_id, deleted_at, notebook_id, title,
+  content_md, content_hash
+FROM notes''',
+  'DROP TABLE notes',
+  'ALTER TABLE notes_v4 RENAME TO notes',
+  'DROP TABLE IF EXISTS notebooks_v4',
+  '''
+CREATE TABLE notebooks_v4 (
+  id TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  updated_at INTEGER NOT NULL,
+  device_id TEXT NOT NULL,
+  deleted_at INTEGER NULL,
+  name TEXT NOT NULL,
+  parent_id TEXT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (id)
+)''',
+  '''
+INSERT INTO notebooks_v4 (
+  id, version, updated_at, device_id, deleted_at, name, parent_id, sort_order
+)
+SELECT
+  id, version, updated_at, device_id, deleted_at, name, parent_id, sort_order
+FROM notebooks''',
+  'DROP TABLE notebooks',
+  'ALTER TABLE notebooks_v4 RENAME TO notebooks',
   'PRAGMA user_version = 4',
 ];
 
@@ -342,6 +392,50 @@ void main() {
       expect(hw.dueAt, isNull, reason: 'due_at 可空');
       expect(hw.title, '', reason: '迁移不能改动旧列的默认值');
       expect(hw.itemsJson, '[]', reason: '迁移不能改动旧列的默认值');
+    });
+  });
+
+  group('v8 新列：notes / notebooks 的 pinned', () {
+    late AppDatabase db;
+
+    setUp(() {
+      db = AppDatabase(NativeDatabase.memory());
+    });
+
+    tearDown(() async {
+      await db.close();
+    });
+
+    test('新建笔记 / 文件夹默认不置顶，置顶后落库回读仍为 true', () async {
+      await db.into(db.notes).insert(
+            NotesCompanion.insert(
+              id: 'note-v8',
+              notebookId: const Value<String?>(null),
+              title: const Value('临时笔记'),
+              contentMd: const Value('正文'),
+              updatedAt: DateTime.now().toUtc(),
+              deviceId: 'v8-test',
+            ),
+          );
+      final note = await (db.select(db.notes)..limit(1)).getSingle();
+      expect(note.pinned, isFalse, reason: 'notes.pinned 默认 false');
+
+      await db.into(db.notebooks).insert(
+            NotebooksCompanion.insert(
+              id: 'nb-v8',
+              name: '工作',
+              updatedAt: DateTime.now().toUtc(),
+              deviceId: 'v8-test',
+            ),
+          );
+      final folder =
+          await (db.select(db.notebooks)..limit(1)).getSingle();
+      expect(folder.pinned, isFalse, reason: 'notebooks.pinned 默认 false');
+
+      await (db.update(db.notes)..where((t) => t.id.equals('note-v8')))
+          .write(const NotesCompanion(pinned: Value(true)));
+      final updated = await (db.select(db.notes)..limit(1)).getSingle();
+      expect(updated.pinned, isTrue, reason: 'notes.pinned 可置顶');
     });
   });
 

@@ -36,6 +36,10 @@ class Notebooks extends Table with SyncMeta {
   TextColumn get name => text().named('name')();
   TextColumn get parentId => text().named('parent_id').nullable()();
   IntColumn get sortOrder => integer().named('sort_order').withDefault(const Constant(0))();
+
+  /// 置顶：true 的文件夹恒排在侧栏最前（用户诉求：文件夹也能置顶）。
+  BoolColumn get pinned =>
+      boolean().named('pinned').withDefault(const Constant(false))();
 }
 
 /// 笔记正文（Markdown 源码 + 分屏预览，PRD §5.10）。
@@ -47,6 +51,10 @@ class Notes extends Table with SyncMeta {
 
   /// 内容哈希，用于快速判断是否有实质变更 / 同步校验和。
   TextColumn get contentHash => text().named('content_hash').withDefault(const Constant(''))();
+
+  /// 置顶：true 的笔记恒排在所属文件夹列表最前（用户诉求：笔记也能置顶）。
+  BoolColumn get pinned =>
+      boolean().named('pinned').withDefault(const Constant(false))();
 }
 
 /// 笔记附件（图片）——与笔记分开同步，避免笔记 payload 被 base64 撑爆。

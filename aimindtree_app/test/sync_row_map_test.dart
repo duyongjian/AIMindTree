@@ -47,6 +47,7 @@ const Map<String, Set<String>> kSyncTableKeys = <String, Set<String>>{
     'name',
     'parent_id',
     'sort_order',
+    'pinned',
     'updated_at',
     'version',
     'device_id',
@@ -58,6 +59,7 @@ const Map<String, Set<String>> kSyncTableKeys = <String, Set<String>>{
     'title',
     'content_md',
     'content_hash',
+    'pinned',
     'updated_at',
     'version',
     'device_id',
@@ -523,6 +525,7 @@ final List<_KeyProbe> _probes = <_KeyProbe>[
       'name': 'probe-name',
       'parent_id': 'probe-parent',
       'sort_order': 7,
+      'pinned': true,
       'deleted_at': _probeDeletedAt,
     },
     read: (db, id) async {
@@ -533,6 +536,7 @@ final List<_KeyProbe> _probes = <_KeyProbe>[
         'name': r.name,
         'parent_id': r.parentId,
         'sort_order': r.sortOrder,
+        'pinned': r.pinned,
         'updated_at': r.updatedAt,
         'version': r.version,
         'device_id': r.deviceId,
@@ -552,6 +556,7 @@ final List<_KeyProbe> _probes = <_KeyProbe>[
       // 也回落 `''` → 断言恒真、探针没有区分度（同 canvas_nodes.pinned
       // 用 `false` 区分默认 `true` 的道理）。
       'content_hash': 'probe-hash',
+      'pinned': true,
       'deleted_at': _probeDeletedAt,
     },
     read: (db, id) async {
@@ -563,6 +568,7 @@ final List<_KeyProbe> _probes = <_KeyProbe>[
         'title': r.title,
         'content_md': r.contentMd,
         'content_hash': r.contentHash,
+        'pinned': r.pinned,
         'updated_at': r.updatedAt,
         'version': r.version,
         'device_id': r.deviceId,

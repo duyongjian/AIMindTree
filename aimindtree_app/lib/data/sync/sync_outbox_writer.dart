@@ -47,6 +47,15 @@ class SyncOutboxWriter {
         toMap: noteRowToMap,
       );
 
+  /// 笔记本（文件夹）upsert。
+  Future<void> upsertNotebook(String id) => _upsert(
+        table: 'notebooks',
+        id: id,
+        load: () => (_db.select(_db.notebooks)..where((t) => t.id.equals(id)))
+            .getSingleOrNull(),
+        toMap: notebookRowToMap,
+      );
+
   /// 知识点 upsert。
   Future<void> upsertKnowledgePoint(String id) => _upsert(
         table: 'knowledge_points',
@@ -182,6 +191,16 @@ class SyncOutboxWriter {
             (_db.select(_db.notes)..where((t) => t.id.equals(id)))
                 .getSingleOrNull(),
         toMap: noteRowToMap,
+      );
+
+  /// 笔记本（文件夹）墓碑（软删：行仍在本地，deleted_at 非空）。
+  Future<void> tombstoneNotebook(String id) => _tombstone(
+        table: 'notebooks',
+        id: id,
+        load: () =>
+            (_db.select(_db.notebooks)..where((t) => t.id.equals(id)))
+                .getSingleOrNull(),
+        toMap: notebookRowToMap,
       );
 
   /// 知识点墓碑（软删：行仍在本地，deleted_at 非空）。

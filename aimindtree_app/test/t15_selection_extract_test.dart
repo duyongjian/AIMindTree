@@ -24,6 +24,7 @@ import 'package:aimindtree_app/data/models/knowledge_point.dart';
 import 'package:aimindtree_app/data/repositories/group_repository.dart';
 import 'package:aimindtree_app/data/repositories/knowledge_repository.dart';
 import 'package:aimindtree_app/data/repositories/note_asset_repository.dart';
+import 'package:aimindtree_app/data/repositories/notebook_repository.dart';
 import 'package:aimindtree_app/data/repositories/tree_repository.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -102,6 +103,7 @@ void main() {
 
   ExtractionService makeService() => ExtractionService(
         repo: repo,
+        notebooks: NotebookRepository(repo.db, deviceId: 't'),
         trees: TreeRepository(db, deviceId: 'd'),
         groups: GroupRepository(db, deviceId: 'd'),
         jobs: AiJobService(baseUrl: 'http://127.0.0.1:1'),

@@ -95,6 +95,19 @@ class $NotebooksTable extends Notebooks
     requiredDuringInsert: false,
     defaultValue: const Constant(0),
   );
+  static const VerificationMeta _pinnedMeta = const VerificationMeta('pinned');
+  @override
+  late final GeneratedColumn<bool> pinned = GeneratedColumn<bool>(
+    'pinned',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("pinned" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -105,6 +118,7 @@ class $NotebooksTable extends Notebooks
     name,
     parentId,
     sortOrder,
+    pinned,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -171,6 +185,12 @@ class $NotebooksTable extends Notebooks
         sortOrder.isAcceptableOrUnknown(data['sort_order']!, _sortOrderMeta),
       );
     }
+    if (data.containsKey('pinned')) {
+      context.handle(
+        _pinnedMeta,
+        pinned.isAcceptableOrUnknown(data['pinned']!, _pinnedMeta),
+      );
+    }
     return context;
   }
 
@@ -212,6 +232,10 @@ class $NotebooksTable extends Notebooks
         DriftSqlType.int,
         data['${effectivePrefix}sort_order'],
       )!,
+      pinned: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}pinned'],
+      )!,
     );
   }
 
@@ -237,6 +261,9 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
   final String name;
   final String? parentId;
   final int sortOrder;
+
+  /// 置顶：true 的文件夹恒排在侧栏最前（用户诉求：文件夹也能置顶）。
+  final bool pinned;
   const NotebookRow({
     required this.id,
     required this.version,
@@ -246,6 +273,7 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
     required this.name,
     this.parentId,
     required this.sortOrder,
+    required this.pinned,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -262,6 +290,7 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
       map['parent_id'] = Variable<String>(parentId);
     }
     map['sort_order'] = Variable<int>(sortOrder);
+    map['pinned'] = Variable<bool>(pinned);
     return map;
   }
 
@@ -279,6 +308,7 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
           ? const Value.absent()
           : Value(parentId),
       sortOrder: Value(sortOrder),
+      pinned: Value(pinned),
     );
   }
 
@@ -296,6 +326,7 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
       name: serializer.fromJson<String>(json['name']),
       parentId: serializer.fromJson<String?>(json['parentId']),
       sortOrder: serializer.fromJson<int>(json['sortOrder']),
+      pinned: serializer.fromJson<bool>(json['pinned']),
     );
   }
   @override
@@ -310,6 +341,7 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
       'name': serializer.toJson<String>(name),
       'parentId': serializer.toJson<String?>(parentId),
       'sortOrder': serializer.toJson<int>(sortOrder),
+      'pinned': serializer.toJson<bool>(pinned),
     };
   }
 
@@ -322,6 +354,7 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
     String? name,
     Value<String?> parentId = const Value.absent(),
     int? sortOrder,
+    bool? pinned,
   }) => NotebookRow(
     id: id ?? this.id,
     version: version ?? this.version,
@@ -331,6 +364,7 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
     name: name ?? this.name,
     parentId: parentId.present ? parentId.value : this.parentId,
     sortOrder: sortOrder ?? this.sortOrder,
+    pinned: pinned ?? this.pinned,
   );
   NotebookRow copyWithCompanion(NotebooksCompanion data) {
     return NotebookRow(
@@ -342,6 +376,7 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
       name: data.name.present ? data.name.value : this.name,
       parentId: data.parentId.present ? data.parentId.value : this.parentId,
       sortOrder: data.sortOrder.present ? data.sortOrder.value : this.sortOrder,
+      pinned: data.pinned.present ? data.pinned.value : this.pinned,
     );
   }
 
@@ -355,7 +390,8 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
           ..write('deletedAt: $deletedAt, ')
           ..write('name: $name, ')
           ..write('parentId: $parentId, ')
-          ..write('sortOrder: $sortOrder')
+          ..write('sortOrder: $sortOrder, ')
+          ..write('pinned: $pinned')
           ..write(')'))
         .toString();
   }
@@ -370,6 +406,7 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
     name,
     parentId,
     sortOrder,
+    pinned,
   );
   @override
   bool operator ==(Object other) =>
@@ -382,7 +419,8 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
           other.deletedAt == this.deletedAt &&
           other.name == this.name &&
           other.parentId == this.parentId &&
-          other.sortOrder == this.sortOrder);
+          other.sortOrder == this.sortOrder &&
+          other.pinned == this.pinned);
 }
 
 class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
@@ -394,6 +432,7 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
   final Value<String> name;
   final Value<String?> parentId;
   final Value<int> sortOrder;
+  final Value<bool> pinned;
   final Value<int> rowid;
   const NotebooksCompanion({
     this.id = const Value.absent(),
@@ -404,6 +443,7 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
     this.name = const Value.absent(),
     this.parentId = const Value.absent(),
     this.sortOrder = const Value.absent(),
+    this.pinned = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   NotebooksCompanion.insert({
@@ -415,6 +455,7 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
     required String name,
     this.parentId = const Value.absent(),
     this.sortOrder = const Value.absent(),
+    this.pinned = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        updatedAt = Value(updatedAt),
@@ -429,6 +470,7 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
     Expression<String>? name,
     Expression<String>? parentId,
     Expression<int>? sortOrder,
+    Expression<bool>? pinned,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -440,6 +482,7 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
       if (name != null) 'name': name,
       if (parentId != null) 'parent_id': parentId,
       if (sortOrder != null) 'sort_order': sortOrder,
+      if (pinned != null) 'pinned': pinned,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -453,6 +496,7 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
     Value<String>? name,
     Value<String?>? parentId,
     Value<int>? sortOrder,
+    Value<bool>? pinned,
     Value<int>? rowid,
   }) {
     return NotebooksCompanion(
@@ -464,6 +508,7 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
       name: name ?? this.name,
       parentId: parentId ?? this.parentId,
       sortOrder: sortOrder ?? this.sortOrder,
+      pinned: pinned ?? this.pinned,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -495,6 +540,9 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
     if (sortOrder.present) {
       map['sort_order'] = Variable<int>(sortOrder.value);
     }
+    if (pinned.present) {
+      map['pinned'] = Variable<bool>(pinned.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -512,6 +560,7 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
           ..write('name: $name, ')
           ..write('parentId: $parentId, ')
           ..write('sortOrder: $sortOrder, ')
+          ..write('pinned: $pinned, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -622,6 +671,19 @@ class $NotesTable extends Notes with TableInfo<$NotesTable, NoteRow> {
     requiredDuringInsert: false,
     defaultValue: const Constant(''),
   );
+  static const VerificationMeta _pinnedMeta = const VerificationMeta('pinned');
+  @override
+  late final GeneratedColumn<bool> pinned = GeneratedColumn<bool>(
+    'pinned',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("pinned" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -633,6 +695,7 @@ class $NotesTable extends Notes with TableInfo<$NotesTable, NoteRow> {
     title,
     contentMd,
     contentHash,
+    pinned,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -706,6 +769,12 @@ class $NotesTable extends Notes with TableInfo<$NotesTable, NoteRow> {
         ),
       );
     }
+    if (data.containsKey('pinned')) {
+      context.handle(
+        _pinnedMeta,
+        pinned.isAcceptableOrUnknown(data['pinned']!, _pinnedMeta),
+      );
+    }
     return context;
   }
 
@@ -751,6 +820,10 @@ class $NotesTable extends Notes with TableInfo<$NotesTable, NoteRow> {
         DriftSqlType.string,
         data['${effectivePrefix}content_hash'],
       )!,
+      pinned: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}pinned'],
+      )!,
     );
   }
 
@@ -779,6 +852,9 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
 
   /// 内容哈希，用于快速判断是否有实质变更 / 同步校验和。
   final String contentHash;
+
+  /// 置顶：true 的笔记恒排在所属文件夹列表最前（用户诉求：笔记也能置顶）。
+  final bool pinned;
   const NoteRow({
     required this.id,
     required this.version,
@@ -789,6 +865,7 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
     required this.title,
     required this.contentMd,
     required this.contentHash,
+    required this.pinned,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -806,6 +883,7 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
     map['title'] = Variable<String>(title);
     map['content_md'] = Variable<String>(contentMd);
     map['content_hash'] = Variable<String>(contentHash);
+    map['pinned'] = Variable<bool>(pinned);
     return map;
   }
 
@@ -824,6 +902,7 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
       title: Value(title),
       contentMd: Value(contentMd),
       contentHash: Value(contentHash),
+      pinned: Value(pinned),
     );
   }
 
@@ -842,6 +921,7 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
       title: serializer.fromJson<String>(json['title']),
       contentMd: serializer.fromJson<String>(json['contentMd']),
       contentHash: serializer.fromJson<String>(json['contentHash']),
+      pinned: serializer.fromJson<bool>(json['pinned']),
     );
   }
   @override
@@ -857,6 +937,7 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
       'title': serializer.toJson<String>(title),
       'contentMd': serializer.toJson<String>(contentMd),
       'contentHash': serializer.toJson<String>(contentHash),
+      'pinned': serializer.toJson<bool>(pinned),
     };
   }
 
@@ -870,6 +951,7 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
     String? title,
     String? contentMd,
     String? contentHash,
+    bool? pinned,
   }) => NoteRow(
     id: id ?? this.id,
     version: version ?? this.version,
@@ -880,6 +962,7 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
     title: title ?? this.title,
     contentMd: contentMd ?? this.contentMd,
     contentHash: contentHash ?? this.contentHash,
+    pinned: pinned ?? this.pinned,
   );
   NoteRow copyWithCompanion(NotesCompanion data) {
     return NoteRow(
@@ -896,6 +979,7 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
       contentHash: data.contentHash.present
           ? data.contentHash.value
           : this.contentHash,
+      pinned: data.pinned.present ? data.pinned.value : this.pinned,
     );
   }
 
@@ -910,7 +994,8 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
           ..write('notebookId: $notebookId, ')
           ..write('title: $title, ')
           ..write('contentMd: $contentMd, ')
-          ..write('contentHash: $contentHash')
+          ..write('contentHash: $contentHash, ')
+          ..write('pinned: $pinned')
           ..write(')'))
         .toString();
   }
@@ -926,6 +1011,7 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
     title,
     contentMd,
     contentHash,
+    pinned,
   );
   @override
   bool operator ==(Object other) =>
@@ -939,7 +1025,8 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
           other.notebookId == this.notebookId &&
           other.title == this.title &&
           other.contentMd == this.contentMd &&
-          other.contentHash == this.contentHash);
+          other.contentHash == this.contentHash &&
+          other.pinned == this.pinned);
 }
 
 class NotesCompanion extends UpdateCompanion<NoteRow> {
@@ -952,6 +1039,7 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
   final Value<String> title;
   final Value<String> contentMd;
   final Value<String> contentHash;
+  final Value<bool> pinned;
   final Value<int> rowid;
   const NotesCompanion({
     this.id = const Value.absent(),
@@ -963,6 +1051,7 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
     this.title = const Value.absent(),
     this.contentMd = const Value.absent(),
     this.contentHash = const Value.absent(),
+    this.pinned = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   NotesCompanion.insert({
@@ -975,6 +1064,7 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
     this.title = const Value.absent(),
     this.contentMd = const Value.absent(),
     this.contentHash = const Value.absent(),
+    this.pinned = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        updatedAt = Value(updatedAt),
@@ -989,6 +1079,7 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
     Expression<String>? title,
     Expression<String>? contentMd,
     Expression<String>? contentHash,
+    Expression<bool>? pinned,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1001,6 +1092,7 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
       if (title != null) 'title': title,
       if (contentMd != null) 'content_md': contentMd,
       if (contentHash != null) 'content_hash': contentHash,
+      if (pinned != null) 'pinned': pinned,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1015,6 +1107,7 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
     Value<String>? title,
     Value<String>? contentMd,
     Value<String>? contentHash,
+    Value<bool>? pinned,
     Value<int>? rowid,
   }) {
     return NotesCompanion(
@@ -1027,6 +1120,7 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
       title: title ?? this.title,
       contentMd: contentMd ?? this.contentMd,
       contentHash: contentHash ?? this.contentHash,
+      pinned: pinned ?? this.pinned,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1061,6 +1155,9 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
     if (contentHash.present) {
       map['content_hash'] = Variable<String>(contentHash.value);
     }
+    if (pinned.present) {
+      map['pinned'] = Variable<bool>(pinned.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1079,6 +1176,7 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
           ..write('title: $title, ')
           ..write('contentMd: $contentMd, ')
           ..write('contentHash: $contentHash, ')
+          ..write('pinned: $pinned, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -12024,6 +12122,7 @@ typedef $$NotebooksTableCreateCompanionBuilder = NotebooksCompanion Function({
   required String name,
   Value<String?> parentId,
   Value<int> sortOrder,
+  Value<bool> pinned,
   Value<int> rowid,
 });
 typedef $$NotebooksTableUpdateCompanionBuilder = NotebooksCompanion Function({
@@ -12035,6 +12134,7 @@ typedef $$NotebooksTableUpdateCompanionBuilder = NotebooksCompanion Function({
   Value<String> name,
   Value<String?> parentId,
   Value<int> sortOrder,
+  Value<bool> pinned,
   Value<int> rowid,
 });
 
@@ -12084,6 +12184,11 @@ class $$NotebooksTableFilterComposer
 
   ColumnFilters<int> get sortOrder => $composableBuilder(
     column: $table.sortOrder,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get pinned => $composableBuilder(
+    column: $table.pinned,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -12136,6 +12241,11 @@ class $$NotebooksTableOrderingComposer
     column: $table.sortOrder,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<bool> get pinned => $composableBuilder(
+    column: $table.pinned,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$NotebooksTableAnnotationComposer
@@ -12170,6 +12280,9 @@ class $$NotebooksTableAnnotationComposer
 
   GeneratedColumn<int> get sortOrder =>
       $composableBuilder(column: $table.sortOrder, builder: (column) => column);
+
+  GeneratedColumn<bool> get pinned =>
+      $composableBuilder(column: $table.pinned, builder: (column) => column);
 }
 
 class $$NotebooksTableTableManager
@@ -12211,6 +12324,7 @@ class $$NotebooksTableTableManager
                 Value<String> name = const Value.absent(),
                 Value<String?> parentId = const Value.absent(),
                 Value<int> sortOrder = const Value.absent(),
+                Value<bool> pinned = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => NotebooksCompanion(
                 id: id,
@@ -12221,6 +12335,7 @@ class $$NotebooksTableTableManager
                 name: name,
                 parentId: parentId,
                 sortOrder: sortOrder,
+                pinned: pinned,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -12233,6 +12348,7 @@ class $$NotebooksTableTableManager
                 required String name,
                 Value<String?> parentId = const Value.absent(),
                 Value<int> sortOrder = const Value.absent(),
+                Value<bool> pinned = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => NotebooksCompanion.insert(
                 id: id,
@@ -12243,6 +12359,7 @@ class $$NotebooksTableTableManager
                 name: name,
                 parentId: parentId,
                 sortOrder: sortOrder,
+                pinned: pinned,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
@@ -12289,6 +12406,7 @@ typedef $$NotesTableCreateCompanionBuilder = NotesCompanion Function({
   Value<String> title,
   Value<String> contentMd,
   Value<String> contentHash,
+  Value<bool> pinned,
   Value<int> rowid,
 });
 typedef $$NotesTableUpdateCompanionBuilder = NotesCompanion Function({
@@ -12301,6 +12419,7 @@ typedef $$NotesTableUpdateCompanionBuilder = NotesCompanion Function({
   Value<String> title,
   Value<String> contentMd,
   Value<String> contentHash,
+  Value<bool> pinned,
   Value<int> rowid,
 });
 
@@ -12354,6 +12473,11 @@ class $$NotesTableFilterComposer extends Composer<_$AppDatabase, $NotesTable> {
 
   ColumnFilters<String> get contentHash => $composableBuilder(
     column: $table.contentHash,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get pinned => $composableBuilder(
+    column: $table.pinned,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -12411,6 +12535,11 @@ class $$NotesTableOrderingComposer
     column: $table.contentHash,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<bool> get pinned => $composableBuilder(
+    column: $table.pinned,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$NotesTableAnnotationComposer
@@ -12452,6 +12581,9 @@ class $$NotesTableAnnotationComposer
     column: $table.contentHash,
     builder: (column) => column,
   );
+
+  GeneratedColumn<bool> get pinned =>
+      $composableBuilder(column: $table.pinned, builder: (column) => column);
 }
 
 class $$NotesTableTableManager
@@ -12491,6 +12623,7 @@ class $$NotesTableTableManager
                 Value<String> title = const Value.absent(),
                 Value<String> contentMd = const Value.absent(),
                 Value<String> contentHash = const Value.absent(),
+                Value<bool> pinned = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => NotesCompanion(
                 id: id,
@@ -12502,6 +12635,7 @@ class $$NotesTableTableManager
                 title: title,
                 contentMd: contentMd,
                 contentHash: contentHash,
+                pinned: pinned,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -12515,6 +12649,7 @@ class $$NotesTableTableManager
                 Value<String> title = const Value.absent(),
                 Value<String> contentMd = const Value.absent(),
                 Value<String> contentHash = const Value.absent(),
+                Value<bool> pinned = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => NotesCompanion.insert(
                 id: id,
@@ -12526,6 +12661,7 @@ class $$NotesTableTableManager
                 title: title,
                 contentMd: contentMd,
                 contentHash: contentHash,
+                pinned: pinned,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

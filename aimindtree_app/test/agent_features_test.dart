@@ -21,6 +21,7 @@ import 'package:aimindtree_app/data/repositories/ai_session_repository.dart';
 import 'package:aimindtree_app/data/repositories/group_repository.dart';
 import 'package:aimindtree_app/data/repositories/knowledge_repository.dart';
 import 'package:aimindtree_app/data/repositories/note_asset_repository.dart';
+import 'package:aimindtree_app/data/repositories/notebook_repository.dart';
 import 'package:aimindtree_app/data/repositories/tree_repository.dart';
 import 'package:aimindtree_app/features/agent/agent_page.dart';
 import 'package:drift/native.dart';
@@ -53,6 +54,7 @@ void main() {
   /// 造一个只够初始化页面的 ExtractionService（测试不发消息、不提交任务）。
   ExtractionService makeService() => ExtractionService(
         repo: repo,
+        notebooks: NotebookRepository(repo.db, deviceId: 't'),
         trees: trees,
         groups: GroupRepository(db, deviceId: 't'),
         ai: AiService(router: AiTaskRouter(providers: const {})),

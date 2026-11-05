@@ -22,6 +22,7 @@ import 'package:aimindtree_app/data/models/knowledge_point.dart';
 import 'package:aimindtree_app/data/repositories/group_repository.dart';
 import 'package:aimindtree_app/data/repositories/knowledge_repository.dart';
 import 'package:aimindtree_app/data/repositories/note_asset_repository.dart';
+import 'package:aimindtree_app/data/repositories/notebook_repository.dart';
 import 'package:aimindtree_app/data/repositories/tree_repository.dart';
 import 'package:aimindtree_app/features/knowledge/knowledge_manage_page.dart';
 import 'package:aimindtree_app/main.dart';
@@ -50,6 +51,7 @@ void main() {
   /// 造一个够用的 ExtractionService（管理页只用到 repo / trees）。
   ExtractionService makeService() => ExtractionService(
         repo: repo,
+        notebooks: NotebookRepository(repo.db, deviceId: 't'),
         trees: TreeRepository(db, deviceId: 'd'),
         groups: GroupRepository(db, deviceId: 'd'),
         jobs: AiJobService(baseUrl: 'http://127.0.0.1:8787'),

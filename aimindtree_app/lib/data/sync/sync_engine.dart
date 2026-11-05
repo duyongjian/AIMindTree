@@ -1064,6 +1064,8 @@ SyncEngine({
         name: Value((p['name'] as String?) ?? ''),
         parentId: Value(p['parent_id'] as String?),
         sortOrder: Value((p['sort_order'] as num?)?.toInt() ?? 0),
+        // v8 新增：文件夹置顶。缺键（旧端 push 没带）回落默认 false，与列默认值一致。
+        pinned: Value(_bool(p['pinned'], false)),
         updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),
@@ -1076,6 +1078,8 @@ SyncEngine({
         title: Value((p['title'] as String?) ?? ''),
         contentMd: Value((p['content_md'] as String?) ?? ''),
         contentHash: Value((p['content_hash'] as String?) ?? ''),
+        // v8 新增：笔记置顶。缺键回落默认 false。
+        pinned: Value(_bool(p['pinned'], false)),
         updatedAt: Value(_dt(p['updated_at']) ?? _epoch),
         version: Value((p['version'] as num?)?.toInt() ?? 1),
         deviceId: Value((p['device_id'] as String?) ?? deviceId),

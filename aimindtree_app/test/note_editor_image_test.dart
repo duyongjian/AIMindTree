@@ -19,6 +19,7 @@ import 'package:aimindtree_app/data/db/drift_database.dart';
 import 'package:aimindtree_app/data/repositories/group_repository.dart';
 import 'package:aimindtree_app/data/repositories/knowledge_repository.dart';
 import 'package:aimindtree_app/data/repositories/note_asset_repository.dart';
+import 'package:aimindtree_app/data/repositories/notebook_repository.dart';
 import 'package:aimindtree_app/data/repositories/tree_repository.dart';
 import 'package:aimindtree_app/features/notes/note_editor_page.dart';
 import 'package:file_picker/file_picker.dart';
@@ -65,6 +66,7 @@ void main() {
 
   ExtractionService makeService() => ExtractionService(
         repo: KnowledgeRepository(db, deviceId: 'd'),
+        notebooks: NotebookRepository(db, deviceId: 't'),
         trees: TreeRepository(db, deviceId: 'd'),
         groups: GroupRepository(db, deviceId: 'd'),
         jobs: AiJobService(baseUrl: 'http://127.0.0.1:8787'),

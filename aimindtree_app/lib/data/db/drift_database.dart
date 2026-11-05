@@ -40,7 +40,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase([QueryExecutor? executor]) : super(executor ?? _openConnection());
 
   @override
-  int get schemaVersion => 7;
+  int get schemaVersion => 8;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -85,6 +85,13 @@ class AppDatabase extends _$AppDatabase {
             await m.addColumn(homeworks, homeworks.batchId);
             await m.addColumn(homeworks, homeworks.status);
             await m.addColumn(homeworks, homeworks.dueAt);
+          }
+          // v7 → v8（笔记置顶 + 文件夹置顶）：notes 与 notebooks 各加一个
+          // `pinned` 布尔列（默认 false）。非空布尔带默认值，addColumn 自动回填
+          // 历史行；与 v4 节点置顶、v5 知识点置顶同范式。
+          if (from < 8) {
+            await m.addColumn(notes, notes.pinned);
+            await m.addColumn(notebooks, notebooks.pinned);
           }
         },
       );

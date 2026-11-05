@@ -94,6 +94,7 @@ class Note {
     this.version = 1,
     this.deviceId = '',
     this.deletedAt,
+    this.pinned = false,
   })  : id = id ?? newUlid(),
         updatedAt = updatedAt ?? DateTime.now().toUtc();
 
@@ -107,16 +108,21 @@ class Note {
   final String deviceId;
   final DateTime? deletedAt;
 
+  /// 置顶：true 的笔记恒排在所属文件夹列表最前。
+  final bool pinned;
+
   Note copyWith({
     String? title,
     String? contentMd,
     String? contentHash,
     DateTime? updatedAt,
     int? version,
+    String? notebookId,
+    bool? pinned,
   }) =>
       Note(
         id: id,
-        notebookId: notebookId,
+        notebookId: notebookId ?? this.notebookId,
         title: title ?? this.title,
         contentMd: contentMd ?? this.contentMd,
         contentHash: contentHash ?? this.contentHash,
@@ -124,6 +130,7 @@ class Note {
         version: version ?? this.version,
         deviceId: deviceId,
         deletedAt: deletedAt,
+        pinned: pinned ?? this.pinned,
       );
 }
 

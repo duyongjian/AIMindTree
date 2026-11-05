@@ -7,6 +7,7 @@ import 'core/secret_store.dart';
 import 'data/db/drift_database.dart';
 import 'data/models/knowledge_point.dart';
 import 'data/models/knowledge_tree.dart';
+import 'data/models/notebook.dart';
 import 'data/repositories/ai_session_repository.dart';
 import 'data/repositories/knowledge_repository.dart';
 import 'data/repositories/settings_repository.dart';
@@ -281,6 +282,13 @@ class _AppShellState extends State<AppShell> {
 }
 
 /// 笔记列表页（T06 新增）。
+/// 文件夹树节点（由扁平列表按 parentId 组装，供抽屉递归渲染）。
+class _FolderNode {
+  _FolderNode({required this.folder, required this.children});
+  final Notebook folder;
+  final List<_FolderNode> children;
+}
+
 class NotesListPage extends StatefulWidget {
   const NotesListPage({
     super.key,
@@ -310,6 +318,15 @@ class NotesListPageState extends State<NotesListPage> {
   bool _selectionMode = false;
   Set<String> _selected = <String>{};
 
+  /// 文件夹树（仓库层已按置顶 / 排序排好），用于抽屉渲染与层级组装。
+  List<Notebook> _folders = <Notebook>[];
+
+  /// 当前选中的文件夹：null=全部笔记，''=未分类，其余为 folderId。
+  String? _selectedFolderId;
+
+  /// 文件夹导航抽屉句柄。
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
+
   @override
   void initState() {
     super.initState();
@@ -318,21 +335,16 @@ class NotesListPageState extends State<NotesListPage> {
 
   Future<void> reload() => _reload();
   Future<void> _reload() async {
-    // 删除是软删除（写 deletedAt），列表必须过滤掉已删除的笔记。
-    final rows = await (widget.db.select(widget.db.notes)
-          ..where((t) => t.deletedAt.isNull()))
-        .get();
-    final notes = rows
-        .map((r) => Note(
-              id: r.id,
-              contentMd: r.contentMd,
-              title: r.title,
-              updatedAt: r.updatedAt,
-              deviceId: r.deviceId,
-              version: r.version,
-            ))
-        .toList()
-      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    // 1) 加载文件夹树（置顶 / 排序已在仓库层完成）。
+    final folderRes = await widget.service.notebooks.listFolders();
+    if (!mounted) return;
+    final folders =
+        folderRes is Success<List<Notebook>> ? folderRes.value : <Notebook>[];
+
+    // 2) 按当前选中的文件夹（全部 / 未分类 / 具体文件夹）加载笔记；
+    //    置顶优先、软删过滤、搜索内存过滤已在仓库层 + 下方完成。
+    final notes =
+        await widget.service.repo.listNotes(folderId: _selectedFolderId);
     // 内存过滤（搜索）：不新增 SQL，过滤逻辑只在本页。
     List<Note> result = notes;
     if (_query.trim().isNotEmpty) {
@@ -342,15 +354,29 @@ class NotesListPageState extends State<NotesListPage> {
         n.contentMd.toLowerCase().contains(q)).toList();
     }
     if (!mounted) return;
-    setState(() => _notes = result);
+    setState(() {
+      _folders = folders;
+      _notes = result;
+    });
+  }
+
+  /// 切换选中的文件夹：null=全部，''=未分类，folderId=具体文件夹。
+  Future<void> _selectFolder(String? id) async {
+    setState(() => _selectedFolderId = id);
+    await _reload();
   }
 
   Future<void> _openEditor({String? id}) async {
+    // 在「某个具体文件夹」下点 + 新建时，把该文件夹作为预选归属下传编辑器。
+    final initialFolder = (_selectedFolderId != null && _selectedFolderId!.isNotEmpty)
+        ? _selectedFolderId
+        : null;
     final changed = await Navigator.of(context).push<bool>(MaterialPageRoute(
       builder: (_) => NoteEditorPage(
         service: widget.service,
         db: widget.db,
         noteId: id,
+        notebookId: initialFolder,
       ),
     ));
     if (!mounted) return;
@@ -367,6 +393,9 @@ class NotesListPageState extends State<NotesListPage> {
         break;
       case 'delete':
         await _deleteNote(n);
+        break;
+      case 'pin':
+        await _pinNote(n);
         break;
     }
   }
@@ -452,6 +481,257 @@ class NotesListPageState extends State<NotesListPage> {
               : '已删除笔记，并从 ${summary.treesAffected} 棵知识树中移除知识点',
     );
     await _reload();
+  }
+
+  // ============ 笔记文件夹（置顶 + 增删改查） ============
+
+  /// 文件夹导航抽屉：全部 / 未分类 + 层级文件夹树。
+  Widget _buildFolderDrawer() {
+    final tree = _buildFolderTree(_folders);
+    return Drawer(
+      child: Column(
+        children: [
+          const DrawerHeader(
+            margin: EdgeInsets.zero,
+            child: Align(
+              alignment: Alignment.bottomLeft,
+              child: Text('笔记文件夹',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            ),
+          ),
+          Expanded(
+            child: ListView(
+              children: [
+                _folderTile(
+                  label: '全部笔记',
+                  selected: _selectedFolderId == null,
+                  onTap: () {
+                    Navigator.pop(context);
+                    _selectFolder(null);
+                  },
+                ),
+                _folderTile(
+                  label: '未分类',
+                  selected: _selectedFolderId == '',
+                  onTap: () {
+                    Navigator.pop(context);
+                    _selectFolder('');
+                  },
+                ),
+                const Divider(),
+                for (final node in tree) _folderNode(node, 0),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          ListTile(
+            leading: const Icon(Icons.create_new_folder_outlined),
+            title: const Text('新建文件夹'),
+            onTap: () {
+              Navigator.pop(context);
+              _createFolder();
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 递归渲染文件夹节点（按层级缩进），每个节点带操作菜单。
+  Widget _folderNode(_FolderNode node, int depth) {
+    final f = node.folder;
+    return Column(
+      children: [
+        _folderTile(
+          label: f.name.isEmpty ? '(未命名文件夹)' : f.name,
+          indent: 16.0 * depth,
+          selected: _selectedFolderId == f.id,
+          pinned: f.pinned,
+          trailing: PopupMenuButton<String>(
+            tooltip: '文件夹操作',
+            onSelected: (v) {
+              switch (v) {
+                case 'add':
+                  _createFolder(parentId: f.id);
+                case 'rename':
+                  _renameFolder(f);
+                case 'pin':
+                  _pinFolder(f);
+                case 'delete':
+                  _deleteFolder(f);
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'add', child: Text('新建子文件夹')),
+              PopupMenuItem(value: 'rename', child: Text('重命名')),
+              PopupMenuItem(value: 'pin', child: Text('置顶 / 取消置顶')),
+              PopupMenuItem(
+                value: 'delete',
+                child: Text('删除', style: TextStyle(color: Colors.red)),
+              ),
+            ],
+          ),
+          onTap: () {
+            Navigator.pop(context);
+            _selectFolder(f.id);
+          },
+        ),
+        for (final child in node.children) _folderNode(child, depth + 1),
+      ],
+    );
+  }
+
+  Widget _folderTile({
+    required String label,
+    required bool selected,
+    bool pinned = false,
+    double indent = 0,
+    Widget? trailing,
+    required VoidCallback onTap,
+  }) =>
+      ListTile(
+        dense: true,
+        selected: selected,
+        contentPadding: EdgeInsets.only(left: indent + 16, right: 8),
+        leading: pinned
+            ? const Icon(Icons.push_pin, size: 16)
+            : const Icon(Icons.folder_outlined, size: 20),
+        title: Text(label),
+        trailing: trailing,
+        onTap: onTap,
+      );
+
+  /// 由扁平列表按 parentId 组装成树（父不存在 / 已删视为根级）。
+  List<_FolderNode> _buildFolderTree(List<Notebook> folders) {
+    final childrenOf = <String?, List<Notebook>>{};
+    for (final f in folders) {
+      (childrenOf[f.parentId] ??= <Notebook>[]).add(f);
+    }
+    List<_FolderNode> buildLevel(String? pid) =>
+        [for (final f in childrenOf[pid] ?? <Notebook>[]) _FolderNode(folder: f, children: buildLevel(f.id))];
+    return buildLevel(null);
+  }
+
+  /// 新建文件夹（[parentId] 非空即成为子文件夹）。
+  Future<void> _createFolder({String? parentId}) async {
+    final ctrl = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(parentId == null
+            ? '新建文件夹'
+            : '在「${_folderName(parentId)}」下新建子文件夹'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: '文件夹名称'),
+          onSubmitted: (value) => Navigator.pop(ctx, value.trim()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            child: const Text('创建'),
+          ),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty) return;
+    final res =
+        await widget.service.notebooks.createFolder(name: name, parentId: parentId);
+    if (!mounted) return;
+    res.fold(
+      (_) {
+        _toast('已创建文件夹「$name」');
+        _reload();
+      },
+      (e, _) => _toast('创建文件夹失败：$e'),
+    );
+  }
+
+  String _folderName(String id) {
+    final f = _folders.where((x) => x.id == id).firstOrNull;
+    return f?.name ?? '(未知)';
+  }
+
+  Future<void> _renameFolder(Notebook f) async {
+    final ctrl = TextEditingController(text: f.name);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重命名文件夹'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: '文件夹名称'),
+          onSubmitted: (value) => Navigator.pop(ctx, value.trim()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty) return;
+    final res = await widget.service.notebooks.renameFolder(f.id, name);
+    if (!mounted) return;
+    res.fold(
+      (_) {
+        _toast('已重命名为「$name」');
+        _reload();
+      },
+      (e, _) => _toast('重命名失败：$e'),
+    );
+  }
+
+  Future<void> _pinFolder(Notebook f) async {
+    final res = await widget.service.notebooks.pinFolder(f.id, !f.pinned);
+    if (!mounted) return;
+    res.fold(
+      (_) => _reload(),
+      (e, _) => _toast('置顶操作失败：$e'),
+    );
+  }
+
+  Future<void> _deleteFolder(Notebook f) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除文件夹？'),
+        content: const Text('文件夹将被删除，其下笔记退回「未分类」。\n（子文件夹会被移到根级。）'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final res = await widget.service.notebooks.deleteFolder(f.id);
+    if (!mounted) return;
+    res.fold(
+      (_) {
+        if (_selectedFolderId == f.id) _selectedFolderId = null;
+        _toast('已删除文件夹');
+        _reload();
+      },
+      (e, _) => _toast('删除文件夹失败：$e'),
+    );
+  }
+
+  /// 置顶 / 取消置顶一篇笔记。
+  Future<void> _pinNote(Note n) async {
+    final res = await widget.service.repo.pinNote(n.id, !n.pinned);
+    if (!mounted) return;
+    res.fold(
+      (_) => _reload(),
+      (e, _) => _toast('置顶笔记失败：$e'),
+    );
   }
 
   // ============ P1-2：多选删除 ============
@@ -558,6 +838,8 @@ class NotesListPageState extends State<NotesListPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      key: _scaffoldKey,
+      drawer: _buildFolderDrawer(),
       appBar: AppBar(
         title: _selectionMode
             ? Text('已选 ${_selected.length} 篇')
@@ -595,6 +877,12 @@ class NotesListPageState extends State<NotesListPage> {
               tooltip: '删除所选',
             ),
           ] else ...[
+            // 文件夹导航抽屉入口：展示 / 切换笔记文件夹。
+            IconButton(
+              onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+              icon: const Icon(Icons.folder_outlined),
+              tooltip: '文件夹',
+            ),
             // 搜索：展开搜索框时显示「关闭」，否则显示「搜索」入口。
             if (_searching)
               IconButton(
@@ -669,7 +957,9 @@ class NotesListPageState extends State<NotesListPage> {
                           value: _selected.contains(n.id),
                           onChanged: (_) => _toggle(n.id),
                         )
-                      : const Icon(Icons.description_outlined),
+                      : (n.pinned
+                          ? const Icon(Icons.push_pin, color: Colors.amber)
+                          : const Icon(Icons.description_outlined)),
                   title: Text(n.title.isEmpty ? '(无标题)' : n.title),
                   subtitle: Text(preview, maxLines: 2, overflow: TextOverflow.ellipsis),
                   trailing: Row(
@@ -683,12 +973,16 @@ class NotesListPageState extends State<NotesListPage> {
                       PopupMenuButton<String>(
                         tooltip: '更多操作',
                         onSelected: (v) => _onNoteAction(v, n),
-                        itemBuilder: (_) => const [
+                        itemBuilder: (_) => [
                           PopupMenuItem(
+                            value: 'pin',
+                            child: Text(n.pinned ? '取消置顶' : '置顶笔记'),
+                          ),
+                          const PopupMenuItem(
                             value: 'merge',
                             child: Text('把知识点并入知识树'),
                           ),
-                          PopupMenuItem(
+                          const PopupMenuItem(
                             value: 'delete',
                             child: Text(
                               '删除笔记',

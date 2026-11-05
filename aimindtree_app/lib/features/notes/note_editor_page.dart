@@ -24,6 +24,7 @@ import '../../core/result.dart';
 import '../../data/db/drift_database.dart';
 import '../../data/models/knowledge_point.dart';
 import '../../data/models/note_asset.dart';
+import '../../data/models/notebook.dart';
 import '../../data/repositories/ai_session_repository.dart';
 import '../../features/teacher/teacher_page.dart';
 import 'block_model.dart';
@@ -50,6 +51,7 @@ class NoteEditorPage extends StatefulWidget {
     required this.service,
     required this.db,
     this.noteId,
+    this.notebookId,
   });
 
   final ExtractionService service;
@@ -57,6 +59,9 @@ class NoteEditorPage extends StatefulWidget {
 
   /// null = 新建；非空 = 编辑已有。
   final String? noteId;
+
+  /// 预选 / 当前所属文件夹（null=未分类）。新建笔记沿用；编辑已有笔记可被下拉框改。
+  final String? notebookId;
 
   @override
   State<NoteEditorPage> createState() => _NoteEditorPageState();
@@ -76,6 +81,12 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   Timer? _autoSaveTimer;
   String _status = '';
   Note? _note;
+
+  /// 当前所属文件夹（null=未分类）；随下拉框 / 加载结果变化。
+  String? _notebookId;
+
+  /// 文件夹列表（下拉选择器用）。
+  List<Notebook> _folders = <Notebook>[];
 
   /// 本笔记提取出的知识点（P1-5：笔记详情展示并可跳转）。
   List<KnowledgePoint> _kps = <KnowledgePoint>[];
@@ -103,6 +114,8 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         _scheduleAutoSave();
       }
     });
+    _notebookId = widget.notebookId;
+    _loadFolders();
     if (widget.noteId != null) _load();
   }
 
@@ -162,13 +175,23 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         id: row.id,
         contentMd: row.contentMd,
         title: row.title,
+        notebookId: row.notebookId,
         updatedAt: row.updatedAt,
         deviceId: row.deviceId,
         version: row.version,
       );
+      _notebookId = row.notebookId;
       _dirty = false;
     });
     await _reloadKps();
+  }
+
+  /// 拉取文件夹列表（下拉选择器用）。
+  Future<void> _loadFolders() async {
+    final res = await widget.service.notebooks.listFolders();
+    if (!mounted) return;
+    setState(() =>
+        _folders = res is Success<List<Notebook>> ? res.value : <Notebook>[]);
   }
 
   /// P1-5：回读本笔记提取的知识点。
@@ -412,6 +435,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
           ? Note(
               contentMd: content,
               title: title,
+              notebookId: _notebookId,
               // 同步设备号：必须与仓库内其它写入路径同源（每台设备唯一），
               // 否则本机上传的行会被 pull 的自回声过滤误判为「本机自己上传的」。
               deviceId: widget.service.repo.deviceId,
@@ -419,6 +443,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
           : _note!.copyWith(
               title: title,
               contentMd: content,
+              notebookId: _notebookId,
             );
       final res = await widget.service.repo.saveNote(note);
       if (res is Success<Note>) {
@@ -546,6 +571,51 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
             ],
           ),
       ],
+    );
+  }
+
+  /// 文件夹选择器：未分类 + 各文件夹下拉框，改选即落库（让归属变化随笔记同步）。
+  ///
+  /// 当下拉项里没有当前所属文件夹（如被删），补一个「(未知文件夹)」占位项避免
+  /// Flutter 报 value 不匹配；选择它会把归属清空回未分类。
+  Widget _buildFolderSelector() {
+    final hasCurrent =
+        _notebookId == null || _folders.any((f) => f.id == _notebookId);
+    final items = <DropdownMenuItem<String?>>[
+      const DropdownMenuItem<String?>(value: null, child: Text('未分类')),
+      for (final f in _folders)
+        DropdownMenuItem<String?>(
+          value: f.id,
+          child: Text(f.name.isEmpty ? '(未命名文件夹)' : f.name),
+        ),
+    ];
+    if (!hasCurrent && _notebookId != null) {
+      items.add(DropdownMenuItem<String?>(
+        value: _notebookId,
+        child: const Text('(未知文件夹)'),
+      ));
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+      child: Row(
+        children: [
+          const Icon(Icons.folder_outlined, size: 18, color: Colors.grey),
+          const SizedBox(width: 8),
+          Expanded(
+            child: DropdownButton<String?>(
+              isExpanded: true,
+              value: _notebookId,
+              hint: const Text('未分类'),
+              items: items,
+              onChanged: (String? v) {
+                setState(() => _notebookId = v);
+                // 立即落库：文件夹归属变化（尤其已有笔记）应该即时生效并随同步上行。
+                _save();
+              },
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -690,6 +760,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
             ),
           ),
           const Divider(height: 1),
+          _buildFolderSelector(),
           MarkdownToolbar(
             controller: _controller,
             onInsertImage: _insertImage,

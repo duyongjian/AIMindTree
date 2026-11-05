@@ -123,6 +123,9 @@ class KnowledgeRepository {
             title: Value(toSave.title),
             contentMd: Value(toSave.contentMd),
             contentHash: Value(toSave.contentHash),
+            // v8 新增：置顶。漏写会让 insertOnConflictUpdate 在冲突更新时
+            // 把 pinned 回落成列默认值 false，静默丢掉置顶状态。
+            pinned: Value(toSave.pinned),
             updatedAt: Value(toSave.updatedAt),
             version: Value(toSave.version),
             deviceId: Value(toSave.deviceId),
@@ -977,14 +980,27 @@ class KnowledgeRepository {
     return row?.canvasId;
   }
 
-  /// 全部未删除笔记（按更新时间倒序）。
+  /// 全部未删除笔记。
+  ///
+  /// [folderId] 非空时按文件夹过滤：
+  /// - 空字符串 `''` = 「未分类」（notebook_id 为 null 的笔记）；
+  /// - 非空 = 该文件夹下的笔记。
+  /// 不传 [folderId] 则返回全部未删笔记（向后兼容原调用方）。
+  ///
+  /// 排序：置顶笔记（pinned=true）恒在最前，其余按更新时间倒序。
   ///
   /// 软删铁律：`deletedAt` 非空的必须滤掉（与 main.dart / canvas_page 的
   /// 笔记列表同规则，此处收敛成仓库方法，供 AI 助手工具等复用）。
-  Future<List<Note>> listNotes() async {
-    final rows = await (_db.select(_db.notes)
-          ..where((t) => t.deletedAt.isNull()))
-        .get();
+  Future<List<Note>> listNotes({String? folderId}) async {
+    final q = _db.select(_db.notes)
+      ..where((t) => t.deletedAt.isNull());
+    if (folderId != null) {
+      // 一行里同时写两路 where（drift 会 AND 起来）。
+      q.where((t) => folderId.isEmpty
+          ? t.notebookId.isNull()
+          : t.notebookId.equals(folderId));
+    }
+    final rows = await q.get();
     return rows
         .map((r) => Note(
               id: r.id,
@@ -992,13 +1008,50 @@ class KnowledgeRepository {
               title: r.title,
               contentMd: r.contentMd,
               contentHash: r.contentHash,
+              pinned: r.pinned,
               updatedAt: r.updatedAt,
               version: r.version,
               deviceId: r.deviceId,
               deletedAt: r.deletedAt,
             ))
         .toList()
-      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      ..sort((a, b) {
+        // 置顶优先；同级按更新时间倒序。
+        if (a.pinned != b.pinned) return a.pinned ? -1 : 1;
+        return b.updatedAt.compareTo(a.updatedAt);
+      });
+  }
+
+  /// 置顶 / 取消置顶一篇笔记（version+1、updatedAt 刷新、上行同步）。
+  Future<Result<Note>> pinNote(String id, bool pinned) async {
+    try {
+      final existing = await (_db.select(_db.notes)
+            ..where((t) => t.id.equals(id)))
+          .getSingleOrNull();
+      if (existing == null) {
+        return Failure(StateError('笔记不存在'));
+      }
+      final now = DateTime.now().toUtc();
+      await (_db.update(_db.notes)..where((t) => t.id.equals(id))).write(
+        NotesCompanion(
+          pinned: Value(pinned),
+          updatedAt: Value(now),
+          version: Value(existing.version + 1),
+        ),
+      );
+      await _sync.upsertNote(id);
+      final updated = await (_db.select(_db.notes)
+            ..where((t) => t.id.equals(id)))
+          .getSingleOrNull();
+      if (updated == null) {
+        return Failure(StateError('置顶后读取失败'));
+      }
+      _log.i('置顶笔记 $id = $pinned');
+      return Success(_noteFromRow(updated));
+    } on Object catch (e, s) {
+      _log.e('置顶笔记失败', error: e, stackTrace: s);
+      return Failure(e, s);
+    }
   }
 
   // ============ 笔记回收站（软删墓碑的可见面）============
@@ -1010,6 +1063,7 @@ class KnowledgeRepository {
         title: r.title,
         contentMd: r.contentMd,
         contentHash: r.contentHash,
+        pinned: r.pinned,
         updatedAt: r.updatedAt,
         version: r.version,
         deviceId: r.deviceId,
@@ -1137,6 +1191,7 @@ class KnowledgeRepository {
       notebookId: row.notebookId,
       title: row.title,
       contentMd: row.contentMd,
+      pinned: row.pinned,
       contentHash: row.contentHash,
       updatedAt: row.updatedAt,
       version: row.version,
