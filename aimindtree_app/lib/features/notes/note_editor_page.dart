@@ -574,48 +574,176 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     );
   }
 
-  /// 文件夹选择器：未分类 + 各文件夹下拉框，改选即落库（让归属变化随笔记同步）。
-  ///
-  /// 当下拉项里没有当前所属文件夹（如被删），补一个「(未知文件夹)」占位项避免
-  /// Flutter 报 value 不匹配；选择它会把归属清空回未分类。
-  Widget _buildFolderSelector() {
-    final hasCurrent =
-        _notebookId == null || _folders.any((f) => f.id == _notebookId);
-    final items = <DropdownMenuItem<String?>>[
-      const DropdownMenuItem<String?>(value: null, child: Text('未分类')),
-      for (final f in _folders)
-        DropdownMenuItem<String?>(
-          value: f.id,
-          child: Text(f.name.isEmpty ? '(未命名文件夹)' : f.name),
+  /// 右上角「归入文件夹」弹层：支持按名称搜索，选中即把当前笔记归属到该文件夹并即时落库。
+  /// 保留 未分类 / (未知文件夹) 兜底，并可在弹层内直接新建文件夹。
+  Future<void> _openFolderPicker() async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) {
+        var query = '';
+        return StatefulBuilder(
+          builder: (ctx, setLocal) {
+            final q = query.trim().toLowerCase();
+            final matches = q.isEmpty
+                ? _folders
+                : _folders.where((f) => f.name.toLowerCase().contains(q)).toList();
+            final hasCurrent =
+                _notebookId == null || _folders.any((f) => f.id == _notebookId);
+            final pickerHeight = MediaQuery.of(ctx).size.height * 0.7;
+            return Align(
+              alignment: Alignment.topRight,
+              child: Material(
+                type: MaterialType.card,
+                elevation: 8,
+                borderRadius: BorderRadius.circular(12),
+                color: Theme.of(ctx).colorScheme.surface,
+                child: SizedBox(
+                  width: 320,
+                  height: pickerHeight,
+                  child: Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
+                        child: Row(
+                          children: [
+                            const Expanded(
+                              child: Text('归入文件夹',
+                                  style: TextStyle(
+                                      fontSize: 16, fontWeight: FontWeight.bold)),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.close),
+                              tooltip: '关闭',
+                              onPressed: () => Navigator.pop(ctx),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        child: TextField(
+                          autofocus: true,
+                          decoration: const InputDecoration(
+                            hintText: '搜索文件夹',
+                            prefixIcon: Icon(Icons.search, size: 20),
+                            isDense: true,
+                            border: OutlineInputBorder(),
+                          ),
+                          onChanged: (v) => setLocal(() => query = v),
+                        ),
+                      ),
+                      const Divider(height: 1),
+                      Expanded(
+                        child: ListView(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          children: [
+                            _folderPickTile('未分类', _notebookId == null, () {
+                              Navigator.pop(ctx);
+                              _selectFolderInEditor(null);
+                            }),
+                            if (!hasCurrent && _notebookId != null)
+                              _folderPickTile('(未知文件夹)', true, () {
+                                Navigator.pop(ctx);
+                                _selectFolderInEditor(_notebookId);
+                              }),
+                            const Divider(),
+                            for (final f in matches)
+                              _folderPickTile(
+                                f.name.isEmpty ? '(未命名文件夹)' : f.name,
+                                _notebookId == f.id,
+                                () {
+                                  Navigator.pop(ctx);
+                                  _selectFolderInEditor(f.id);
+                                },
+                              ),
+                            if (q.isNotEmpty && matches.isEmpty)
+                              const Padding(
+                                padding: EdgeInsets.all(16),
+                                child: Text('没有匹配的文件夹',
+                                    style: TextStyle(color: Colors.grey)),
+                              ),
+                          ],
+                        ),
+                      ),
+                      const Divider(height: 1),
+                      ListTile(
+                        leading: const Icon(Icons.create_new_folder_outlined),
+                        title: const Text('新建文件夹'),
+                        onTap: () async {
+                          final created = await _createFolderInEditor();
+                          if (created != null) {
+                            Navigator.pop(ctx);
+                            _selectFolderInEditor(created);
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// 弹层里的单行文件夹项：选中态用置顶图标标记，点击执行 [onTap]。
+  Widget _folderPickTile(String label, bool selected, VoidCallback onTap) =>
+      ListTile(
+        dense: true,
+        selected: selected,
+        leading: selected
+            ? const Icon(Icons.push_pin, size: 16)
+            : const Icon(Icons.folder_outlined, size: 20),
+        title: Text(label),
+        onTap: onTap,
+      );
+
+  /// 把当前笔记归入 [id] 对应的文件夹（null = 未分类），并即时落库。
+  void _selectFolderInEditor(String? id) {
+    setState(() => _notebookId = id);
+    _save();
+  }
+
+  /// 编辑器内新建文件夹，成功返回新建 id，取消 / 失败返回 null。
+  Future<String?> _createFolderInEditor() async {
+    final ctrl = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('新建文件夹'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: '文件夹名称'),
+          onSubmitted: (value) => Navigator.pop(ctx, value.trim()),
         ),
-    ];
-    if (!hasCurrent && _notebookId != null) {
-      items.add(DropdownMenuItem<String?>(
-        value: _notebookId,
-        child: const Text('(未知文件夹)'),
-      ));
-    }
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-      child: Row(
-        children: [
-          const Icon(Icons.folder_outlined, size: 18, color: Colors.grey),
-          const SizedBox(width: 8),
-          Expanded(
-            child: DropdownButton<String?>(
-              isExpanded: true,
-              value: _notebookId,
-              hint: const Text('未分类'),
-              items: items,
-              onChanged: (String? v) {
-                setState(() => _notebookId = v);
-                // 立即落库：文件夹归属变化（尤其已有笔记）应该即时生效并随同步上行。
-                _save();
-              },
-            ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            child: const Text('创建'),
           ),
         ],
       ),
+    );
+    if (name == null || name.isEmpty) return null;
+    final res = await widget.service.notebooks.createFolder(name: name);
+    if (!mounted) return null;
+    return res.fold(
+      (nb) {
+        _loadFolders();
+        return nb.id;
+      },
+      (e, _) {
+        _snack('创建文件夹失败：$e');
+        return null;
+      },
     );
   }
 
@@ -714,6 +842,11 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         title: Text(_note == null ? '新笔记' : (_note!.title.isEmpty ? '无标题' : _note!.title)),
         actions: [
           IconButton(
+            onPressed: _openFolderPicker,
+            icon: const Icon(Icons.folder_outlined),
+            tooltip: '归入文件夹（搜索 / 切换）',
+          ),
+          IconButton(
             onPressed: _openToc,
             icon: const Icon(Icons.list_alt),
             tooltip: '目录 / 大纲',
@@ -760,7 +893,6 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
             ),
           ),
           const Divider(height: 1),
-          _buildFolderSelector(),
           MarkdownToolbar(
             controller: _controller,
             onInsertImage: _insertImage,
