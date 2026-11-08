@@ -367,4 +367,33 @@ void main() {
     expect(tester.widget<TextField>(field).controller!.text, '第二节');
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('⑨ 回归：置顶笔记加载后保存不丢置顶状态',
+      (WidgetTester tester) async {
+    // 复现 bug：_load() 构造 Note 时漏传 pinned → 回落默认 false →
+    // _save() 经 copyWith 保留 false 写库，覆盖原置顶。
+    await db.into(db.notes).insert(NotesCompanion(
+          id: const Value<String>('n3'),
+          title: const Value<String>('置顶笔记'),
+          contentMd: const Value<String>('# 标题\n\n正文'),
+          pinned: const Value<bool>(true),
+          updatedAt: Value<DateTime>(DateTime.utc(2026, 1, 1)),
+          deviceId: const Value<String>('local-dev'),
+        ));
+
+    await tester.pumpWidget(MaterialApp(
+      home: NoteEditorPage(service: makeService(), db: db, noteId: 'n3'),
+    ));
+    await tester.pumpAndSettle();
+
+    // 什么都不改，直接保存。
+    await tester.tap(find.byTooltip('保存'));
+    await tester.pumpAndSettle();
+
+    final row = await (db.select(db.notes)..where((t) => t.id.equals('n3')))
+        .getSingle();
+    expect(row.pinned, isTrue,
+        reason: '保存后必须保留原置顶状态（回归 _load 漏传 pinned 的 bug）');
+    expect(tester.takeException(), isNull);
+  });
 }

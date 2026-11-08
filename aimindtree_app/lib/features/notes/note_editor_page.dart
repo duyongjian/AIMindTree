@@ -176,6 +176,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         contentMd: row.contentMd,
         title: row.title,
         notebookId: row.notebookId,
+        pinned: row.pinned,
         updatedAt: row.updatedAt,
         deviceId: row.deviceId,
         version: row.version,
