@@ -33,20 +33,23 @@ String? threeWayMergeNotes(String base, String local, String remote) {
     final bs = i < bp.length ? (bp[i].source ?? '') : '';
     final ls = i < lp.length ? (lp[i].source ?? '') : '';
     final rs = i < rp.length ? (rp[i].source ?? '') : '';
-    // 块后分隔沿用基线（保证整篇 byte-exact 还原）。
-    final gap = i < bp.length
-        ? bp[i].trailingGap
-        : (i < lp.length ? lp[i].trailingGap : '\n\n');
 
+    // 选每块时，同时记录该块取自哪一侧，段后分隔沿用「被采用那一侧」的
+    // trailingGap，避免本地/远端对段落间距的编辑在合并时被基线覆盖。
     String pick;
+    String gap;
     if (ls == rs) {
       pick = ls; // 两边相同：任取
+      gap = i < lp.length ? lp[i].trailingGap : (i < bp.length ? bp[i].trailingGap : '\n\n');
     } else if (ls == bs) {
       pick = rs; // 本地没动这块，采用远端
+      gap = i < rp.length ? rp[i].trailingGap : (i < bp.length ? bp[i].trailingGap : '\n\n');
     } else if (rs == bs) {
       pick = ls; // 远端没动这块，采用本地
+      gap = i < lp.length ? lp[i].trailingGap : (i < bp.length ? bp[i].trailingGap : '\n\n');
     } else {
       pick = ls; // 两边都动了同一块 → 冲突，暂留本地
+      gap = i < lp.length ? lp[i].trailingGap : (i < bp.length ? bp[i].trailingGap : '\n\n');
       conflict = true;
     }
     chosen.add(pick);
@@ -55,7 +58,12 @@ String? threeWayMergeNotes(String base, String local, String remote) {
 
   if (conflict) return null;
 
-  final sb = StringBuffer(bDoc.prologue);
+  // 文档级 prologue（正文前的引导文字）：优先采用「相对基线改过」的一侧，
+  // 避免某一端对引言的编辑在合并时被基线的旧 prologue 覆盖。
+  final prologue = lDoc.prologue != bDoc.prologue
+      ? lDoc.prologue
+      : (rDoc.prologue != bDoc.prologue ? rDoc.prologue : bDoc.prologue);
+  final sb = StringBuffer(prologue);
   for (var i = 0; i < n; i++) {
     sb.write(chosen[i]);
     sb.write(gaps[i]);

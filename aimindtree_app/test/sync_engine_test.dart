@@ -13,6 +13,7 @@ library;
 
 import 'package:aimindtree_app/data/db/drift_database.dart';
 import 'package:aimindtree_app/data/sync/sync_api.dart';
+import 'dart:convert';
 import 'package:aimindtree_app/data/sync/sync_engine.dart';
 import 'package:aimindtree_app/data/sync/sync_outbox.dart';
 import 'package:aimindtree_app/data/sync/sync_types.dart';
@@ -238,9 +239,12 @@ void main() {
           op: SyncOp.delete,
         ),
       ]);
-      await engine.pull();
+      final r = await engine.pull();
       final rows = await db.select(db.notebooks).get();
       expect(rows, isEmpty);
+      // O2：tombstone 应计入 deleted，而不是被误算进 applied（避免「应用 N 条」虚高）。
+      expect(r.deleted, 1);
+      expect(r.applied, 0);
     });
 
     test('remote.version == 0（从未同步过） + 本地空 → insert', () async {
@@ -508,6 +512,70 @@ void main() {
           .getSingle();
       expect(card.contentMd, 'pulled');
       expect(card.version, 5);
+    });
+  });
+
+  group('Pull - 笔记冲突本地胜出 → 合并结果回推发件箱', () {
+    test('本地胜出（version 更高）且内容冲突：合并进胜方并登记 outbox 回推', () async {
+      // 本地先有一篇笔记，版本 5。
+      await db.into(db.notes).insert(NotesCompanion(
+        id: const Value('n1'),
+        notebookId: const Value(null),
+        title: const Value('t'),
+        contentMd: const Value('LOCAL'),
+        contentHash: const Value(''),
+        pinned: const Value(false),
+        updatedAt: Value(DateTime.parse('2026-01-01T00:00:00Z')),
+        version: const Value(5),
+        deviceId: const Value('local-dev'),
+        deletedAt: const Value(null),
+      ));
+      // 对端（另一设备）推来同 id、版本更低、内容不同的笔记 → 本地胜出。
+      api.enqueuePull([
+        _mkEnv(
+          deviceId: 'remote-device-1',
+          entityTable: 'notes',
+          entityId: 'n1',
+          baseVersion: 2,
+          updatedAt: DateTime.now().toUtc(),
+          payload: <String, dynamic>{
+            'id': 'n1',
+            'notebook_id': null,
+            'title': 't',
+            'content_md': 'REMOTE',
+            'content_hash': '',
+            'pinned': false,
+            'updated_at': DateTime.now().toUtc().toIso8601String(),
+            'version': 2,
+            'device_id': 'remote-device-1',
+            'deleted_at': null,
+          },
+        ),
+      ]);
+      final r = await engine.pull();
+      expect(r.conflictsMerged, 1,
+          reason: '本地胜出的内容冲突应计为一次内联合并');
+
+      // 本地笔记应保留本地内容，并把对端内容追加进「同步冲突」区块。
+      final local =
+          await (db.select(db.notes)..where((t) => t.id.equals('n1'))).getSingle();
+      expect(local.contentMd, contains('LOCAL'));
+      expect(local.contentMd, contains('REMOTE'));
+      expect(local.contentMd, contains('同步冲突'));
+
+      // 合并结果必须回推：outbox 里应有一条 notes upsert，内容同样含冲突区块。
+      final pending = await outbox.pending();
+      final noteRow = pending
+          .where((e) => e.entityTable == 'notes' && e.entityId == 'n1')
+          .toList();
+      expect(noteRow, isNotEmpty,
+          reason: 'H2：本地胜出合并后必须把结果登记进发件箱回推，'
+              '否则对端仍是旧版本（分叉）');
+      final pushed =
+          jsonDecode(noteRow.single.payloadJson) as Map<String, dynamic>;
+      expect(pushed['content_md'], contains('同步冲突'));
+      // 回推版本必须严格高于对端（本机 5 vs 对端 2 → 6），保证 LWW 不被旧版本覆盖。
+      expect(pushed['version'], 6);
     });
   });
 }

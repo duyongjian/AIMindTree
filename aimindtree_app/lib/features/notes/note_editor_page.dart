@@ -671,13 +671,14 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
                       ListTile(
                         leading: const Icon(Icons.create_new_folder_outlined),
                         title: const Text('新建文件夹'),
-                        onTap: () async {
-                          final created = await _createFolderInEditor();
-                          if (created != null) {
-                            Navigator.pop(ctx);
-                            _selectFolderInEditor(created);
-                          }
-                        },
+            onTap: () async {
+              final created = await _createFolderInEditor();
+              if (created != null) {
+                if (!ctx.mounted) return;
+                Navigator.pop(ctx);
+                _selectFolderInEditor(created);
+              }
+            },
                       ),
                     ],
                   ),

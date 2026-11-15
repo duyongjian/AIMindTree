@@ -913,14 +913,16 @@ class AgentPageState extends State<AgentPage> {
   /// 时缺少参照系，一律要求给空数组（空树仍有树名/主题可作参照，照常判断）。
   /// 页面在查库期间被销毁则返回 null。
   Future<String?> _buildDetectPrompt() async {
+    // 捕获当前活跃树：await 期间 _activeTree 可能被置空，后续统一用本地快照。
+    final tree = _activeTree;
     var treeCtx = '';
-    var hasTreeBasis = _activeTree != null;
-    if (_activeTree != null) {
-      final ids = await widget.service.trees.memberPointIds(_activeTree!.id);
+    var hasTreeBasis = tree != null;
+    if (tree != null) {
+      final ids = await widget.service.trees.memberPointIds(tree.id);
       final pts = await widget.service.repo.pointsByIds(ids);
       treeCtx = pts.isEmpty
-          ? '用户正在构建知识树「${_activeTree!.name}」，树里目前还没有知识点。\n\n'
-          : '用户正在构建知识树「${_activeTree!.name}」，已有知识点：'
+          ? '用户正在构建知识树「${tree.name}」，树里目前还没有知识点。\n\n'
+          : '用户正在构建知识树「${tree.name}」，已有知识点：'
               '${pts.map((p) => p.name).join('、')}。'
               '请重点指出用户还缺哪些、哪些明显薄弱。\n'
               '已在树内的概念不要放进 extension。\n\n';
@@ -1809,7 +1811,7 @@ class _ApprovalTile extends StatelessWidget {
         secondary: Container(
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
           decoration: BoxDecoration(
-            color: _riskColor().withOpacity(0.12),
+            color: _riskColor().withValues(alpha: 0.12),
             borderRadius: BorderRadius.circular(4),
           ),
           child: Text(

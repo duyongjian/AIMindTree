@@ -686,7 +686,7 @@ class _HomeworkPageState extends State<HomeworkPage> {
             TextButton(
               onPressed: () async {
                 await Clipboard.setData(ClipboardData(text: md));
-                if (!mounted) return;
+                if (!ctx.mounted) return;
                 Navigator.of(ctx).pop();
                 _toast('已复制到剪贴板');
               },

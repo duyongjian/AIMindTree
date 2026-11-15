@@ -350,6 +350,7 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
                 if (existing == null) {
                   kpDedupSchedule(repo: _repo, jobs: widget.service.jobs);
                 }
+                if (!ctx.mounted) return;
                 Navigator.pop(ctx);
               },
               child: const Text('保存'),
@@ -1028,7 +1029,7 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
                             : CircleAvatar(
                                 radius: 14,
                                 backgroundColor:
-                                    _masteryColor(m).withOpacity(0.15),
+                                    _masteryColor(m).withValues(alpha: 0.15),
                                 child: Text(
                                   kp.type.label[0],
                                   style: TextStyle(
@@ -1072,7 +1073,7 @@ class KnowledgeManagePageState extends State<KnowledgeManagePage> {
                                 vertical: 2,
                               ),
                               decoration: BoxDecoration(
-                                color: _masteryColor(m).withOpacity(0.12),
+                                color: _masteryColor(m).withValues(alpha: 0.12),
                                 borderRadius: BorderRadius.circular(10),
                               ),
                               child: Text(

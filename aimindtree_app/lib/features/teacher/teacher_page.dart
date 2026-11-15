@@ -430,7 +430,6 @@ class _TeacherPageState extends State<TeacherPage> {
       _jobSub = null;
     }
   }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -484,6 +483,7 @@ class _TeacherPageState extends State<TeacherPage> {
                   if (mounted) await _reloadMessages();
                 }
               } else if (value == 'delete' && _currentSessionId != null) {
+                if (!mounted) return;
                 final isPrimary = _currentSessionId == _primarySessionId;
                 String message;
                 if (isPrimary) {
@@ -502,6 +502,7 @@ class _TeacherPageState extends State<TeacherPage> {
                 } else {
                   message = '连同消息一起删除，不可恢复。';
                 }
+                if (!context.mounted) return;
                 final confirmed = await confirmDialog(
                   context,
                   title: '删除会话',

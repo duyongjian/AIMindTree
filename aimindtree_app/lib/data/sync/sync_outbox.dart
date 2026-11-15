@@ -19,6 +19,10 @@ class SyncOutboxRepo {
   final AppDatabase _db;
   final String deviceId;
 
+  /// 入队失败累计次数（旁路记账失败的可观测信号，不阻断业务写入）。
+  /// UI/同步状态可用它判断「本地→服务器」上行是否卡住。
+  int enqueueFailures = 0;
+
   /// 本 outbox 所属的数据库实例（接线一致性校验用）。
   AppDatabase get db => _db;
 

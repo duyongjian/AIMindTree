@@ -155,17 +155,24 @@ class KnowledgeRepository {
 
   /// 保留每个笔记最近 30 个版本：超出则删除最旧的（按 created_at 升序）。
   Future<void> _trimNoteVersions(String noteId) async {
-    final all = await (_db.select(_db.noteVersions)
-          ..where((t) => t.noteId.equals(noteId))
-          ..orderBy([(t) => OrderingTerm.desc(t.createdAt)]))
-        .get();
-    if (all.length <= 30) return;
-    final excess = all.skip(30).map((r) => r.id).toList();
-    if (excess.isNotEmpty) {
-      await (_db.delete(_db.noteVersions)
-            ..where((t) => t.id.isIn(excess)))
-          .go();
-    }
+    await _db.transaction(() async {
+      final all = await (_db.select(_db.noteVersions)
+            ..where((t) => t.noteId.equals(noteId))
+            // 稳定排序：createdAt 相同（同毫秒）时用 version 兜底，
+            // 否则 SQLite 排序不稳定，可能误删较新的版本快照。
+            ..orderBy([
+              (t) => OrderingTerm.desc(t.createdAt),
+              (t) => OrderingTerm.desc(t.version),
+            ]))
+          .get();
+      if (all.length <= 30) return;
+      final excess = all.skip(30).map((r) => r.id).toList();
+      if (excess.isNotEmpty) {
+        await (_db.delete(_db.noteVersions)
+              ..where((t) => t.id.isIn(excess)))
+            .go();
+      }
+    });
   }
 
   /// 把 AI 提取结果**带锚点校验**地入库。
@@ -1187,9 +1194,8 @@ class KnowledgeRepository {
             ..where((t) => t.noteId.equals(noteId)))
           .go();
       await (_db.delete(_db.notes)..where((t) => t.id.equals(noteId))).go();
-      // TODO(sync): enqueue notes hard-delete when sync writer adds hardDeleteNotes.
-      // 目前 SyncOutboxWriter 仅有 upsertNote / hardDeleteNoteAssets，没有
-      // hardDeleteNotes，跨设备回收待同步层补齐。
+      // 跨设备回收：把笔记物理删除登记进发件箱，让对端也跟着硬删。
+      await _sync.hardDeleteNotes(<NoteRow>[row]);
       _log.i('彻底删除笔记 $noteId（物理删除，不可恢复）');
       return const Success<void>(null);
     } on Object catch (e, s) {

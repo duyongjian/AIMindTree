@@ -473,6 +473,8 @@ Future<void> _onKpDedupResult(AiJob job, KnowledgeRepository repo) async {
       _log.w('知识点查重：拿不到全局导航上下文，跳过结果弹窗');
       return;
     }
+    // ctx 为全局导航上下文，await（pointsByIds）后可能被路由变更置空，先校验。
+    if (!ctx.mounted) return;
     // 树仓储与 KP 仓储必须共用同一个库实例（同步 outbox 身份校验）。
     final trees = TreeRepository(repo.db, deviceId: repo.deviceId);
     await showKpDedupDialog(

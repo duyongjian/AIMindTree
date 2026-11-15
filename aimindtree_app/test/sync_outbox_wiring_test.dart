@@ -21,7 +21,9 @@ import 'package:aimindtree_app/data/sync/sync_api.dart';
 import 'package:aimindtree_app/data/sync/sync_engine.dart';
 import 'package:aimindtree_app/data/sync/sync_json.dart';
 import 'package:aimindtree_app/data/sync/sync_outbox.dart';
+import 'package:aimindtree_app/data/sync/sync_outbox_writer.dart';
 import 'package:aimindtree_app/data/sync/sync_types.dart';
+import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -291,6 +293,134 @@ void main() {
       final payload = decoded['payload'] as Map<String, dynamic>;
       expect(payload['updated_at'], isA<String>());
       expect(DateTime.tryParse(payload['updated_at'] as String), isNotNull);
+    });
+  });
+
+  group('孤儿表上行管道（cards / canvas_edges，管道对称占位）', () {
+    late SyncOutboxWriter writer;
+
+    setUp(() {
+      writer = SyncOutboxWriter(db);
+    });
+
+    test('upsertCard → cards upsert 入队（payload 键与 engine fromMap 对齐）',
+        () async {
+      SyncOutboxRepo.current = outbox;
+
+      await db.into(db.cards).insert(
+            CardsCompanion.insert(
+              id: 'card-1',
+              type: 'qna',
+              contentMd: Value('什么是 LWW？'),
+              updatedAt: DateTime.utc(2026, 1, 1),
+              deviceId: 'local-dev',
+            ),
+          );
+
+      await writer.upsertCard('card-1');
+
+      final pending = await outbox.pending();
+      expect(pending, hasLength(1));
+      final row = pending.single;
+      expect(row.entityTable, 'cards');
+      expect(row.entityId, 'card-1');
+      expect(row.op, SyncOp.upsert.name);
+      expect(row.baseVersion, 1); // version 默认 1
+      final payload = jsonDecode(row.payloadJson) as Map<String, dynamic>;
+      expect(payload['id'], 'card-1');
+      expect(payload['type'], 'qna');
+      expect(payload['content_md'], '什么是 LWW？');
+    });
+
+    test('upsertCanvasEdge → canvas_edges upsert 入队', () async {
+      SyncOutboxRepo.current = outbox;
+
+      await db.into(db.canvasEdges).insert(
+            CanvasEdgesCompanion.insert(
+              id: 'edge-1',
+              canvasId: 'cv-1',
+              fromNodeId: 'n-a',
+              toNodeId: 'n-b',
+              updatedAt: DateTime.utc(2026, 1, 1),
+              deviceId: 'local-dev',
+            ),
+          );
+
+      await writer.upsertCanvasEdge('edge-1');
+
+      final pending = await outbox.pending();
+      expect(pending, hasLength(1));
+      final row = pending.single;
+      expect(row.entityTable, 'canvas_edges');
+      expect(row.entityId, 'edge-1');
+      expect(row.op, SyncOp.upsert.name);
+      final payload = jsonDecode(row.payloadJson) as Map<String, dynamic>;
+      expect(payload['id'], 'edge-1');
+      expect(payload['canvas_id'], 'cv-1');
+      expect(payload['from_node_id'], 'n-a');
+      expect(payload['to_node_id'], 'n-b');
+    });
+
+    test('hardDeleteCards / hardDeleteCanvasEdges → delete 信封（baseVersion 取行 version）',
+        () async {
+      SyncOutboxRepo.current = outbox;
+
+      await db.into(db.cards).insert(
+            CardsCompanion.insert(
+              id: 'card-2',
+              type: 'qna',
+              contentMd: Value('x'),
+              version: Value(2),
+              updatedAt: DateTime.utc(2026, 1, 1),
+              deviceId: 'local-dev',
+            ),
+          );
+      await db.into(db.canvasEdges).insert(
+            CanvasEdgesCompanion.insert(
+              id: 'edge-2',
+              canvasId: 'cv-1',
+              fromNodeId: 'n-a',
+              toNodeId: 'n-b',
+              version: Value(3),
+              updatedAt: DateTime.utc(2026, 1, 1),
+              deviceId: 'local-dev',
+            ),
+          );
+
+      final cardRows =
+          await (db.select(db.cards)..where((t) => t.id.equals('card-2'))).get();
+      final edgeRows = await (db.select(db.canvasEdges)
+            ..where((t) => t.id.equals('edge-2')))
+          .get();
+      await writer.hardDeleteCards(cardRows);
+      await writer.hardDeleteCanvasEdges(edgeRows);
+
+      final pending = await outbox.pending();
+      expect(pending, hasLength(2));
+      final byTable = {for (final p in pending) p.entityTable: p};
+      expect(byTable.containsKey('cards'), isTrue);
+      expect(byTable.containsKey('canvas_edges'), isTrue);
+      expect(byTable['cards']!.op, SyncOp.delete.name);
+      expect(byTable['canvas_edges']!.op, SyncOp.delete.name);
+      expect(byTable['cards']!.baseVersion, 2);
+      expect(byTable['canvas_edges']!.baseVersion, 3);
+    });
+
+    test('未接线（current == null）时 writer 静默跳过、不崩', () async {
+      SyncOutboxRepo.current = null;
+
+      await db.into(db.cards).insert(
+            CardsCompanion.insert(
+              id: 'card-x',
+              type: 'qna',
+              updatedAt: DateTime.utc(2026, 1, 1),
+              deviceId: 'local-dev',
+            ),
+          );
+
+      // 不应抛异常，也不入队（outbox 未接到同一个 db 的接线）。
+      await writer.upsertCard('card-x');
+      expect(await outbox.pendingCount(), 0);
     });
   });
 }

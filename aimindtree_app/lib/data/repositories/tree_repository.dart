@@ -161,13 +161,17 @@ class TreeRepository {
               .get()
           : <KnowledgePointRow>[];
 
-      await (_db.delete(_db.canvasNodes)..where((t) => t.canvasId.equals(id)))
-          .go();
-      await (_db.delete(_db.canvases)..where((t) => t.id.equals(id))).go();
-      if (deletePoints && kpIds.isNotEmpty) {
-        await (_db.delete(_db.knowledgePoints)..where((t) => t.id.isIn(kpIds)))
+      // 原子删除：三个本地删除要么都成功、要么都回滚，避免「树没了但节点/知识点
+      // 残留」的部分删除态（之前无事务包裹，任一步失败都会留下脏数据）。
+      await _db.transaction(() async {
+        await (_db.delete(_db.canvasNodes)..where((t) => t.canvasId.equals(id)))
             .go();
-      }
+        await (_db.delete(_db.canvases)..where((t) => t.id.equals(id))).go();
+        if (deletePoints && kpIds.isNotEmpty) {
+          await (_db.delete(_db.knowledgePoints)..where((t) => t.id.isIn(kpIds)))
+              .go();
+        }
+      });
       // 上行同步：硬删的行逐个入队，让远端跟着删。
       await _sync.hardDeleteCanvasNodes(removedNodes);
       if (treeRow != null) {

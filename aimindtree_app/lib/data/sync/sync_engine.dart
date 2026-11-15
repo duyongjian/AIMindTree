@@ -143,6 +143,7 @@ class PullReport {
     required this.serverTime,
     this.keptLocal = 0,
     this.conflictsMerged = 0,
+    this.deleted = 0,
   });
   final int applied;
 
@@ -158,6 +159,11 @@ class PullReport {
   /// 与 [applied] 分开：内联合并是「在胜方笔记里追加输方内容」的冲突解决动作，
   /// 既不是「应用远端变更」也不算「保留本地」，单独计数便于观察冲突频率。
   final int conflictsMerged;
+
+  /// 拉取时因 tombstone 而在本地被硬删的条数。
+  ///
+  /// 与 [applied] 分开：删除不是「应用远端变更」，单独计数避免「应用 N 条」虚高。
+  final int deleted;
   final DateTime serverTime;
 }
 
@@ -832,6 +838,7 @@ SyncEngine({
     var skipped = 0;
     var keptLocal = 0;
     var conflictsMerged = 0;
+    var deleted = 0;
     for (final env in result.envelopes) {
       // 自回声：本机产生的变更不需要再次 merge（外层 push 已经应用）
       if (env.deviceId == deviceId) {
@@ -843,6 +850,8 @@ SyncEngine({
         keptLocal++;
       } else if (outcome == _MergeOutcome.conflictMerged) {
         conflictsMerged++;
+      } else if (outcome == _MergeOutcome.deleted) {
+        deleted++;
       } else {
         applied++;
       }
@@ -855,6 +864,7 @@ SyncEngine({
       skipped: skipped,
       keptLocal: keptLocal,
       conflictsMerged: conflictsMerged,
+      deleted: deleted,
       serverTime: result.serverTime,
     );
   }
@@ -1047,9 +1057,24 @@ SyncEngine({
         _dt(remotePayload['updated_at']),
       );
       final finalContent = merged ?? localMd;
-      final mergedPayload = <String, dynamic>{...localRow, 'content_md': finalContent};
+      // 合并后整体抬一档版本号（取本地/远端较高者 +1），保证回推时严格晚于对端
+      // 当前版本，避免被 LWW 平局 / 旧版本覆盖（见 [_compare]）。
+      final bumped = (local.version > env.baseVersion ? local.version : env.baseVersion) + 1;
+      final now = DateTime.now().toUtc();
+      final mergedPayload = <String, dynamic>{
+        ...localRow,
+        'content_md': finalContent,
+        'version': bumped,
+        'updated_at': now,
+        'device_id': deviceId,
+      };
       await _upsertLocal('notes', mergedPayload);
-      // 不写基线：本机与服务器尚未收敛（服务器仍是远端），避免把本地误当基线。
+      // 回推：把合并结果登记进发件箱，让服务器与另一台设备也拿到合并后的笔记。
+      // 否则冲突只在本地解决，对端仍是旧版本，造成长期分叉。
+      await _enqueueMergedNote(mergedPayload);
+      // 写基线 = 合并后内容：本机已与（回推后的）服务器收敛到 merged，
+      // 避免下次 pull 又把本地误判为「未改」而重复触发冲突合并。
+      await _writeBaseline(env.entityId, finalContent, bumped, now);
     }
     return _MergeOutcome.conflictMerged;
   }
@@ -1084,6 +1109,24 @@ SyncEngine({
             updatedAt: Value(updatedAt),
           ),
         );
+  }
+
+  /// 把合并后的笔记正文登记进 outbox（回推），让冲突结果跨设备收敛。
+  ///
+  /// 入队失败不阻断本地合并——outbox 是旁路记账，失败只记日志（见
+  /// [SyncOutboxWriter] 的契约）。
+  Future<void> _enqueueMergedNote(Map<String, dynamic> payload) async {
+    try {
+      await _outbox.enqueue(
+        entityTable: 'notes',
+        entityId: payload['id'] as String,
+        op: SyncOp.upsert,
+        payload: payload,
+        baseVersion: (payload['version'] as num?)?.toInt() ?? 1,
+      );
+    } on Object catch (e, s) {
+      _log.e('合并笔记回推入队失败', error: e, stackTrace: s);
+    }
   }
 
   // ============ 表适配 ============

@@ -126,6 +126,33 @@ class SyncOutboxWriter {
         toMap: canvasStrokeRowToMap,
       );
 
+  /// 卡片（AI 生成的问答/讲解/练习卡）upsert。
+  ///
+  /// ⚠️ 管道对称占位：当前本地 App **没有**产生 `cards` 行的写路径
+  /// （详见 sync_engine 的 pull 路径），本方法暂不会被调用；
+  /// 待本地卡片生成功能接入后，在写库处调 `_sync.upsertCard(id)` 即可上行。
+  Future<void> upsertCard(String id) => _upsert(
+        table: 'cards',
+        id: id,
+        load: () =>
+            (_db.select(_db.cards)..where((t) => t.id.equals(id)))
+                .getSingleOrNull(),
+        toMap: cardRowToMap,
+      );
+
+  /// 画布连线 upsert。
+  ///
+  /// ⚠️ 管道对称占位：当前本地 App **没有**产生 `canvas_edges` 行的写路径，
+  /// 本方法暂不会被调用；待画布连线本地生成功能接入后调 `_sync.upsertCanvasEdge(id)`。
+  Future<void> upsertCanvasEdge(String id) => _upsert(
+        table: 'canvas_edges',
+        id: id,
+        load: () => (_db.select(_db.canvasEdges)
+              ..where((t) => t.id.equals(id)))
+            .getSingleOrNull(),
+        toMap: canvasEdgeRowToMap,
+      );
+
   /// AI 会话 upsert。
   Future<void> upsertAiSession(String id) => _upsert(
         table: 'ai_sessions',
@@ -282,6 +309,21 @@ class SyncOutboxWriter {
   Future<void> hardDeleteNoteAssets(Iterable<NoteAssetRow> rows) =>
       _hardDelete(table: 'note_assets', rows: rows, toMap: noteAssetRowToMap);
 
+  /// 笔记物理删除（回收站清空）：把被删笔记登记进发件箱，让对端跟着硬删。
+  Future<void> hardDeleteNotes(Iterable<NoteRow> rows) =>
+      _hardDelete(table: 'notes', rows: rows, toMap: noteRowToMap);
+
+  /// 卡片物理删除（★管道对称占位：本地无产生路径，作为上行能力保留）。
+  ///
+  /// 与 pull 侧一致走硬删：sync_engine 收到 `cards` 删除信封时直接
+  /// `_db.delete(_db.cards)`（见 sync_engine.dart:1416），故本地删除也走硬删信封。
+  Future<void> hardDeleteCards(Iterable<CardRow> rows) =>
+      _hardDelete(table: 'cards', rows: rows, toMap: cardRowToMap);
+
+  /// 画布连线物理删除（★管道对称占位：本地无产生路径，作为上行能力保留）。
+  Future<void> hardDeleteCanvasEdges(Iterable<CanvasEdgeRow> rows) =>
+      _hardDelete(table: 'canvas_edges', rows: rows, toMap: canvasEdgeRowToMap);
+
   // ============ 内部实现 ============
 
   /// 取出当前接线点；未接线或库不匹配时返回 null（= 本次不入队）。
@@ -317,6 +359,7 @@ class SyncOutboxWriter {
         baseVersion: (payload['version'] as num?)?.toInt() ?? 1,
       );
     } on Object catch (e, s) {
+      outbox.enqueueFailures++;
       _log.e('upsert 入队失败：$table/$id', error: e, stackTrace: s);
     }
   }
@@ -344,6 +387,7 @@ class SyncOutboxWriter {
         baseVersion: (payload['version'] as num?)?.toInt() ?? 1,
       );
     } on Object catch (e, s) {
+      outbox.enqueueFailures++;
       _log.e('墓碑入队失败：$table/$id', error: e, stackTrace: s);
     }
   }
@@ -370,6 +414,7 @@ class SyncOutboxWriter {
         );
       }
     } on Object catch (e, s) {
+      outbox.enqueueFailures++;
       _log.e('硬删入队失败：$table', error: e, stackTrace: s);
     }
   }

@@ -1078,6 +1078,7 @@ class CanvasPageState extends State<CanvasPage> {
                   _toast('新建失败：$msg');
                   return;
                 }
+                if (!ctx.mounted) return;
                 Navigator.pop(ctx, kp);
               },
               child: const Text('创建'),
@@ -1209,6 +1210,7 @@ class CanvasPageState extends State<CanvasPage> {
                   _toast('保存失败：${res.message}');
                   return;
                 }
+                if (!ctx.mounted) return;
                 Navigator.pop(ctx, true);
               },
               child: const Text('保存'),
@@ -1633,6 +1635,7 @@ class CanvasPageState extends State<CanvasPage> {
       },
       (e, _) => _toast('自动连线失败：$e'),
     );
+    // 仅关闭加载态，忽略其完成错误
     await loading.catchError((_) {});
   }
 
@@ -1740,6 +1743,7 @@ class CanvasPageState extends State<CanvasPage> {
       },
       (e, _) => _toast('局部连线失败：$e'),
     );
+    // 仅关闭加载态，忽略其完成错误
     await loading.catchError((_) {});
   }
 
@@ -2043,7 +2047,7 @@ class CanvasPageState extends State<CanvasPage> {
       },
       (e, _) => _toast('自动补前置失败：$e'),
     );
-    // 显式消费 loading Future，避免「未使用变量」提示。
+    // 仅关闭加载态，忽略其完成错误
     await loading.catchError((_) {});
   }
 
@@ -2623,7 +2627,7 @@ class CanvasPageState extends State<CanvasPage> {
       final singleMd = '# ${s.name}\n\n${s.definition}';
       final ext = await widget.service.extract(singleMd);
       if (!mounted) {
-        Navigator.of(context, rootNavigator: true).pop();
+        // 仅关闭加载态，忽略其完成错误
         await loading.catchError((_) {});
         return;
       }
@@ -2632,6 +2636,7 @@ class CanvasPageState extends State<CanvasPage> {
       }
     }
     if (mounted) Navigator.of(context, rootNavigator: true).pop();
+    // 仅关闭加载态，忽略其完成错误
     await loading.catchError((_) {});
     if (!mounted) return;
     if (ids.isEmpty) {
@@ -2713,12 +2718,13 @@ class CanvasPageState extends State<CanvasPage> {
       md,
     );
     if (!mounted) {
-      Navigator.of(context, rootNavigator: true).pop();
+      // 仅关闭加载态，忽略其完成错误
       await loading.catchError((_) {});
       return;
     }
     if (ext is Failure<ExtractionSaveResult>) {
       Navigator.of(context, rootNavigator: true).pop();
+      // 仅关闭加载态，忽略其完成错误
       await loading.catchError((_) {});
       _toast('T1 锚定失败：${ext.error}');
       return;
@@ -2729,6 +2735,7 @@ class CanvasPageState extends State<CanvasPage> {
         .map((k) => k.id)
         .toList();
     if (mounted) Navigator.of(context, rootNavigator: true).pop();
+    // 仅关闭加载态，忽略其完成错误
     await loading.catchError((_) {});
     if (!mounted) return;
     if (ids.isEmpty) {
@@ -2795,6 +2802,7 @@ class CanvasPageState extends State<CanvasPage> {
       if (mounted) {
         Navigator.of(context, rootNavigator: true).pop();
       }
+      // 仅关闭加载态，忽略其完成错误
       await loading.catchError((_) {});
       if (!mounted) return null;
       var linkNote = '';
@@ -2906,6 +2914,7 @@ class CanvasPageState extends State<CanvasPage> {
     if (!mounted) return;
     if (ext is Failure<ExtractionSaveResult>) {
       Navigator.of(context, rootNavigator: true).pop();
+      // 仅关闭加载态，忽略其完成错误
       await loading.catchError((_) {});
       _toast('T1 锚定失败：${ext.error}');
       return;
@@ -2916,6 +2925,7 @@ class CanvasPageState extends State<CanvasPage> {
     if (ids.isEmpty) {
       // 建议全被锚点校验剔除：不落库任何无出处的点。
       Navigator.of(context, rootNavigator: true).pop();
+      // 仅关闭加载态，忽略其完成错误
       await loading.catchError((_) {});
       _toast('没有可锚定的知识点被收录（${res.rejectedCount} 条因缺少原文出处被剔除）。'
           '可改用「不新建笔记」手动收录。');
@@ -2924,6 +2934,7 @@ class CanvasPageState extends State<CanvasPage> {
 
     // T1 进度框关闭，落库/连线交给公共尾（它内部会再弹 T3 进度框）。
     if (mounted) Navigator.of(context, rootNavigator: true).pop();
+    // 仅关闭加载态，忽略其完成错误
     await loading.catchError((_) {});
     if (!mounted) return;
     await _finalizeSupplement(tree, ids, _syncLinkConnect(tree));
