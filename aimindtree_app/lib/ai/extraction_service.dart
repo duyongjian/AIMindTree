@@ -597,6 +597,17 @@ class ExtractionService {
       api: api,
     );
 
+    // P1 自动同步：已登录（真实 HttpSyncApi）且用户开启了自动同步时，启动周期调度。
+    // MockSyncApi 占位（后端未配地址 / 未登录）时不启动——周期 push/pull 全打
+    // Mock 既无意义又会刷错误日志；用户可在设置页配好后端登录后由开关重新拉起。
+    if (syncConfig.autoSyncEnabled && api is HttpSyncApi) {
+      scheduler.start();
+      _log.i('自动同步已启动（backend=$syncBackend）');
+    } else {
+      _log.i('自动同步未启动（autoSyncEnabled=${syncConfig.autoSyncEnabled}，'
+          'api=${api.runtimeType}）');
+    }
+
     // 任务队列：与 llm_server 同一信任域（只走本地 127.0.0.1）。
     final jobs = AiJobService(
       baseUrl: llmServerBaseUrl ?? kLlmServerDefaultBaseUrl,

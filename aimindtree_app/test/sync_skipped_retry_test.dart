@@ -202,7 +202,7 @@ void main() {
   });
 
   group('pull 计数', () {
-    test('LWW keep local 零写入：applied=0，keptLocal=1', () async {
+    test('LWW keep local：输方正文内联合并进胜方笔记（P0，不另开副本）', () async {
       final localAt = DateTime.utc(2026, 6, 1, 12);
       await db.into(db.notes).insert(NotesCompanion(
             id: const Value('n1'),
@@ -239,12 +239,24 @@ void main() {
 
       final report = await engine.pull();
 
-      expect(report.applied, 0, reason: 'keep local 零写入，不能算应用');
-      expect(report.keptLocal, 1);
+      // 胜方（本地）保留，输方（远端旧值）内联合并进同一篇笔记 —— 不另开副本。
       final row = await (db.select(db.notes)
             ..where((t) => t.id.equals('n1')))
           .getSingle();
-      expect(row.contentMd, '本地更新');
+      expect(row.contentMd, contains('本地更新'), reason: '胜方内容必须保留');
+      expect(row.contentMd, contains('远端旧值'),
+          reason: '输方内容必须内联合并，不能静默丢失');
+      expect(row.contentMd, contains('同步冲突'),
+          reason: '应带「同步冲突」标记区块');
+
+      // 没有额外副本笔记，只有 n1 这一篇。
+      final allNotes = await (db.select(db.notes)).get();
+      expect(allNotes, hasLength(1),
+          reason: '内联合并不应生成额外副本笔记');
+
+      expect(report.conflictsMerged, 1, reason: '应计为一次内联合并');
+      expect(report.applied, 0, reason: '胜方未被远端覆盖，不算应用');
+      expect(report.keptLocal, 0);
     });
   });
 

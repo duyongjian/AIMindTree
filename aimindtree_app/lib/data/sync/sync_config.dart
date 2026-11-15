@@ -250,6 +250,19 @@ class SyncConfig {
     }
   }
 
+  // ---- 全局：自动同步开关 ----
+  // 默认开启：已登录且后端就绪时，bootstrap 会自动启动周期调度（见
+  // ExtractionService.bootstrap）；用户在设置页可随时关闭。
+
+  static const _kAutoSync = 'aimindtree.sync.auto_enabled';
+
+  /// 是否启用自动同步（默认 true）。
+  bool get autoSyncEnabled => prefs.getBool(_kAutoSync) ?? true;
+
+  /// 设置/清除自动同步开关。
+  Future<void> setAutoSyncEnabled(bool v) async =>
+      prefs.setBool(_kAutoSync, v);
+
   /// 清空全部同步配置：所有后端的地址 / 用户名 / 每用户令牌、选中后端
   /// （回落 cloudflare）、手动代理，并顺带清理历史遗留 key。
   Future<void> clear() async {

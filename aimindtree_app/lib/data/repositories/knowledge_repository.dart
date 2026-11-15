@@ -115,6 +115,20 @@ class KnowledgeRepository {
         version: (existing?.version ?? 0) + 1,
         updatedAt: now,
       );
+      // P0 版本历史：仅在正文真发生变化时，把被覆盖前的旧版本快照进 note_versions。
+      // 不动标题/置顶等元数据变更（那不算「内容版本」），避免无意义的版本膨胀。
+      if (existing != null && existing.contentMd != toSave.contentMd) {
+        await _db.into(_db.noteVersions).insert(NoteVersionsCompanion(
+          id: Value(newUlid()),
+          noteId: Value(existing.id),
+          version: Value(existing.version),
+          title: Value(existing.title),
+          contentMd: Value(existing.contentMd),
+          createdAt: Value(existing.updatedAt),
+          deviceId: Value(existing.deviceId),
+        ));
+        await _trimNoteVersions(existing.id);
+      }
       await _db
           .into(_db.notes)
           .insertOnConflictUpdate(NotesCompanion(
@@ -136,6 +150,21 @@ class KnowledgeRepository {
     } on Object catch (e, s) {
       _log.e('保存笔记失败', error: e, stackTrace: s);
       return Failure(e, s);
+    }
+  }
+
+  /// 保留每个笔记最近 30 个版本：超出则删除最旧的（按 created_at 升序）。
+  Future<void> _trimNoteVersions(String noteId) async {
+    final all = await (_db.select(_db.noteVersions)
+          ..where((t) => t.noteId.equals(noteId))
+          ..orderBy([(t) => OrderingTerm.desc(t.createdAt)]))
+        .get();
+    if (all.length <= 30) return;
+    final excess = all.skip(30).map((r) => r.id).toList();
+    if (excess.isNotEmpty) {
+      await (_db.delete(_db.noteVersions)
+            ..where((t) => t.id.isIn(excess)))
+          .go();
     }
   }
 

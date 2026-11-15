@@ -35,6 +35,8 @@ import 'sync_outbox.dart';
 import 'sync_row_map.dart';
 import 'sync_types.dart';
 
+import '../../core/note_merge.dart';
+
 /// 参与同步的表名白名单（**一行可回退的开关**）。
 ///
 /// ⚠️ 远端是 Supabase Edge Function（源码不在本仓库、无法验证），若它有
@@ -140,6 +142,7 @@ class PullReport {
     required this.skipped,
     required this.serverTime,
     this.keptLocal = 0,
+    this.conflictsMerged = 0,
   });
   final int applied;
 
@@ -149,6 +152,12 @@ class PullReport {
   /// 拉到了、但 LWW 判定「保留本地」而**没有落库**的条数。
   /// 与 [applied] 分开计数，避免「零写入也报应用 N 条」的假成功。
   final int keptLocal;
+
+  /// 正文冲突时，输的一方被**内联合并**进胜方笔记的条数（P0）。
+  ///
+  /// 与 [applied] 分开：内联合并是「在胜方笔记里追加输方内容」的冲突解决动作，
+  /// 既不是「应用远端变更」也不算「保留本地」，单独计数便于观察冲突频率。
+  final int conflictsMerged;
   final DateTime serverTime;
 }
 
@@ -356,7 +365,24 @@ SyncEngine({
           }
         }
         // 只有真正落库的行才标 done；skipped 的绝不能清掉。
-        if (doneIds.isNotEmpty) await _outbox.markPushed(doneIds);
+        if (doneIds.isNotEmpty) {
+          await _outbox.markPushed(doneIds);
+          // 笔记上行成功后，把「刚推上去的正文」记为基线（本机与服务器已收敛），
+          // 供后续拉取时的段级三方合并（P2）使用。
+          for (final e in batch) {
+            if (doneIds.contains(e.row.id) && e.envelope.entityTable == 'notes') {
+              final md = (e.envelope.payload?['content_md'] as String?) ?? '';
+              if (md.isNotEmpty) {
+                await _writeBaseline(
+                  e.envelope.entityId,
+                  md,
+                  e.envelope.baseVersion,
+                  e.envelope.updatedAt,
+                );
+              }
+            }
+          }
+        }
         pushed += result.accepted;
         serverTime = result.serverTime;
         // 把服务端权威版本回写本地，使本地 version 与服务器对齐
@@ -805,6 +831,7 @@ SyncEngine({
     var applied = 0;
     var skipped = 0;
     var keptLocal = 0;
+    var conflictsMerged = 0;
     for (final env in result.envelopes) {
       // 自回声：本机产生的变更不需要再次 merge（外层 push 已经应用）
       if (env.deviceId == deviceId) {
@@ -814,17 +841,20 @@ SyncEngine({
       final outcome = await _merge(env);
       if (outcome == _MergeOutcome.keptLocal) {
         keptLocal++;
+      } else if (outcome == _MergeOutcome.conflictMerged) {
+        conflictsMerged++;
       } else {
         applied++;
       }
     }
     _lastPulledAt = result.serverTime;
     _log.i('pull applied=$applied skipped=$skipped keptLocal=$keptLocal '
-        'server_time=${result.serverTime}');
+        'conflictsMerged=$conflictsMerged server_time=${result.serverTime}');
     return PullReport(
       applied: applied,
       skipped: skipped,
       keptLocal: keptLocal,
+      conflictsMerged: conflictsMerged,
       serverTime: result.serverTime,
     );
   }
@@ -889,9 +919,17 @@ SyncEngine({
       return _MergeOutcome.deleted;
     }
     if (local == null) {
-      // 本地无记录，直接 apply
+      // 本地无记录，直接 apply；notes 同时记下收敛基线，供后续 pull 判断「本地是否改过」。
       await _applyInsert(env);
+      if (env.entityTable == 'notes') {
+        final md = (env.payload?['content_md'] as String?) ?? '';
+        await _writeBaseline(env.entityId, md, env.baseVersion, env.updatedAt);
+      }
       return _MergeOutcome.inserted;
+    }
+    // notes 走特判：正文冲突时做段级三方合并或落「冲突副本」，避免输方被静默丢弃。
+    if (env.entityTable == 'notes') {
+      return _mergeNote(env, local);
     }
     final cmp = _compare(env, local);
     if (cmp > 0) {
@@ -908,6 +946,144 @@ SyncEngine({
     if (env.baseVersion < local.version) return -1;
     // baseVersion 相等 → 看时间
     return env.updatedAt.isAfter(local.updatedAt) ? 1 : -1;
+  }
+
+  // ============ notes 特判（P0 不丢输方 + P2 段级三方合并 / 内联合并）============
+
+  /// 笔记的合并特判：在普通 LWW 之上，检测正文（content_md）是否真冲突，并避免
+  /// 把「远端单纯比本地新（本地未改过）」误判成冲突。
+  ///
+  /// 判定顺序：
+  /// 1. 本地无记录 → 直接插入，并把远端正文记为收敛基线。
+  /// 2. 正文相同 → 走普通 LWW（只是标题/置顶等元数据差异，无需冲突处理）；
+  ///    落库后同样刷新基线。
+  /// 3. 正文不同，但本地正文 == 收敛基线 → 说明本地自上次同步后**没改过**，
+  ///    远端是更新真相，干净按 LWW 应用远端，不触发冲突合并（防「假冲突」）。
+  /// 4. 正文不同且有基线 → 段级三方合并（[threeWayMergeNotes]）：
+  ///    不同段落各自保留，仅在「两边都改了同一段」时回落冲突处理；
+  ///    合并结果过 L1 安全校验才落地，否则回落内联合并。
+  /// 5. 正文不同但无基线（首次分叉，无共同祖先）→ 回落内联合并。
+  ///
+  /// 冲突回落（4/5）不再另开冲突副本：把「输方」正文作为带标记的段落**内联**
+  /// 进胜方笔记（[inlineMergeNotesConflict]），保证输方内容不被静默丢弃（P0）。
+  Future<_MergeOutcome> _mergeNote(SyncEnvelope env, _LocalVer local) async {
+    final localRow = await _readLocalRow('notes', env.entityId);
+    final remotePayload = env.payload;
+    if (localRow == null || remotePayload == null) {
+      // 退化到普通 LWW（理论不可达：_merge 已保证 local != null 且非 tombstone）。
+      final cmp = _compare(env, local);
+      if (cmp > 0) {
+        await _applyUpdate(env);
+        return _MergeOutcome.applied;
+      }
+      return _MergeOutcome.keptLocal;
+    }
+    final localMd = (localRow['content_md'] as String?) ?? '';
+    final remoteMd = (remotePayload['content_md'] as String?) ?? '';
+
+    // 正文相同 → 整行走普通 LWW，无需冲突处理；落库后刷新收敛基线。
+    if (localMd == remoteMd) {
+      final cmp = _compare(env, local);
+      if (cmp > 0) {
+        await _applyUpdate(env);
+        await _writeBaseline(env.entityId, remoteMd, env.baseVersion, env.updatedAt);
+        return _MergeOutcome.applied;
+      }
+      return _MergeOutcome.keptLocal;
+    }
+
+    // 正文不同 → 真正的正文冲突。
+    final remoteWins = _compare(env, local) > 0;
+
+    // 0) 关键护栏：若本地自上次收敛后**没改过**（local 正文 == 基线），
+    // 则这是「远端单纯比本地新」而不是冲突——干净按 LWW 应用远端，
+    // 否则会出现「假冲突」把旧正文又拼回笔记（见 sync_edit_propagation_test）。
+    final baseline = await _readBaseline(env.entityId);
+    if (baseline != null && localMd == baseline.contentMd) {
+      if (remoteWins) {
+        await _applyUpdate(env);
+        await _writeBaseline(env.entityId, remoteMd, env.baseVersion, env.updatedAt);
+        return _MergeOutcome.applied;
+      }
+      // 远端更旧且本地未改（本地即收敛内容）→ 保持，基线不变。
+      return _MergeOutcome.keptLocal;
+    }
+
+    // 1) 尝试段级三方合并（需要「上次收敛内容」基线 + 本地确实改过）。
+    if (baseline != null) {
+      final merged = threeWayMergeNotes(baseline.contentMd, localMd, remoteMd);
+      // 合并结果必须真的不同于本地（否则等于没解决冲突，还是内联更稳）。
+      if (merged != null && merged != localMd) {
+        final mergedPayload = <String, dynamic>{...remotePayload, 'content_md': merged};
+        await _applyUpdate(env.copyWith(payload: mergedPayload));
+        await _writeBaseline(env.entityId, merged, env.baseVersion, env.updatedAt);
+        _log.i('notes 三方合并成功：${env.entityId}');
+        return _MergeOutcome.merged;
+      }
+    }
+
+    // 2) 回落：把「输方」正文作为标记段落**内联**进胜方笔记（不另开副本，
+    // 避免笔记越攒越多）。胜方正文保留，输方内容追加在末尾的「同步冲突」区块。
+    _log.i('notes 内容冲突，内联合并进胜方笔记：${env.entityId}（remoteWins=$remoteWins）');
+    if (remoteWins) {
+      // 胜方 = 远端；输方 = 本地旧正文，追加进笔记。
+      final merged = inlineMergeNotesConflict(
+        remoteMd,
+        localMd,
+        localRow['device_id'] as String?,
+        localRow['updated_at'] as DateTime?,
+      );
+      final finalContent = merged ?? remoteMd;
+      await _applyUpdate(env.copyWith(
+        payload: <String, dynamic>{...remotePayload, 'content_md': finalContent},
+      ));
+      await _writeBaseline(env.entityId, finalContent, env.baseVersion, env.updatedAt);
+    } else {
+      // 胜方 = 本地（保持）；输方 = 远端正文，追加进本地笔记。
+      final merged = inlineMergeNotesConflict(
+        localMd,
+        remoteMd,
+        remotePayload['device_id'] as String?,
+        _dt(remotePayload['updated_at']),
+      );
+      final finalContent = merged ?? localMd;
+      final mergedPayload = <String, dynamic>{...localRow, 'content_md': finalContent};
+      await _upsertLocal('notes', mergedPayload);
+      // 不写基线：本机与服务器尚未收敛（服务器仍是远端），避免把本地误当基线。
+    }
+    return _MergeOutcome.conflictMerged;
+  }
+
+  /// 读笔记的同步基线（上次与服务器收敛后的正文）；无则返回 null。
+  Future<({String contentMd, int version, DateTime updatedAt})?> _readBaseline(
+    String noteId,
+  ) async {
+    final row = await (_db.select(_db.noteSyncBaseline)
+          ..where((t) => t.noteId.equals(noteId)))
+        .getSingleOrNull();
+    if (row == null) return null;
+    return (
+      contentMd: row.contentMd,
+      version: row.version,
+      updatedAt: row.updatedAt,
+    );
+  }
+
+  /// 写/更新笔记同步基线（按 note_id 主键 upsert）。
+  Future<void> _writeBaseline(
+    String noteId,
+    String contentMd,
+    int version,
+    DateTime updatedAt,
+  ) async {
+    await _db.into(_db.noteSyncBaseline).insertOnConflictUpdate(
+          NoteSyncBaselineCompanion(
+            noteId: Value(noteId),
+            contentMd: Value(contentMd),
+            version: Value(version),
+            updatedAt: Value(updatedAt),
+          ),
+        );
   }
 
   // ============ 表适配 ============
@@ -1576,7 +1752,7 @@ class _LocalVer {
 
 /// [SyncEngine._merge] 的结果：区分「真正落库」与「LWW 保留本地」。
 /// 只有前三者计入 [PullReport.applied]，避免零写入也报「应用 N 条」。
-enum _MergeOutcome { inserted, applied, deleted, keptLocal }
+enum _MergeOutcome { inserted, applied, deleted, keptLocal, merged, conflictMerged }
 
 /// 稳定地按 [key] 升序排序：相等元素保持原顺序（Dart 的 `List.sort` 不稳定）。
 /// 批内 envelope 必须用它排，保证同 baseVersion 的行不因排序抖动而乱序。

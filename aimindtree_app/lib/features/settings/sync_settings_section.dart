@@ -123,6 +123,13 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
     final ok = await widget.config.isLoggedIn(_backend);
     if (!mounted) return;
     setState(() => _loggedIn = ok);
+    // 登录成功且开启了自动同步 → 拉起周期调度；登出 → 停掉。
+    // 与 bootstrap 的自动启动逻辑保持一致，让设置页内的登录/登出即时生效。
+    if (ok && widget.config.autoSyncEnabled) {
+      widget.scheduler.start();
+    } else if (!ok) {
+      widget.scheduler.stop();
+    }
   }
 
   /// 刷新「数据版本」卡：本机 + 服务器各查一次。
@@ -588,6 +595,33 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
   ///
   /// 登录/注册成功后 `setState` 触发重建 → 徽章由灰「未登录」变绿「已登录」
   /// 并显示用户名，状态切换肉眼可辨；失败则该卡片保持「未登录」+ 红条提示。
+  /// 自动同步开关（P1）。
+  ///
+  /// 开启 → 持久化标志并启动周期调度；关闭 → 停止调度。仅当已登录（[ _loggedIn ]）
+  /// 时才真正拉起调度，避免对未就绪后端空跑；切换后端/登录状态变化后本开关会与
+  /// 实际调度状态保持一致（登录成功会触发 bootstrap 的自动启动逻辑）。
+  Widget _autoSyncTile() {
+    final enabled = widget.config.autoSyncEnabled;
+    return SwitchListTile(
+      title: const Text('自动同步'),
+      subtitle: Text(
+        _loggedIn
+            ? '开启后后台自动上传/拉取笔记'
+            : '需先登录同步账号后才会真正生效',
+      ),
+      value: enabled,
+      onChanged: (v) async {
+        await widget.config.setAutoSyncEnabled(v);
+        if (v && _loggedIn) {
+          widget.scheduler.start();
+        } else {
+          widget.scheduler.stop();
+        }
+        if (mounted) setState(() {});
+      },
+    );
+  }
+
   Widget _accountCard() {
     final theme = Theme.of(context);
     final disabledReason = _backend.disabledReason;
@@ -1085,6 +1119,9 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
               const SizedBox(height: 16),
               // 当前后端的账号卡片（自助注册 / 登录，各后端互相独立）
               _accountCard(),
+              const SizedBox(height: 16),
+              // 自动同步开关（P1）：开启后后台周期 push/pull；需先登录。
+              _autoSyncTile(),
               const SizedBox(height: 16),
               // 上传 / 拉取（对当前选中后端）
               _syncButtons(),

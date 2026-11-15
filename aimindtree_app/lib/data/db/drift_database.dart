@@ -33,6 +33,8 @@ part 'drift_database.g.dart';
     AiProviders,
     AiTaskRoutes,
     SyncOutbox,
+    NoteVersions,
+    NoteSyncBaseline,
   ],
   daos: [AiTaskRouteDao],
 )
@@ -40,7 +42,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase([QueryExecutor? executor]) : super(executor ?? _openConnection());
 
   @override
-  int get schemaVersion => 8;
+  int get schemaVersion => 9;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -92,6 +94,14 @@ class AppDatabase extends _$AppDatabase {
           if (from < 8) {
             await m.addColumn(notes, notes.pinned);
             await m.addColumn(notebooks, notebooks.pinned);
+          }
+          // v8 → v9：新增两张**本地专属**表（笔记版本历史 + 同步基线）。
+          // 均为 createTable（非 addColumn），drift 发 `CREATE TABLE IF NOT EXISTS`，
+          // 不影响 schema_migration_test 的 kV4DowngradeSql（那只校验加列回退）。
+          // 两张表都不进同步白名单 / sync_row_map / sync_engine switch。
+          if (from < 9) {
+            await m.createTable(noteVersions);
+            await m.createTable(noteSyncBaseline);
           }
         },
       );

@@ -413,3 +413,50 @@ class SyncOutbox extends Table {
 
   DateTimeColumn get createdAt => dateTime().named('created_at')();
 }
+
+/// 笔记版本历史（**本地专属**，不同步）。
+///
+/// 每次保存笔记覆盖正文前，把「被覆盖前的旧正文」快照存这里，供「查看历史 /
+/// 回滚」使用（P0）。与 `notes` 同步表解耦：不进同步白名单、不进
+/// sync_row_map / sync_engine 的 switch，避免触碰同步契约。
+@DataClassName('NoteVersionRow')
+class NoteVersions extends Table {
+  TextColumn get id => text().named('id')();
+
+  /// 所属笔记 id（多版本归属）。
+  TextColumn get noteId => text().named('note_id')();
+
+  /// 被快照时该笔记自身的 version（非本表主键）。
+  IntColumn get version => integer().named('version')();
+
+  TextColumn get title => text().named('title').withDefault(const Constant(''))();
+
+  /// 被覆盖前的旧正文。
+  TextColumn get contentMd => text().named('content_md').withDefault(const Constant(''))();
+
+  /// 快照时间戳（取被覆盖前的 updated_at）。
+  DateTimeColumn get createdAt => dateTime().named('created_at')();
+
+  TextColumn get deviceId => text().named('device_id')();
+}
+
+/// 笔记同步基线（**本地专属**，不同步）。
+///
+/// 记录「上次与服务器收敛后的正文」，供 [SyncEngine] 的段级三方合并（P2）使用：
+/// 拉取时把 本地 / 远端 / 基线 三份按段落三方比对，不同段落各自保留，只有
+/// 「两边都改了同一段」才升级为冲突副本。不进同步契约（见类文档）。
+@DataClassName('NoteSyncBaselineRow')
+class NoteSyncBaseline extends Table {
+  TextColumn get noteId => text().named('note_id')();
+
+  /// 上次收敛后的正文（三段合并的「base」）。
+  TextColumn get contentMd => text().named('content_md').withDefault(const Constant(''))();
+
+  /// 该基线对应的 version。
+  IntColumn get version => integer().named('version')();
+
+  DateTimeColumn get updatedAt => dateTime().named('updated_at')();
+
+  @override
+  Set<Column>? get primaryKey => {noteId};
+}
