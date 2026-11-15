@@ -107,6 +107,36 @@ class SyncOutboxRepo {
         .write(SyncOutboxCompanion(status: Value(OutboxStatus.done.name)));
   }
 
+  /// 把 sending 行重置为 pending（不记失败）。
+  ///
+  /// 用于服务端明确回「skipped」的行：它们没落库，绝不能 `markFailed`
+  /// （failed 行会被 `push()` 追加在新 pending 行之后，形成
+  /// `[新版, 旧版]` 批内乱序，让中继把旧正文以更高版本写回云端）。
+  Future<void> markPending(List<int> ids) async {
+    if (ids.isEmpty) return;
+    await (_db.update(_db.syncOutbox)..where((t) => t.id.isIn(ids)))
+        .write(SyncOutboxCompanion(status: Value(OutboxStatus.pending.name)));
+  }
+
+  /// 刷新一条 skipped 行的最终态并重置为 pending，供下一轮重推。
+  ///
+  /// 为什么必须刷新：`_adoptServerVersions` 会把本地 `version` 抬到服务端
+  /// 权威值（stale 分支回写的是 `authStart`），而 outbox 行里存的还是登记时
+  /// 的旧 `base_version` / `payload_json`。若不刷新就重推，`incoming` 仍
+  /// 落后于服务端 `authStart` → 二次 stale → 无限跳过。
+  Future<void> refreshAndRequeue({
+    required int id,
+    required String payloadJson,
+    required int baseVersion,
+  }) async {
+    await (_db.update(_db.syncOutbox)..where((t) => t.id.equals(id)))
+        .write(SyncOutboxCompanion(
+      payloadJson: Value(payloadJson),
+      baseVersion: Value(baseVersion),
+      status: Value(OutboxStatus.pending.name),
+    ));
+  }
+
   /// 标记推送失败：retryCount+1，状态回到 failed。
   Future<void> markFailed(List<int> ids) async {
     if (ids.isEmpty) return;

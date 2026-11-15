@@ -1,7 +1,8 @@
 /// SyncApi 抽象 + Http 实现 + Mock 实现（T03）。
 ///
 /// 客户端不直连 Supabase；统一走 Supabase ai-proxy 中转：
-///   POST /sync/push   `{device_id, envelopes}` → `{received, server_time}`
+///   POST /sync/push   `{device_id, envelopes}` →
+///     `{received, accepted, skipped, server_time, versions}`
 ///   POST /sync/pull   `{device_id, since}`      → `{envelopes, server_time}`
 ///   GET  /sync/manifest                         → `{count, max_version}`
 ///
@@ -57,8 +58,15 @@ class SyncPushResult {
     required this.accepted,
     required this.serverTime,
     this.versions = const {},
+    this.skipped = const <String>[],
   });
   final int accepted;
+
+  /// 被服务端「防陈旧覆盖」守卫跳过、未真正落库的实体 key。
+  ///
+  /// 元素格式 `"<entity_table>:<entity_id>"`（如 `"notes:n1"`），与
+  /// [versions] 的键格式一致。旧中继不返回该字段时为空数组。
+  final List<String> skipped;
   final DateTime serverTime;
 
   /// 服务端权威版本映射：`<entity_table>:<entity_id>` → 该实体被服务端分配的
@@ -220,13 +228,24 @@ class HttpSyncApi implements SyncApi {
       'envelopes': envelopes.map((e) => e.toJson()).toList(),
     });
     return SyncPushResult(
-      // 字段兼容：CF Worker 目前返回 `received`，其它后端（llm_server 中继 /
-      // 旧实现）返回 `accepted`。以前只读 `accepted` → CF 链路永远回落 0，
-      // 用户看到「上传成功但 0 条」。优先 `received`，回退 `accepted`。
-      accepted: ((m['received'] ?? m['accepted']) as num?)?.toInt() ?? 0,
+      // `accepted` 是服务端**真正写入**的条数；`received` 只是收到的 envelope
+      // 总数（含被「防陈旧覆盖」守卫跳过的行）。以前把 `received` 当成功数
+      // → 中继跳过写入却回 200，UI 仍报「上传成功」但正文没更新。
+      // 旧中继只回 `received`（没有 `accepted`）时回落它，保持兼容。
+      accepted: ((m['accepted'] ?? m['received']) as num?)?.toInt() ?? 0,
+      skipped: _parseSkipped(m['skipped']),
       serverTime: DateTime.parse(m['server_time'] as String),
       versions: _parseVersions(m['versions']),
     );
+  }
+
+  /// 解析 `skipped`：只保留非空字符串，坏数据/旧中继一律回落空数组。
+  static List<String> _parseSkipped(dynamic raw) {
+    if (raw is! List) return const <String>[];
+    return <String>[
+      for (final e in raw)
+        if (e is String && e.isNotEmpty) e,
+    ];
   }
 
   /// 把服务端 push 响应里的 `versions` 对象安全解析成 `<String,int>`。
@@ -360,6 +379,11 @@ class MockSyncApi implements SyncApi {
   /// push 历史（用于测试断言）。
   final List<List<SyncEnvelope>> pushHistory = [];
 
+  /// push 响应队列（测试用）：每次 [pushBatch] 消费队首；为空时走默认
+  /// 「全接受」。用于模拟「第一轮返回 skipped + versions 回写 authStart、
+  /// 第二轮全接受」这类多轮上行场景。
+  final List<SyncPushResult> pushResponseQueue = <SyncPushResult>[];
+
   /// 模拟 push 失败时触发（业务回调）。
   void Function(List<SyncEnvelope>)? onPushFailed;
 
@@ -369,6 +393,9 @@ class MockSyncApi implements SyncApi {
     if (pushShouldFail) {
       onPushFailed?.call(envelopes);
       throw const SyncApiException('mock failure', 500);
+    }
+    if (pushResponseQueue.isNotEmpty) {
+      return pushResponseQueue.removeAt(0);
     }
     return SyncPushResult(
       accepted: envelopes.length,

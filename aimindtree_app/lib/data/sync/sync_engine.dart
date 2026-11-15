@@ -30,6 +30,7 @@ import 'package:drift/drift.dart';
 import '../../core/logger.dart';
 import '../db/drift_database.dart';
 import 'sync_api.dart';
+import 'sync_json.dart';
 import 'sync_outbox.dart';
 import 'sync_row_map.dart';
 import 'sync_types.dart';
@@ -87,15 +88,27 @@ const Set<String> kSyncTableAllowlist = <String>{
 /// 万一失败也只丢一小批，重试成本低。
 const int kSnapshotMaxBatchCount = 200;
 
+/// 服务端 skipped 行的自动重推总轮数上限（含首轮）。
+///
+/// 第 1 轮被守卫跳过后，adoption 会把本地 version 抬到服务端 authStart，
+/// 刷新 outbox 行的 base_version / payload 后第 2 轮必然 `incoming >=
+/// authStart`。给 2 轮足以自愈；仍 skipped 就留 pending，不无限重试。
+const int kMaxSkippedRetryRounds = 2;
+
 /// 推送结果。
 class PushReport {
   const PushReport({
     required this.pushed,
     required this.failed,
     required this.serverTime,
+    this.skipped = 0,
   });
   final int pushed;
   final int failed;
+
+  /// 服务端「防陈旧覆盖」守卫跳过、经自动重推后仍未落库的条数。
+  /// 这些行保留在 outbox 的 pending 里，等下次同步再试。
+  final int skipped;
   final DateTime serverTime;
 }
 
@@ -126,9 +139,16 @@ class PullReport {
     required this.applied,
     required this.skipped,
     required this.serverTime,
+    this.keptLocal = 0,
   });
   final int applied;
+
+  /// 自回声跳过（本机自己上传的行）。
   final int skipped;
+
+  /// 拉到了、但 LWW 判定「保留本地」而**没有落库**的条数。
+  /// 与 [applied] 分开计数，避免「零写入也报应用 N 条」的假成功。
+  final int keptLocal;
   final DateTime serverTime;
 }
 
@@ -177,6 +197,58 @@ SyncEngine({
     int limit = 100,
     bool includeFailed = true,
     SyncApi? api,
+  }) {
+    return _pushWithRetry(
+      limit: limit,
+      includeFailed: includeFailed,
+      api: api,
+      round: 0,
+    );
+  }
+
+  /// 服务端返回 skipped 时，刷新这些行后自动重推，最多
+  /// [kMaxSkippedRetryRounds] 轮；仍 skipped 就留 pending 并记 warning。
+  ///
+  /// 为什么不直接标 failed：failed 行会被追加在新 pending 行之后，形成
+  /// `[新版, 旧版]` 批内乱序，中继的 `authStart` 批内不重读，旧行会以更高
+  /// 版本把旧正文写回云端（反向倒灌）。留 pending 才安全。
+  Future<PushReport> _pushWithRetry({
+    required int limit,
+    required bool includeFailed,
+    required SyncApi? api,
+    required int round,
+  }) async {
+    final report = await _pushOnce(
+      limit: limit,
+      includeFailed: includeFailed,
+      api: api,
+    );
+    if (report.skipped == 0 || round >= kMaxSkippedRetryRounds - 1) {
+      if (report.skipped != 0) {
+        _log.w('${report.skipped} 条仍被服务端跳过，保留 pending 等下次同步');
+      }
+      return report;
+    }
+    _log.i('${report.skipped} 条被服务端跳过，已刷新 payload/version，'
+        '自动重推第 ${round + 2} 轮');
+    final again = await _pushWithRetry(
+      limit: limit,
+      includeFailed: includeFailed,
+      api: api,
+      round: round + 1,
+    );
+    return PushReport(
+      pushed: report.pushed + again.pushed,
+      failed: report.failed + again.failed,
+      skipped: again.skipped,
+      serverTime: again.serverTime,
+    );
+  }
+
+  Future<PushReport> _pushOnce({
+    required int limit,
+    required bool includeFailed,
+    required SyncApi? api,
   }) async {
     final target = api ?? _api;
     // 字节预算 / 单条硬上限按后端取值（edgeone 收紧到 850KB）。
@@ -186,7 +258,16 @@ SyncEngine({
     final failed = includeFailed
         ? await _outbox.failedPending(limit: limit - pending.length)
         : <SyncOutboxRow>[];
-    final rows = [...pending, ...failed];
+    // 【必须】稳定按 baseVersion 升序：同键的旧行在前、新行在后。
+    // `[...pending, ...failed]` 会把之前 failed 的旧行追加在新 pending 行
+    // 之后；服务端 `authStart` 每键每批只读一次、守卫永远跟批前版本比，
+    // 于是 [v2, v1] 里 v1 只要 `v1 >= authStart` 也会被接受且算出更高的
+    // `newVer = running+1` → 旧正文以最高版本写回云端，对端 `_compare`
+    // 判「远端更新」主动 apply 旧正文。排成 [v1, v2] 后最后写入的是新行。
+    final rows = _stableSortBy<SyncOutboxRow>(
+      <SyncOutboxRow>[...pending, ...failed],
+      (r) => r.baseVersion,
+    );
     if (rows.isEmpty) {
       return PushReport(pushed: 0, failed: 0, serverTime: _epoch);
     }
@@ -201,14 +282,18 @@ SyncEngine({
         blockedTables.add(r.entityTable);
         continue;
       }
+      final payload = _decodePayload(r.payloadJson);
       final env = SyncEnvelope(
         deviceId: r.deviceId,
         entityTable: r.entityTable,
         entityId: r.entityId,
         op: SyncOp.parse(r.op),
-        payload: _decodePayload(r.payloadJson),
+        payload: payload,
         baseVersion: r.baseVersion,
-        updatedAt: r.createdAt, // 简化：用 outbox 创建时间（行真正 updatedAt 在 payload 里）
+        // 与 pushAll（:417 附近）口径一致：用行真正的 updated_at，而不是
+        // 发件箱创建时间。旧写法把「上传时间」带进 _hydrate，会污染
+        // _compare 的平局判定；JSON 往返后是 ISO 字符串，必须走 _dt。
+        updatedAt: _dt(payload?['updated_at']) ?? r.createdAt,
         deletedAt: _extractDeletedAt(r.entityTable, r.payloadJson),
       );
       final bytes = _envelopeBytes(env, r.payloadJson);
@@ -250,6 +335,7 @@ SyncEngine({
     // ---- 3. 逐批 push ----
     var pushed = 0;
     var failedCount = oversized.length;
+    var skippedCount = 0;
     var serverTime = DateTime.now().toUtc();
 
     for (final batch in batches) {
@@ -258,13 +344,41 @@ SyncEngine({
       try {
         final result =
             await target.pushBatch(<SyncEnvelope>[for (final e in batch) e.envelope]);
-        await _outbox.markPushed(ids);
+        final skippedKeys = result.skipped.toSet();
+        final doneIds = <int>[];
+        final skippedEntries = <_PushEntry>[];
+        for (final e in batch) {
+          final key = '${e.envelope.entityTable}:${e.envelope.entityId}';
+          if (skippedKeys.contains(key)) {
+            skippedEntries.add(e);
+          } else {
+            doneIds.add(e.row.id);
+          }
+        }
+        // 只有真正落库的行才标 done；skipped 的绝不能清掉。
+        if (doneIds.isNotEmpty) await _outbox.markPushed(doneIds);
         pushed += result.accepted;
         serverTime = result.serverTime;
         // 把服务端权威版本回写本地，使本地 version 与服务器对齐
         // （pull 侧不调版本，这是本地 version 的唯一权威来源）。
+        // 必须先于 skipped 行刷新：刷新要读到 adoption 之后的 version。
         if (result.versions.isNotEmpty) {
           await _adoptServerVersions(result.versions);
+        }
+        // skipped 行：用当前库整行重建 payload + base_version，重置 pending。
+        // adoption 已把本地 version 抬到 authStart，重推 incoming >= authStart。
+        for (final e in skippedEntries) {
+          final refreshed = await _refreshSkippedRow(e.row);
+          if (!refreshed) {
+            // 实体行已被物理删除，无法重建 payload：只重置 pending，
+            // 否则会永远卡在 sending（pending()/failedPending() 都取不到）。
+            await _outbox.markPending(<int>[e.row.id]);
+          }
+        }
+        skippedCount += skippedEntries.length;
+        if (skippedEntries.isNotEmpty) {
+          _log.w('${skippedEntries.length} 条被服务端防陈旧覆盖守卫跳过'
+              '（未落库），已刷新并重置 pending');
         }
         _log.i('push 成功 ${result.accepted} 条；server_time=${result.serverTime}');
       } on Object catch (e) {
@@ -277,8 +391,37 @@ SyncEngine({
     return PushReport(
       pushed: pushed,
       failed: failedCount,
+      skipped: skippedCount,
       serverTime: serverTime,
     );
+  }
+
+  /// 用当前库里的整行最终态刷新一条 skipped outbox 行，并重置为 pending。
+  /// 返回 false 表示实体行已不存在（调用方只重置 pending）。
+  Future<bool> _refreshSkippedRow(SyncOutboxRow row) async {
+    final payload = await _readRowPayload(row.entityTable, row.entityId);
+    if (payload == null) return false;
+    await _outbox.refreshAndRequeue(
+      id: row.id,
+      payloadJson: encodeSyncJson(payload),
+      baseVersion: (payload['version'] as num?)?.toInt() ?? row.baseVersion,
+    );
+    return true;
+  }
+
+  /// 按 (table,id) 读整行并转成 payload（供 [_refreshSkippedRow] 用）。
+  ///
+  /// [_readLocalRow] 对 15 张表已返回完整的 `*RowToMap`；唯独 `note_assets`
+  /// 是 LWW 轻量查询（只 3 列），重建 payload 必须整行 select，否则会把数 MB
+  /// 的 `data_base64` 丢掉。
+  Future<Map<String, dynamic>?> _readRowPayload(String table, String id) async {
+    if (table == 'note_assets') {
+      final r = await (_db.select(_db.noteAssets)
+            ..where((t) => t.id.equals(id)))
+          .getSingleOrNull();
+      return r == null ? null : noteAssetRowToMap(r);
+    }
+    return _readLocalRow(table, id);
   }
 
   /// 估算一条 envelope 序列化后的字节数（UTF-8）。
@@ -364,6 +507,7 @@ SyncEngine({
     final maxEnv = target.maxEnvelopeBytes;
     var pushed = 0;
     var failed = 0;
+    var skipped = 0;
     var serverTime = DateTime.now().toUtc();
 
     // 边读边发：缓冲到字节预算就整批下发，内存峰值 ≈ 一个批次（4MB）
@@ -373,8 +517,15 @@ SyncEngine({
 
     Future<void> flush() async {
       if (buffer.isEmpty) return;
-      final batches = _splitBatches<_SnapshotEntry>(
+      // 【必须】稳定按 baseVersion 升序，与 push() 同一口径：批内同键旧行
+      // 在前、新行在后，避免 [新版, 旧版] 倒灌（服务端 authStart 批内不重读，
+      // 旧行会被接受并以更高版本覆盖新行）。
+      final ordered = _stableSortBy<_SnapshotEntry>(
         buffer,
+        (e) => e.envelope.baseVersion,
+      );
+      final batches = _splitBatches<_SnapshotEntry>(
+        ordered,
         maxCount: kSnapshotMaxBatchCount,
         budgetBytes: budget,
       );
@@ -386,6 +537,13 @@ SyncEngine({
             <SyncEnvelope>[for (final e in batch) e.envelope],
           );
           pushed += result.accepted;
+          // 取舍：全量快照的 envelope 不经过 outbox，所以这里被跳过的行
+          // **没有重推路径**（只有 push()/pushDrain 带 _pushWithRetry）。
+          // 这是可接受的：用户刚编辑的行已在先跑的 pushDrain 里自愈；
+          // 快照里被跳过的多半是「云端版本较新、本地落后」的行，跳过本来
+          // 就是正确行为，不该用本地旧数据覆盖云端——正确动作是「拉取」
+          // 对齐。这里只如实计数，让设置页不再把它算进成功数。
+          skipped += result.skipped.length;
           serverTime = result.serverTime;
           // 把服务端权威版本回写本地（pull 侧不调版本）。
           if (result.versions.isNotEmpty) {
@@ -440,8 +598,13 @@ SyncEngine({
     }
     await flush();
 
-    _log.i('pushAll 完成：pushed=$pushed failed=$failed');
-    return PushReport(pushed: pushed, failed: failed, serverTime: serverTime);
+    _log.i('pushAll 完成：pushed=$pushed failed=$failed skipped=$skipped');
+    return PushReport(
+      pushed: pushed,
+      failed: failed,
+      skipped: skipped,
+      serverTime: serverTime,
+    );
   }
 
   /// 读一张表的一页并转成 payload 列表（按 id 升序保证分页稳定）。
@@ -581,6 +744,7 @@ SyncEngine({
   }) async {
     var pushed = 0;
     var failed = 0;
+    var skipped = 0;
     var serverTime = DateTime.now().toUtc();
     var idleRounds = 0;
 
@@ -588,6 +752,7 @@ SyncEngine({
       final report = await push(api: api, limit: batchLimit);
       pushed += report.pushed;
       failed += report.failed;
+      skipped = report.skipped;
       // 空 outbox 时 push() 早返回 epoch，别让它覆盖真实的服务端时间。
       if (report.pushed > 0 || report.failed > 0) {
         serverTime = report.serverTime;
@@ -619,8 +784,13 @@ SyncEngine({
       }
     }
 
-    _log.i('pushDrain 完成：pushed=$pushed failed=$failed');
-    return PushReport(pushed: pushed, failed: failed, serverTime: serverTime);
+    _log.i('pushDrain 完成：pushed=$pushed failed=$failed skipped=$skipped');
+    return PushReport(
+      pushed: pushed,
+      failed: failed,
+      skipped: skipped,
+      serverTime: serverTime,
+    );
   }
 
   // ============ Pull ============
@@ -634,20 +804,27 @@ SyncEngine({
     final result = await target.pullSince(_lastPulledAt);
     var applied = 0;
     var skipped = 0;
+    var keptLocal = 0;
     for (final env in result.envelopes) {
       // 自回声：本机产生的变更不需要再次 merge（外层 push 已经应用）
       if (env.deviceId == deviceId) {
         skipped++;
         continue;
       }
-      await _merge(env);
-      applied++;
+      final outcome = await _merge(env);
+      if (outcome == _MergeOutcome.keptLocal) {
+        keptLocal++;
+      } else {
+        applied++;
+      }
     }
     _lastPulledAt = result.serverTime;
-    _log.i('pull applied=$applied skipped=$skipped server_time=${result.serverTime}');
+    _log.i('pull applied=$applied skipped=$skipped keptLocal=$keptLocal '
+        'server_time=${result.serverTime}');
     return PullReport(
       applied: applied,
       skipped: skipped,
+      keptLocal: keptLocal,
       serverTime: result.serverTime,
     );
   }
@@ -704,24 +881,25 @@ SyncEngine({
   // │ ==                          │ remote.updatedAt 晚则 apply │
   // └─────────────────────────────┴────────────────────────┘
 
-  Future<void> _merge(SyncEnvelope env) async {
+  Future<_MergeOutcome> _merge(SyncEnvelope env) async {
     final local = await _readLocalVersion(env.entityTable, env.entityId);
     if (env.deletedAt != null) {
       // tombstone：硬删本地
       await _deleteLocal(env.entityTable, env.entityId);
-      return;
+      return _MergeOutcome.deleted;
     }
     if (local == null) {
       // 本地无记录，直接 apply
       await _applyInsert(env);
-      return;
+      return _MergeOutcome.inserted;
     }
     final cmp = _compare(env, local);
     if (cmp > 0) {
       await _applyUpdate(env);
-    } else {
-      _log.d('LWW keep local：${env.entityTable}/${env.entityId}');
+      return _MergeOutcome.applied;
     }
+    _log.d('LWW keep local：${env.entityTable}/${env.entityId}');
+    return _MergeOutcome.keptLocal;
   }
 
   /// 返回 -1 / 0 / 1：remote vs local。
@@ -1394,6 +1572,23 @@ class _LocalVer {
   const _LocalVer({required this.version, required this.updatedAt});
   final int version;
   final DateTime updatedAt;
+}
+
+/// [SyncEngine._merge] 的结果：区分「真正落库」与「LWW 保留本地」。
+/// 只有前三者计入 [PullReport.applied]，避免零写入也报「应用 N 条」。
+enum _MergeOutcome { inserted, applied, deleted, keptLocal }
+
+/// 稳定地按 [key] 升序排序：相等元素保持原顺序（Dart 的 `List.sort` 不稳定）。
+/// 批内 envelope 必须用它排，保证同 baseVersion 的行不因排序抖动而乱序。
+List<T> _stableSortBy<T>(List<T> src, int Function(T) key) {
+  final indexed = <({int index, T value})>[
+    for (var i = 0; i < src.length; i++) (index: i, value: src[i]),
+  ];
+  indexed.sort((a, b) {
+    final cmp = key(a.value).compareTo(key(b.value));
+    return cmp != 0 ? cmp : a.index.compareTo(b.index);
+  });
+  return <T>[for (final e in indexed) e.value];
 }
 
 /// 「带预估字节数」的待发条目（[SyncEngine._splitBatches] 的切批依据）。

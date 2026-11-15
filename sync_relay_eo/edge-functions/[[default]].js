@@ -9,7 +9,7 @@
  * - ``POST /auth/login``     ``{username, password}`` → ``{user_id, token}``
  *
  * 同步（均须 ``Authorization: Bearer <token>``，按 token 归属的 user_id 隔离）：
- * - ``POST /sync/push``   ``{device_id, envelopes:[...]}`` → ``{received, accepted, server_time}``
+ * - ``POST /sync/push``   ``{device_id, envelopes:[...]}`` → ``{received, accepted, skipped, server_time, versions}``
  * - ``POST /sync/pull``   ``{device_id, since|null}``      → ``{envelopes:[...], server_time}``
  * - ``GET  /sync/manifest``                             → ``{count, max_version}``
  *
@@ -357,6 +357,8 @@ async function handlePush(request, kv, ownerId) {
   const serverTime = nowIso();
   // 服务端权威版本号映射：`<entity_table>:<entity_id>` → 新分配的版本。
   const versions = {};
+  // 被防陈旧守卫跳过（未写入）的键，格式 `<entity_table>:<entity_id>`。
+  const skipped = [];
   // 本批开始前各键的权威版本（每个 key 只从存储读一次，作为陈旧覆盖判定基准）；
   // running 记录本批内该键已分配到的版本，供同一批次内同键多 envelope 链式递增。
   const authStart = {};
@@ -409,16 +411,27 @@ async function handlePush(request, kv, ownerId) {
         }),
       );
     } else {
-      versions[k2] = authStart[k2];
+      skipped.push(k2);
+      // 同批该 key 前面已有 accepted envelope 时，versions[k2] 已被抬到更高版本；
+      // 这里取 max 防止把已分配的高版本回退成批前 authStart（否则 App adopt 到
+      // 低于云端实际版本的值，下一轮更容易再次 stale）。
+      versions[k2] = Math.max(versions[k2] ?? 0, authStart[k2]);
       // 跳过写入：保留服务端现有 payload / server_time（不覆盖、不递增）。
+      // 不写 store、也不刷新 server_time：自愈靠 App 收到 skipped 后 adoption
+      // 对齐 base_version → 自动重推，重推命中覆盖分支才写入新 payload + 新
+      // server_time。若在此刷新 server_time，对端增量 pull 会拿到「云端旧
+      // payload + 合法高 base_version」，LWW 判远端更新后主动把旧正文写下去，
+      // 反而扩大数据丢失；让旧行暂留 since 游标之外、等重推完成更安全。
+      // 读改写 blob 还会引入并发 CAS 竞态。
     }
   }
 
-  // 双写 received 与 accepted：App 端 HttpSyncApi 优先读 received，
-  // 旧版 App（只读 accepted）也能拿到正确条数。
+  // 双写 received 与 accepted：新版 App 优先读 accepted（真实写入数），
+  // 缺该字段时回落 received 以兼容旧中继；received 始终为收到的 envelope 总数。
   return jsonResponse({
     received: envelopes.length,
-    accepted: envelopes.length,
+    accepted: envelopes.length - skipped.length,
+    skipped,
     server_time: serverTime,
     versions,
   });

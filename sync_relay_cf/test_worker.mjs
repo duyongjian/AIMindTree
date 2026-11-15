@@ -652,6 +652,139 @@ async function run() {
     assert(u.body.users.length === 100, 'users 列表最多 100 条');
   }
 
+  // --- 防陈旧覆盖 · 契约可区分化（skipped / accepted） ---
+  {
+    const env3 = makeEnv();
+    const reg = await json(await post('/auth/register', { username: 'stale', password: 'stalewq7731' }, env3, ''));
+    const token = reg.body.token;
+    const mk = (id, v, title) => ({
+      device_id: 'devS', entity_table: 'notes', entity_id: id,
+      op: 'upsert', payload: { title }, base_version: v,
+      updated_at: '2026-06-01T00:00:00.000Z', deleted_at: null,
+    });
+
+    // 单条陈旧：先把云端推到版本 3，再用落后声明推同一 key。
+    await post('/sync/push', { device_id: 'devS', envelopes: [mk('n-stale', 2, 'new')] }, env3, token);
+    const r = await json(await post('/sync/push', {
+      device_id: 'devS', envelopes: [mk('n-stale', 1, 'OLD')],
+    }, env3, token));
+    assert(r.status === 200, '陈旧 push 仍返回 200');
+    assert(r.body.received === 1 && r.body.accepted === 0, '陈旧 push received=1 / accepted=0');
+    assert(Array.isArray(r.body.skipped) && JSON.stringify(r.body.skipped) === JSON.stringify(['notes:n-stale']), '陈旧 push skipped=["notes:n-stale"]');
+    assert(r.body.versions['notes:n-stale'] === 3, '陈旧 push 回写服务端权威版本 3');
+    const m = await json(await get('/sync/manifest', env3, token));
+    assert(m.body.count === 1 && m.body.max_version === 3, '陈旧 push 不递增版本（保持 3）');
+    const pull = await json(await post('/sync/pull', { device_id: 'devS', since: null }, env3, token));
+    const s = pull.body.envelopes.find((e) => e.entity_id === 'n-stale');
+    assert(s && s.payload.title === 'new', '云端较新内容 new 未被陈旧 push 覆盖');
+
+    // 混合批次：1 条接受 + 1 条陈旧。
+    await post('/sync/push', {
+      device_id: 'devS',
+      envelopes: [mk('mix-ok', 5, 'v5'), mk('mix-stale', 5, 'v5')],
+    }, env3, token);
+    const r2 = await json(await post('/sync/push', {
+      device_id: 'devS',
+      envelopes: [mk('mix-ok', 6, 'v6'), mk('mix-stale', 1, 'OLD')],
+    }, env3, token));
+    assert(r2.body.received === 2, '混合批次 received=2');
+    assert(r2.body.accepted === 1, '混合批次 accepted=1（只计真实写入）');
+    assert(Array.isArray(r2.body.skipped) && JSON.stringify(r2.body.skipped) === JSON.stringify(['notes:mix-stale']), '混合批次 skipped 只含 ["notes:mix-stale"]');
+    assert(r2.body.versions['notes:mix-ok'] === 7 && r2.body.versions['notes:mix-stale'] === 6, '混合批次 versions：mix-ok=7 / mix-stale=6');
+  }
+
+  // --- 同批「先 accepted 后 stale」：versions 不得回退到 existing ---
+  {
+    const env4 = makeEnv();
+    const reg = await json(await post('/auth/register', { username: 'regress', password: 'pzkdmv8260' }, env4, ''));
+    const token = reg.body.token;
+    const mk = (v, title) => ({
+      device_id: 'devR', entity_table: 'notes', entity_id: 'n-regress',
+      op: 'upsert', payload: { title }, base_version: v,
+      updated_at: '2026-06-01T00:00:00.000Z', deleted_at: null,
+    });
+    // 先把云端权威版本推到 5。
+    await post('/sync/push', { device_id: 'devR', envelopes: [mk(4, 'seed')] }, env4, token);
+    // 同一批：第一条 bv=10 被接受（versions 抬到 11），第二条 bv=1 陈旧。
+    const r = await json(await post('/sync/push', {
+      device_id: 'devR', envelopes: [mk(10, 'new'), mk(1, 'OLD')],
+    }, env4, token));
+    assert(r.body.accepted === 1, '同批先接受后陈旧 accepted=1');
+    assert(Array.isArray(r.body.skipped) && JSON.stringify(r.body.skipped) === JSON.stringify(['notes:n-regress']), '同批先接受后陈旧 skipped=["notes:n-regress"]');
+    assert(r.body.versions['notes:n-regress'] === 11, 'versions 不回退：notes:n-regress=11（而非批前 5）');
+    const m = await json(await get('/sync/manifest', env4, token));
+    assert(m.body.max_version === 11, '云端实际版本保持 11');
+  }
+
+  // --- 带非空 since 的增量 pull：stale 行因旧 server_time 被游标过滤 ---
+  {
+    const env5 = makeEnv();
+    const reg = await json(await post('/auth/register', { username: 'since', password: 'wqmdzt7148' }, env5, ''));
+    const token = reg.body.token;
+    const mk = (v, title) => ({
+      device_id: 'devI', entity_table: 'notes', entity_id: 'n-inc',
+      op: 'upsert', payload: { title }, base_version: v,
+      updated_at: '2026-06-01T00:00:00.000Z', deleted_at: null,
+    });
+    // 首次 push 落库（server_time = now），再把该行的 server_time 改写成很久以前，
+    // 模拟「云端这条记录是很早以前写的、本轮 stale push 没有刷新它」。
+    await post('/sync/push', { device_id: 'devI', envelopes: [mk(5, 'cloud-new')] }, env5, token);
+    for (const [k, row] of env5.DB.tables.sync_envelopes) {
+      if (row.entity_id === 'n-inc') {
+        env5.DB.tables.sync_envelopes.set(k, { ...row, server_time: '2020-01-01T00:00:00.000Z' });
+      }
+    }
+    // 陈旧 push：跳过 INSERT，行的 server_time 仍是 2020。
+    const s = await json(await post('/sync/push', {
+      device_id: 'devI', envelopes: [mk(1, 'OLD')],
+    }, env5, token));
+    assert(s.body.accepted === 0 && JSON.stringify(s.body.skipped) === JSON.stringify(['notes:n-inc']), 'since 用例的陈旧 push accepted=0 / skipped 正确');
+    // 非空 since 的增量 pull：旧 server_time 落在游标之外 → 该行不返回。
+    const inc = await json(await post('/sync/pull', { device_id: 'devI', since: '2021-01-01T00:00:00.000Z' }, env5, token));
+    assert(Array.isArray(inc.body.envelopes) && !inc.body.envelopes.some((e) => e.entity_id === 'n-inc'), '增量 pull（非空 since）stale 行不返回');
+    // 全量 pull 仍能取到云端较新内容，证明行未被删除、只是游标外。
+    const full = await json(await post('/sync/pull', { device_id: 'devI', since: null }, env5, token));
+    const row = full.body.envelopes.find((e) => e.entity_id === 'n-inc');
+    assert(row && row.payload.title === 'cloud-new', '全量 pull 仍返回云端较新内容 cloud-new');
+    // App 收到 skipped 后 adopt 到云端权威版本 6，再以 base_version=6 重推：
+    // 命中覆盖分支 → 写入新 payload + 新 server_time。相同 since 再 pull 应能取到。
+    const re = await json(await post('/sync/push', {
+      device_id: 'devI', envelopes: [mk(6, 'retry-new')],
+    }, env5, token));
+    assert(re.body.accepted === 1 && Array.isArray(re.body.skipped) && re.body.skipped.length === 0, '重推被接受（accepted=1 / skipped 空）');
+    const inc2 = await json(await post('/sync/pull', { device_id: 'devI', since: '2021-01-01T00:00:00.000Z' }, env5, token));
+    const row2 = inc2.body.envelopes.find((e) => e.entity_id === 'n-inc');
+    assert(!!row2, '重推后相同 since 增量 pull 返回该行');
+    assert(row2 && row2.payload.title === 'retry-new', '重推后 payload 是新内容 retry-new');
+    // pull 响应不含 server_time（worker.js:203-213 rowToEnvelope），直接查 D1 行本身：
+    // 证明重推确实写入了新时间戳，而不是沿用被改写成 2020 的旧值。
+    let storedTime = null;
+    for (const [, r] of env5.DB.tables.sync_envelopes) {
+      if (r.entity_id === 'n-inc') storedTime = r.server_time;
+    }
+    assert(typeof storedTime === 'string' && storedTime > '2021-01-01T00:00:00.000Z', '重推后存储行 server_time 严格晚于 2021');
+  }
+
+  // --- 同批同键「先高后低」边界：authStart=6，[bv=6, bv=1] → versions 不回退到 6，应为 7 ---
+  {
+    const env6 = makeEnv();
+    const reg = await json(await post('/auth/register', { username: 'edge', password: 'kdmzt7148' }, env6, ''));
+    const token = reg.body.token;
+    const mk = (v, title) => ({
+      device_id: 'devE', entity_table: 'notes', entity_id: 'x',
+      op: 'upsert', payload: { title }, base_version: v,
+      updated_at: '2026-06-01T00:00:00.000Z', deleted_at: null,
+    });
+    // 先把云端权威版本推到 6。
+    await post('/sync/push', { device_id: 'devE', envelopes: [mk(5, 'seed')] }, env6, token);
+    const r = await json(await post('/sync/push', {
+      device_id: 'devE', envelopes: [mk(6, 'high'), mk(1, 'LOW')],
+    }, env6, token));
+    assert(r.body.accepted === 1, 'authStart=6 边界 accepted=1');
+    assert(Array.isArray(r.body.skipped) && JSON.stringify(r.body.skipped) === JSON.stringify(['notes:x']), 'authStart=6 边界 skipped=["notes:x"]');
+    assert(r.body.versions['notes:x'] === 7, 'authStart=6 边界 versions["notes:x"]=7（不回退到 6）');
+  }
+
   console.log(`\n结果：通过 ${passed}，失败 ${failed}`);
   if (failed > 0) process.exit(1);
 }

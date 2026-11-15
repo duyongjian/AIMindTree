@@ -478,14 +478,21 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
         final snap = await engine.pushAll(api: api);
         final total = inc.pushed + snap.pushed;
         final failed = inc.failed + snap.failed;
+        // skipped = 服务端「防陈旧覆盖」守卫跳过、未真正落库的条数。
+        // 既不能算进成功数，也不能一律承诺「待重推」：pushAll 快照不经
+        // outbox、没有重推路径，正确动作是执行「拉取」对齐云端。
+        final skipped = inc.skipped + snap.skipped;
         await widget.statusStore.setLastPushAt(DateTime.now().toUtc());
         await widget.statusStore.setStatus('ok');
         if (!mounted) return;
         final failedNote = failed > 0 ? '，失败 $failed 条' : '';
+        final skippedNote = skipped > 0
+            ? '，跳过 $skipped 条（云端版本较新，未覆盖；请执行「拉取」对齐）'
+            : '';
         _snack(
           '上传到 ${backend.label} 完成：增量 ${inc.pushed} 条 + 快照 ${snap.pushed} 条，'
-          '共 $total 条$failedNote',
-          ok: failed == 0,
+          '共 $total 条$failedNote$skippedNote',
+          ok: failed == 0 && skipped == 0,
         );
       } else {
         final report = await engine.pull(api: api);
@@ -497,6 +504,7 @@ class _SyncSettingsSectionState extends State<SyncSettingsSection> {
         // 让人误以为拉取失败。
         _snack(
           '从 ${backend.label} 拉取完成：应用 ${report.applied} 条变更，'
+          'LWW 保留 ${report.keptLocal} 条，'
           '跳过 ${report.skipped} 条（本机自己上传的）',
         );
       }
