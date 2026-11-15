@@ -401,29 +401,35 @@ class _TeacherPageState extends State<TeacherPage> {
 
   @override
   void dispose() {
-    // 会话页关闭即撤掉「页面开着」那一行（kp:{id} 锁一并清掉，见
-    // releaseInteractive）—— 后台生成（kp:{id}:chat）不受影响、继续在
-    // runDetached 里跑，回来重开本页能在 DB 读到结果（P1 修复：退出页面
-    // 不再卡住「已打开」）。
-    if (_sessionTicket.isNotEmpty) {
+    // 仍有关联后台生成（kp:{id}:chat 锁被占）→ 会话行先不撤：改文案为「已退出 ·
+    // 生成中」，等该生成终态时由 _jobSub 撤掉，保证用户退出老师模式后仍能
+    // 在托盘看到后台任务（修复：退出会话界面后任务队列不显示）。
+    if (_sessionTicket.isNotEmpty && widget.jobs.isLocked(_chatLockKey)) {
+      widget.jobs.setInteractiveMessage(_sessionTicket, '老师模式已退出 · 生成中');
+      // _jobSub 保持监听（不在此 cancel），生成终态时撤会话行；未订阅则临时建一个。
+      _jobSub ??= widget.jobs.terminalStream.listen(_onChatJobTerminal);
+    } else {
       widget.jobs.releaseInteractive(_sessionTicket);
+      _jobSub?.cancel();
+      _jobSub = null;
     }
-    _jobSub?.cancel();
-    _jobSub = null;
     _input.dispose();
     _scroll.dispose();
     super.dispose();
   }
 
-  /// 后台生成（`kp:{id}:chat`）终态：页面还活着就补拉最新消息；已销毁则
-  /// 什么都不做（DB 已落库，重开本页的 _bootstrap 会读到）。
+  /// 后台生成（`kp:{id}:chat`）终态时的统一处理：会话页还活着就补拉消息；
+  /// 已销毁（mounted=false）则撤掉会话托盘行，避免它永远赖着。
   void _onChatJobTerminal(AiJob job) {
     if (job.resourceKey != _chatLockKey) return;
-    if (!mounted) return;
-    // 本页重进后 `_askBusy` 是按锁恢复的（见 _bootstrap），任务落终态就得
-    // 自己解开 —— 那个任务的 finally 属于上一个页面实例，管不到这里。
-    if (_askBusy) setState(() => _askBusy = false);
-    unawaited(_reloadMessages());
+    if (mounted) {
+      unawaited(_reloadMessages());
+    } else {
+      widget.jobs.releaseInteractive(_sessionTicket);
+      _jobSub?.cancel();
+      _jobSub = null;
+    }
+  }
   }
 
   @override
