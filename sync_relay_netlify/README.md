@@ -71,7 +71,7 @@ sync_relay_netlify/
 │   └── functions/
 │       └── sync.mjs         # 生产入口：Blobs(API 模式) → relay 接口 → handleFetch
 ├── relay.js                 # 存储无关核心逻辑（契约 + 鉴权 + PBKDF2），可内存测试
-├── test_protocol.mjs        # 协议冒烟测试（39 断言，零依赖）
+├── test_protocol.mjs        # 协议冒烟测试（132 断言，零依赖）
 ├── netlify.toml             # functions 目录 + esbuild + rewrite 路由 + 占位 publish
 ├── package.json             # type:module，依赖 @netlify/blobs
 ├── public/.gitkeep          # 占位发布目录
@@ -86,7 +86,7 @@ sync_relay_netlify/
 
 ```bash
 cd sync_relay_netlify
-node test_protocol.mjs        # 期望：通过 97，失败 0
+node test_protocol.mjs        # 期望：通过 132，失败 0
 ```
 
 > 注意：本地 `node` 测试用的是内存 store，**不验证 @netlify/blobs 本身**。本地
@@ -197,9 +197,11 @@ NETLIFY_AUTH_TOKEN=<token> ./node_modules/.bin/netlify env:set \
 
 - `POST /auth/register` `{username,password}` → `{user_id,token}`
 - `POST /auth/login` `{username,password}` → `{user_id,token}`
-- `POST /sync/push` `{device_id,envelopes:[...]}` → `{received,accepted,server_time}`
+- `POST /sync/push` `{device_id,envelopes:[...]}` → `{received,accepted,skipped,server_time,versions}`
 - `POST /sync/pull` `{device_id,since|null}` → `{envelopes:[...],server_time}`
-- `GET  /sync/manifest` → `{count}`
+- `GET  /sync/manifest` → `{count,max_version}`
+
+`accepted` 是**真正写入**的条数（`envelopes.length - skipped.length`）；`skipped` 是被「防陈旧覆盖」守卫跳过、未落库的 `<entity_table>:<entity_id>` 列表。旧中继不返回这两个字段时，App 回落 `received` / 空列表。
 
 所有 `/sync/*` 需 `Authorization: Bearer <token>`。
 
