@@ -32,6 +32,20 @@
 
 ---
 
+## 📷 界面实览
+
+> 以下为 Windows 桌面端真实运行截图（示例笔记为「高等数学」）。
+
+| 画布知识树 <br> 知识点节点 · 前置连线 · 掌握度色标 | 块级笔记编辑器 <br> 工具栏 · 底部自动提取的知识点 |
+|:---:|:---:|
+| <img src="docs/images/screen-01-canvas.png" alt="画布知识树界面" width="100%" /> | <img src="docs/images/screen-02-note-editor.png" alt="笔记编辑器界面" width="100%" /> |
+
+| 老师模式 <br> 逐点讲解 · 随时追问 | 设置 · 同步 <br> 后端切换 · 上传/拉取 · 数据版本 |
+|:---:|:---:|
+| <img src="docs/images/screen-03-teacher-mode.png" alt="老师模式界面" width="100%" /> | <img src="docs/images/screen-04-settings-sync.png" alt="设置同步界面" width="100%" /> |
+
+---
+
 ## ✨ 特色功能一览
 
 ### 🗺️ 画布知识树 —— 把抽象关系变成可动手整理的地图
@@ -51,7 +65,7 @@ T1–T15 任务体系覆盖知识提取（T1）、前置知识推断（T3，按 
 
 ### 🔐 安全与同步 —— 密钥不出本机，数据自己掌控
 
-API Key 只存本地 SecretStore，配置只保留 `api_key_ref` 引用名、不落明文，App 调用服务时只传引用、**默认不参与同步**。跨设备同步由你在设置页**手动**触发上传 / 拉取：Outbox 队列 + LWW 冲突消解 + Tombstone 软删，冲突在行级做内联合并而非整篇覆盖；Cloudflare / EdgeOne / Netlify 三套中继共享一致的 HTTP 契约。
+API Key 只存本地 SecretStore，配置只保留 `api_key_ref` 引用名、不落明文，App 调用服务时只传引用、**默认不参与同步**。跨设备同步以**手动**为主：设置页点「上传 / 拉取」即可，也可按需打开「自动同步」开关（默认关闭）；底层是 Outbox 队列 + LWW 冲突消解 + Tombstone 软删，冲突在行级做内联合并而非整篇覆盖；Cloudflare / EdgeOne / Netlify 三套中继共享一致的 HTTP 契约。
 
 <p align="center">
   <img src="docs/images/03-sync-security.png" alt="AIMindTree 安全与同步" width="92%" />
