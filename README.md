@@ -15,6 +15,11 @@
 
 </div>
 
+<p align="center">
+  <img src="docs/images/01-knowledge-tree.png" alt="AIMindTree 画布知识树" width="92%" />
+</p>
+<p align="center"><sub>▲ 画布知识树：AI 理清前置关系，掌握度一目了然，追问沉淀成卡片</sub></p>
+
 ---
 
 ## 🤔 为什么做 AIMindTree
@@ -27,16 +32,33 @@
 
 ---
 
-## ✨ 核心特性
+## ✨ 特色功能一览
 
-- ✍️ **块级 WYSIWYG 笔记编辑器** —— 正文以 Markdown 纯文本（`content_md`）存储，11 种内容块自由组合，未编辑块原文字节直通。
-- 🌱 **AI 自动长出结构** —— T1–T15 任务体系覆盖知识提取、前置知识推断、节点连线、问答、作业出题，从一篇笔记长成一张知识网络。
-- 🗺️ **画布知识树** —— 缩放、平移、节点拖拽、连线、框选、网格吸附，把抽象的知识关系变成可动手整理的地图。
-- 👨‍🏫 **每个知识点一位 AI 老师** —— 逐点对话、随堂提问，追问的结论直接沉淀成画布卡片。
-- 🔄 **跨设备同步（手动）** —— Outbox + LWW + Tombstone + 冲突行级内联合并，16 张表参与同步，三套中继共享一致的 HTTP 契约。
-- 🤖 **本地与云端模型自由切换** —— 本地 llama.cpp（Qwen3.8-27B）离线可用，也可接 MiniMax / OpenAI / Ollama / Dify。
-- 🔐 **密钥不出本机** —— 密钥只存本地 SecretStore，配置仅保留引用名，API Key 默认不同步。
-- 📦 **三端发布脚本开箱即用** —— Android（`--split-per-abi` 三个架构包）、Windows、iOS（Codemagic）构建脚本齐备。
+### 🗺️ 画布知识树 —— 把抽象关系变成可动手整理的地图
+
+知识点落在可自由缩放、平移的画布上，拖动节点、连出前置关系，支持**框选多节点**与**网格吸附**。掌握度用颜色区分，某知识点被标为「未掌握」时，依赖它的后继会**级联降级**并打上「前置不足」角标。你在老师模式里的每一次追问，都会变成贴在旁边的一张小卡片，永久沉淀进知识结构。
+
+> ✍️ 配套的块级 WYSIWYG 编辑器正文以纯 Markdown 存储（11 种内容块），坚守 **L1 红线**：未编辑块原文字节直通、序列化往返幂等——「打开不改也不会变脏」。
+
+### 🤖 AI 自动长结构 —— 从一篇笔记到一张知识网络
+
+T1–T15 任务体系覆盖知识提取（T1）、前置知识推断（T3，按 low / mid / high / custom 深度）、节点连线、问答、作业出题。每个知识点都带 `source_quote` 原文锚点，**无锚点视为幻觉、不得持久化**。模型可插拔：本地 llama.cpp（Qwen3.8-27B）离线可用，也可切 MiniMax / OpenAI / Ollama / Dify。
+
+<p align="center">
+  <img src="docs/images/02-ai-pipeline.png" alt="AIMindTree AI 能力流水线" width="92%" />
+</p>
+<p align="center"><sub>▲ AI 能力主线：写笔记 → 提取知识点 → 补前置 → 老师模式 → 追问沉淀</sub></p>
+
+### 🔐 安全与同步 —— 密钥不出本机，数据自己掌控
+
+API Key 只存本地 SecretStore，配置只保留 `api_key_ref` 引用名、不落明文，App 调用服务时只传引用、**默认不参与同步**。跨设备同步由你在设置页**手动**触发上传 / 拉取：Outbox 队列 + LWW 冲突消解 + Tombstone 软删，冲突在行级做内联合并而非整篇覆盖；Cloudflare / EdgeOne / Netlify 三套中继共享一致的 HTTP 契约。
+
+<p align="center">
+  <img src="docs/images/03-sync-security.png" alt="AIMindTree 安全与同步" width="92%" />
+</p>
+<p align="center"><sub>▲ 安全与同步：密钥边界清晰 + 手动可控的三中继同步</sub></p>
+
+> 📦 三端发布脚本开箱即用：Android（`--split-per-abi` 三个架构包）、Windows、iOS（Codemagic）。
 
 ---
 

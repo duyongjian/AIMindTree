@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8"><style>
+*{box-sizing:border-box}
+body{margin:0;width:1200px;height:640px;background:linear-gradient(135deg,#0a1628,#12233f 55%,#0d1b32);color:#fff;font-family:'Microsoft YaHei','Segoe UI',sans-serif;overflow:hidden;position:relative}
+body:before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 20% 15%,rgba(16,185,129,.13),transparent 42%),radial-gradient(circle at 82% 82%,rgba(56,189,248,.12),transparent 45%)}
+.head{position:relative;padding:32px 48px 0;z-index:2}
+.badge{display:inline-flex;align-items:center;gap:9px;background:rgba(16,185,129,.14);border:1px solid rgba(52,211,153,.4);color:#6ee7b7;font-size:15px;font-weight:700;padding:7px 15px;border-radius:20px}
+h1{font-size:38px;margin:14px 0 5px}
+h1 .g{background:linear-gradient(90deg,#34d399,#38bdf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.sub{color:#94a3b8;font-size:17px;margin:0}
+.cols{position:absolute;left:48px;right:48px;top:160px;bottom:52px;display:flex;gap:22px;z-index:2}
+.panel{flex:1;border-radius:20px;padding:24px 24px;position:relative;box-shadow:0 14px 36px rgba(0,0,0,.3)}
+.sec{background:linear-gradient(160deg,rgba(16,185,129,.1),rgba(10,25,44,.85));border:1px solid rgba(52,211,153,.32)}
+.syn{background:linear-gradient(160deg,rgba(56,189,248,.1),rgba(10,25,44,.85));border:1px solid rgba(96,165,250,.32)}
+.pt{font-size:20px;font-weight:800;margin-bottom:18px;display:flex;align-items:center;gap:10px}
+.locked{margin:6px 0 16px;background:rgba(15,30,52,.85);border:1.5px solid rgba(52,211,153,.4);border-radius:14px;padding:16px;display:flex;align-items:center;gap:14px}
+.lockico{font-size:34px}
+.locked .lt{font-size:15px;font-weight:800;color:#6ee7b7}
+.locked .lp{font-size:12.5px;color:#a7b4c6;margin-top:5px;line-height:1.5}
+.rows{display:flex;flex-direction:column;gap:9px}
+.row{display:flex;align-items:flex-start;gap:10px;font-size:13.5px;color:#cbd5e1;line-height:1.45}
+.row .k{color:#34d399;font-weight:800;flex:none}
+.device{display:flex;align-items:center;justify-content:center;gap:16px;margin:2px 0 18px}
+.dev{background:rgba(15,30,52,.9);border:1.5px solid rgba(96,165,250,.45);border-radius:12px;padding:12px 16px;text-align:center;font-size:13px;font-weight:700}
+.dev small{display:block;color:#7dd3fc;font-size:11px;font-weight:400;margin-top:4px}
+.syncarrow{font-size:24px;color:#64748b;position:relative}
+.syncarrow:after{content:"手动";position:absolute;top:-16px;left:50%;transform:translateX(-50%);font-size:10px;color:#fbbf24;white-space:nowrap}
+.relays{display:flex;gap:10px;margin-bottom:16px}
+.relay{flex:1;text-align:center;background:rgba(15,30,52,.85);border:1px solid rgba(148,163,184,.28);border-radius:12px;padding:13px 6px;font-size:12.5px;font-weight:700;line-height:1.35}
+.relay small{display:block;color:#94a3b8;font-size:10.5px;font-weight:400;margin-top:5px}
+.mech{display:flex;flex-wrap:wrap;gap:8px}
+.chip{background:rgba(96,165,250,.12);border:1px solid rgba(96,165,250,.3);color:#bfdbfe;font-size:12px;padding:6px 11px;border-radius:16px;font-weight:700}
+.chip.g{background:rgba(52,211,153,.12);border-color:rgba(52,211,153,.3);color:#a7f3d0}
+.foot{position:absolute;left:0;right:0;bottom:16px;text-align:center;color:#5b6b82;font-size:12px;z-index:2}
+</style></head><body>
+<div class="head">
+  <div class="badge">🔐 AIMindTree · 安全与同步</div>
+  <h1>密钥不出本机，<span class="g">数据自己掌控</span></h1>
+  <p class="sub">密钥边界清晰 + 手动可控的跨设备同步，隐私与便利兼得</p>
+</div>
+
+<div class="cols">
+  <div class="panel sec">
+    <div class="pt">🛡️ 密钥边界</div>
+    <div class="locked">
+      <div class="lockico">🔒</div>
+      <div>
+        <div class="lt">SecretStore · 仅存本机</div>
+        <div class="lp">API Key 只保存在设备本地安全存储，App 与数据库都拿不到明文。</div>
+      </div>
+    </div>
+    <div class="rows">
+      <div class="row"><span class="k">引用名</span><span>配置只保存 <b>api_key_ref</b> 引用名，不落明文</span></div>
+      <div class="row"><span class="k">不传输</span><span>App 调用 llm_server 只传引用，不传密钥本身</span></div>
+      <div class="row"><span class="k">不同步</span><span>API Key 默认不参与跨设备同步</span></div>
+      <div class="row"><span class="k">不外泄</span><span>/.env 等敏感文件被 gitignore 挡在仓库之外</span></div>
+    </div>
+  </div>
+
+  <div class="panel syn">
+    <div class="pt">🔄 跨设备同步（手动）</div>
+    <div class="device">
+      <div class="dev">💻 设备 A<small>上传 / 拉取</small></div>
+      <div class="syncarrow">⇄</div>
+      <div class="dev">📱 设备 B<small>上传 / 拉取</small></div>
+    </div>
+    <div class="relays">
+      <div class="relay">☁️ Cloudflare<small>Worker + D1</small></div>
+      <div class="relay">☁️ EdgeOne<small>Edge Function + KV</small></div>
+      <div class="relay">☁️ Netlify<small>Functions + Blobs</small></div>
+    </div>
+    <div class="mech">
+      <span class="chip">Outbox 队列</span>
+      <span class="chip">LWW 冲突消解</span>
+      <span class="chip">Tombstone 软删</span>
+      <span class="chip g">冲突行级内联合并</span>
+      <span class="chip g">16 张表参与</span>
+      <span class="chip g">HTTP 契约一致</span>
+    </div>
+  </div>
+</div>
+<div class="foot">功能示意图 · 依据 AIMindTree 实际安全与同步机制绘制</div>
+</body></html>
