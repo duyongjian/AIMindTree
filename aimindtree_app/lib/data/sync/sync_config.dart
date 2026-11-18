@@ -251,13 +251,13 @@ class SyncConfig {
   }
 
   // ---- 全局：自动同步开关 ----
-  // 默认开启：已登录且后端就绪时，bootstrap 会自动启动周期调度（见
-  // ExtractionService.bootstrap）；用户在设置页可随时关闭。
+  // 默认关闭：已登录且后端就绪时也不会自动周期同步，用户须在设置页主动开启
+  // （或手动点「立即同步」），避免未经确认就把本地笔记推送到远端。
 
   static const _kAutoSync = 'aimindtree.sync.auto_enabled';
 
-  /// 是否启用自动同步（默认 true）。
-  bool get autoSyncEnabled => prefs.getBool(_kAutoSync) ?? true;
+  /// 是否启用自动同步（默认 false）。
+  bool get autoSyncEnabled => prefs.getBool(_kAutoSync) ?? false;
 
   /// 设置/清除自动同步开关。
   Future<void> setAutoSyncEnabled(bool v) async =>

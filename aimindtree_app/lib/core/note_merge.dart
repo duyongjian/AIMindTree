@@ -48,9 +48,19 @@ String? threeWayMergeNotes(String base, String local, String remote) {
       pick = ls; // 远端没动这块，采用本地
       gap = i < lp.length ? lp[i].trailingGap : (i < bp.length ? bp[i].trailingGap : '\n\n');
     } else {
-      pick = ls; // 两边都动了同一块 → 冲突，暂留本地
-      gap = i < lp.length ? lp[i].trailingGap : (i < bp.length ? bp[i].trailingGap : '\n\n');
-      conflict = true;
+      // 两边都动了同一块：先尝试段内「行级」三方合并——若两端改的是块内不同行
+      // （典型：本地/远端各在段落里改了不同的一行），仍可合并留住双方改动，
+      // 避免一有同块改动就整篇回退。仅当**同一行**两端都改且不一致时，才视为
+      // 真冲突，留本地并升级为整篇内联合并。
+      final lineMerged = _mergeBlockLines(bs, ls, rs);
+      if (lineMerged != null) {
+        pick = lineMerged;
+        gap = i < lp.length ? lp[i].trailingGap : (i < bp.length ? bp[i].trailingGap : '\n\n');
+      } else {
+        pick = ls;
+        gap = i < lp.length ? lp[i].trailingGap : (i < bp.length ? bp[i].trailingGap : '\n\n');
+        conflict = true;
+      }
     }
     chosen.add(pick);
     gaps.add(gap);
@@ -75,14 +85,47 @@ String? threeWayMergeNotes(String base, String local, String remote) {
   return merged;
 }
 
-/// 把「输方」正文作为标记段落追加进「胜方」正文，得到**单篇**合并笔记（P0 内联合并）。
+/// 段内行级三方合并：把 base / local / remote 三份**块文本**按行做三方合并。
+///
+/// 用于 [threeWayMergeNotes] 在同「块」冲突时降级——若两端改的是块内**不同行**
+/// （典型：本地与远端各在段落里改了不同的一行），仍可合并留住双方改动；
+/// 仅当**同一行**两端都改且不一致时才返回 null（真冲突），交由上层整篇内联。
+String? _mergeBlockLines(String base, String local, String remote) {
+  final bl = base.split('\n');
+  final ll = local.split('\n');
+  final rl = remote.split('\n');
+  final n = [bl.length, ll.length, rl.length].reduce((a, b) => a > b ? a : b);
+  final out = <String>[];
+  for (var i = 0; i < n; i++) {
+    final b = i < bl.length ? bl[i] : '';
+    final l = i < ll.length ? ll[i] : '';
+    final r = i < rl.length ? rl[i] : '';
+    if (l == r) {
+      out.add(l);
+    } else if (l == b) {
+      out.add(r);
+    } else if (r == b) {
+      out.add(l);
+    } else {
+      // 同一行两端都改了且不一致 → 真冲突。
+      return null;
+    }
+  }
+  return out.join('\n');
+}
+
+/// 把「输方」中、胜方**没有**的行作为标记段落追加进「胜方」正文，得到**单篇**
+/// 合并笔记（P0 内联合并）。
 ///
 /// 与另开冲突副本不同：这里直接在胜方笔记里追加一段明确标注的「同步冲突」区块，
-/// 把输方内容一并保留，笔记数量不膨胀。返回合并后的 Markdown；以下情况返回 null
-/// （表示「直接用胜方即可」，调用方回落为仅保留胜方）：
+/// 把输方相对胜方**新增/不同的行**一并保留，笔记数量不膨胀。
+///
+/// 细粒度：只追加「输方有、胜方没有」的行，而不是把整篇输方复制一遍（这正是旧版
+/// 「整个笔记被重复复制」的根因，见同步排障记录）。返回合并后的 Markdown；以下
+/// 情况返回 null（表示「直接用胜方即可」，调用方回落为仅保留胜方）：
 /// - 输方为空；
-/// - 胜方已包含输方内容（重复 pull 防重，避免无限增长）；
-/// - 合并结果未过 L1 字节校验（理论上不会，纯属护栏）。
+/// - 输方相对胜方无新增行（重复 pull / 对端已拉回，避免无限增长）；
+/// - 合并结果未过 L1 字节校验（护栏，理论上不会触发）。
 String? inlineMergeNotesConflict(
   String winner,
   String loser,
@@ -91,16 +134,32 @@ String? inlineMergeNotesConflict(
 ) {
   final loserTrim = loser.trim();
   if (loserTrim.isEmpty) return null;
-  // 已合并过（重复 pull / 对端拉回）则不再追加，避免笔记被反复撑大。
-  if (winner.contains(loserTrim)) return null;
+
+  // 细粒度：仅保留「输方有、胜方没有」的行，避免整篇输方被重复追加。
+  final winnerLines = winner
+      .split('\n')
+      .map((l) => l.trim())
+      .where((l) => l.isNotEmpty)
+      .toSet();
+  final missing = <String>[];
+  for (final line in loser.split('\n')) {
+    final t = line.trim();
+    if (t.isEmpty) continue; // 跳过空白行
+    if (!winnerLines.contains(t)) missing.add(line);
+  }
+  if (missing.isEmpty) return null; // 输方相对胜方无新增 → 不追加（防重复 pull）
+
   final ts = _conflictTs(loserTime ?? DateTime.now());
-  final dev = (loserDevice != null && loserDevice.isNotEmpty) ? loserDevice : '未知设备';
-  final section = '\n\n---\n\n## 同步冲突（已合并保留 · 来自 $dev · $ts）\n\n$loser\n';
+  final dev = (loserDevice != null && loserDevice.isNotEmpty)
+      ? loserDevice
+      : '未知设备';
+  // 注意：冲突区块结尾不加独立换行，保证结果满足 L1 字节级恒等（round-trip 无损）。
+  final section = '\n\n---\n\n'
+      '## 同步冲突（已合并保留 · 来自 $dev · $ts）\n\n'
+      '${missing.join('\n')}';
   final merged = '$winner$section';
   // L1 护栏：合并结果必须能无损重开，否则退化为仅保留胜方，避免正文损坏。
-  if (serializeDoc(parseMarkdownDoc(merged)) != merged) {
-    return null;
-  }
+  if (serializeDoc(parseMarkdownDoc(merged)) != merged) return null;
   return merged;
 }
 

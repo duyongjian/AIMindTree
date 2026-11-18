@@ -78,5 +78,38 @@ void main() {
     test('输方为空时返回 null（直接用胜方）', () {
       expect(inlineMergeNotesConflict('胜方内容', '', 'dev-B', null), isNull);
     });
+
+    test('输方仅部分行新增时只追加新增行（防整篇复制回归）', () {
+      const winner = '# 卫通\n\n本地改了第一段。';
+      const loser = '# 卫通\n\n本地改了第一段。\n\n远端也改了第二段。';
+      final merged = inlineMergeNotesConflict(winner, loser, 'dev-B', null)!;
+      expect(merged, contains('本地改了第一段。')); // 胜方内容保留
+      expect(merged, contains('远端也改了第二段。')); // 输方新增行保留
+      // 冲突标记之后不应再出现胜方已存在的标题行（否则等于整篇复制）
+      final idx = merged.indexOf('## 同步冲突');
+      expect(idx, greaterThanOrEqualTo(0));
+      expect(merged.substring(idx), isNot(contains('# 卫通')));
+    });
+  });
+
+  group('threeWayMergeNotes 段内行级降级', () {
+    test('同块但改了不同行 → 行级合并保留双方改动', () {
+      const b = '# T\n\nL1\nL2\nL3';
+      const l = '# T\n\nL1-local\nL2\nL3';
+      const r = '# T\n\nL1\nL2\nL3-remote';
+      final merged = threeWayMergeNotes(b, l, r);
+      expect(merged, isNotNull);
+      expect(merged, contains('L1-local'));
+      expect(merged, contains('L3-remote'));
+      expect(merged, contains('L2'));
+    });
+
+    test('同块同一行两端都改 → 仍视为冲突返回 null', () {
+      const b = '# T\n\nL1\nL2';
+      const l = '# T\n\nL1-local\nL2';
+      const r = '# T\n\nL1-remote\nL2';
+      final merged = threeWayMergeNotes(b, l, r);
+      expect(merged, isNull);
+    });
   });
 }
