@@ -9,7 +9,7 @@
 你写笔记，AI 把笔记拆成知识点、补全前置知识路径、当老师考你；追问沉淀成画布上的卡片。
 
 ![Flutter](https://img.shields.io/badge/Flutter-Dart-02569B?logo=flutter&logoColor=white)
-![License](https://img.shields.io/badge/License-%E5%BE%85%E8%A1%A5%E5%85%85-lightgrey)
+![License](https://img.shields.io/badge/License-PolyForm%20Noncommercial-important)
 ![Platform](https://img.shields.io/badge/Platform-Android%20%7C%20Windows%20%7C%20iOS%20%7C%20Web-4A90E2)
 ![Version](https://img.shields.io/badge/version-2.0.2-orange)
 
@@ -161,4 +161,4 @@ scripts\build_windows.bat
 - 作者：**duyongjian**
 - 仓库：[https://github.com/duyongjian/AIMindTree.git](https://github.com/duyongjian/AIMindTree.git)
 - 版本：2.0.2
-- 许可协议：待补充（仓库暂未包含 LICENSE 文件；如需开源许可请自行添加）
+- 许可协议：[PolyForm Noncommercial License 1.0.0](LICENSE) —— 允许个人学习、研究、实验与修改分发，**禁止商业用途**（商用需另行取得授权）。
